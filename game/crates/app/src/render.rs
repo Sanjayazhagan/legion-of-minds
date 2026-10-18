@@ -87,21 +87,22 @@ impl Effects {
         // Who acted this tick: the unit standing where the event started.
         for e in &w.events {
             // Rolls and blinks end where the unit now stands.
-            let moved = matches!(e.kind, EventKind::Dodge | EventKind::Skill(Skill::Shadowstep));
+            let moved = matches!(e.kind, EventKind::Dodge | EventKind::Blink | EventKind::Charge | EventKind::Skill(Skill::Shadowstep));
             let at = match e.kind {
-                EventKind::Death | EventKind::Stun | EventKind::Blocked => continue,
+                EventKind::Death | EventKind::Stun | EventKind::Blocked | EventKind::TrapHit => continue,
                 _ if moved => e.to,
                 _ => e.from,
             };
             if let Some(i) = w.units.iter().position(|u| (u.x - at.0).abs() < 1e-3 && (u.y - at.1).abs() < 1e-3) {
                 let a = &mut self.anim[i];
-                if a.special != 0 && now - a.acted < 0.3 && !matches!(e.kind, EventKind::Dodge | EventKind::Skill(_)) {
+                if a.special != 0 && now - a.acted < 0.3 && !matches!(e.kind, EventKind::Dodge | EventKind::Blink | EventKind::Ward | EventKind::Skill(_)) {
                     continue; // a skill's own hits don't restart its animation
                 }
                 a.acted = now;
                 (a.special, a.skill) = match e.kind {
-                    EventKind::Dodge => (1, None),
+                    EventKind::Dodge | EventKind::Blink => (1, None),
                     EventKind::Skill(s) => (2, Some(s)),
+                    EventKind::Ward => (2, Some(Skill::HealingNova)),
                     _ => (0, None),
                 };
                 if !moved && (e.to.0 - e.from.0).abs() + (e.to.1 - e.from.1).abs() > 1e-3 {
@@ -943,6 +944,9 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
                 draw_line_3d(pos + vec3(a0.cos() * 0.45, 0.03, a0.sin() * 0.45), pos + vec3(a1.cos() * 0.45, 0.03, a1.sin() * 0.45), col);
             }
         }
+        if u.cloak > 0 && looks[i].as_ref().map_or(true, |l| l.hostile) {
+            continue; // an enemy in cloak is invisible (a shimmer is drawn later)
+        }
         if !draw_character(lib, &fig, npc, pos, a.heading, pose, CHAR_SCALE) {
             flat.push(i);
         }
@@ -1003,6 +1007,19 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         }
     }
 
+    // ---- Snares on the ground (enemy ones barely visible)
+    for tr in &w.traps {
+        let ours = tr.team == friendly;
+        let a = if ours { 0.9 } else { 0.25 };
+        let c = v.p(tr.x, tr.y);
+        let r = 0.45 * s;
+        draw_circle_lines(c.x, c.y, r, 2.0, Color::new(0.75, 0.6, 0.35, a));
+        for k in 0..6 {
+            let ang = k as f32 * 1.047;
+            draw_line(c.x + ang.cos() * r * 0.4, c.y + ang.sin() * r * 0.4, c.x + ang.cos() * r, c.y + ang.sin() * r, 1.5, Color::new(0.85, 0.85, 0.9, a));
+        }
+    }
+
     // ---- Overlays: names and health bars
     for (i, u) in w.units.iter().enumerate() {
         if !u.alive {
@@ -1028,6 +1045,16 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
                 let ang = t * 5.0 + k as f32 * 2.094;
                 star(top.x + ang.cos() * 12.0, top.y - 14.0 + ang.sin() * 4.0, 4.5, true);
             }
+        }
+        if u.cloak > 0 {
+            let c = v.p3(u.x, u.y, 0.6);
+            let shimmer = 0.5 + 0.5 * (t * 6.0 + i as f32).sin();
+            draw_circle(c.x, c.y, 0.5 * s, Color::new(0.25, 0.15, 0.35, 0.25 + 0.15 * shimmer));
+        }
+        if u.ward > 0 {
+            let c = v.p3(u.x, u.y, 0.7);
+            draw_circle(c.x, c.y, 0.62 * s, Color::new(1.0, 0.85, 0.35, 0.12));
+            draw_circle_lines(c.x, c.y, 0.62 * s, 2.0, Color::new(1.0, 0.9, 0.5, 0.75));
         }
         if u.block_ticks > 0 {
             let c = v.p3(u.x, u.y, 0.7);
@@ -1110,6 +1137,38 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
                 draw_circle_lines(to.x, to.y - 20.0, 6.0 + 14.0 * k, 2.0, Color::new(1.0, 0.95, 0.4, a));
             }
             EventKind::Skill(sk) => skill_effect(v, sk, e, k, a, f, to),
+            EventKind::Charge => {
+                for j in 0..6 {
+                    let q = v.p3(e.from.0 + (e.to.0 - e.from.0) * j as f32 / 5.0, e.from.1 + (e.to.1 - e.from.1) * j as f32 / 5.0, 0.15);
+                    draw_circle(q.x, q.y, 5.0 + 5.0 * k, Color::new(0.9, 0.75, 0.5, 0.45 * a));
+                }
+                draw_circle_lines(to.x, to.y, 8.0 + 20.0 * k, 3.0, Color::new(1.0, 0.85, 0.5, a));
+            }
+            EventKind::Blink => {
+                for p in [f, to] {
+                    draw_circle(p.x, p.y, 6.0 + 18.0 * k, Color::new(0.5, 0.4, 1.0, 0.45 * a));
+                    draw_circle_lines(p.x, p.y, 10.0 + 18.0 * k, 2.0, Color::new(0.8, 0.75, 1.0, a));
+                }
+            }
+            EventKind::Cloak => {
+                for j in 0..5 {
+                    let ang = j as f32 * 1.256 + k * 3.0;
+                    draw_circle(to.x + ang.cos() * 14.0 * k, to.y - 8.0 + ang.sin() * 8.0 * k, 7.0, Color::new(0.3, 0.25, 0.4, 0.5 * a));
+                }
+            }
+            EventKind::TrapSet => {
+                draw_circle_lines(to.x, to.y, 6.0 + 8.0 * k, 2.0, Color::new(0.85, 0.7, 0.4, a));
+            }
+            EventKind::TrapHit => {
+                for j in 0..8 {
+                    let ang = j as f32 * 0.785;
+                    let r0 = 4.0 + 22.0 * k;
+                    draw_line(to.x + ang.cos() * r0 * 0.4, to.y + ang.sin() * r0 * 0.4, to.x + ang.cos() * r0, to.y + ang.sin() * r0, 2.5, Color::new(0.95, 0.8, 0.4, a));
+                }
+            }
+            EventKind::Ward => {
+                v.ring(e.from.0, e.from.1, 0.5 + 2.5 * k, 3.0, Color::new(1.0, 0.88, 0.45, a));
+            }
             _ => {}
         }
     }

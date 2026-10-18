@@ -157,6 +157,7 @@ impl BaseClass {
                 plan: None,
                 weapon: None,
                 mastery: 0,
+                move_practice: [0.0; crate::moves::N_MOVES],
             },
             BaseClass::Archer => ClassSpec {
                 name: "Archer".into(),
@@ -183,6 +184,7 @@ impl BaseClass {
                 plan: None,
                 weapon: None,
                 mastery: 0,
+                move_practice: [0.0; crate::moves::N_MOVES],
             },
             BaseClass::Healer => ClassSpec {
                 name: "Healer".into(),
@@ -209,6 +211,7 @@ impl BaseClass {
                 plan: None,
                 weapon: None,
                 mastery: 0,
+                move_practice: [0.0; crate::moves::N_MOVES],
             },
             BaseClass::Guard => ClassSpec {
                 name: "Guard".into(),
@@ -228,6 +231,7 @@ impl BaseClass {
                 plan: None,
                 weapon: None,
                 mastery: 0,
+                move_practice: [0.0; crate::moves::N_MOVES],
             },
             BaseClass::Sentry => ClassSpec {
                 name: "Sentry".into(),
@@ -247,6 +251,7 @@ impl BaseClass {
                 plan: None,
                 weapon: None,
                 mastery: 0,
+                move_practice: [0.0; crate::moves::N_MOVES],
             },
             BaseClass::Keeper => ClassSpec {
                 name: "Keeper".into(),
@@ -270,6 +275,7 @@ impl BaseClass {
                 plan: None,
                 weapon: None,
                 mastery: 0,
+                move_practice: [0.0; crate::moves::N_MOVES],
             },
             BaseClass::Mage => ClassSpec {
                 name: "Mage".into(),
@@ -516,6 +522,9 @@ pub struct ClassSpec {
     /// Mastery level (0 to 5) with the equipped weapon, set from the troop.
     #[serde(default)]
     pub mastery: u8,
+    /// Practice (0 to 1) with each class move, set from the troop.
+    #[serde(default)]
+    pub move_practice: [f32; crate::moves::N_MOVES],
 }
 
 impl ClassSpec {
@@ -538,6 +547,7 @@ impl ClassSpec {
             plan: None,
             weapon: None,
             mastery: 0,
+            move_practice: [0.0; crate::moves::N_MOVES],
         }
     }
 
@@ -604,6 +614,7 @@ impl ClassSpec {
             plan: None,
             weapon: None,
             mastery: 0,
+            move_practice: [0.0; crate::moves::N_MOVES],
         }
     }
 
@@ -681,6 +692,7 @@ impl ClassSpec {
             plan: None,
             weapon: None,
             mastery: 0,
+            move_practice: [0.0; crate::moves::N_MOVES],
         }
     }
 
@@ -704,6 +716,7 @@ impl ClassSpec {
     pub fn with_gear_of(mut self, other: &ClassSpec) -> ClassSpec {
         self.weapon = other.weapon;
         self.mastery = other.mastery;
+        self.move_practice = other.move_practice;
         self
     }
 

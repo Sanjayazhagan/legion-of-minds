@@ -6,6 +6,7 @@ use godcore::ppo::{actor_dims, hidden_for_level};
 use godcore::rng::Rng;
 use godcore::sim::*;
 use godcore::troop::Troop;
+use godcore::moves::Move;
 use godcore::weapons::{mastery_level, Weapon};
 
 fn duel(attacker: BaseClass) -> (World, usize, usize) {
@@ -24,7 +25,9 @@ fn act(w: &mut World, i: usize, a: u8) {
 
 #[test]
 fn dodging_rolls_away_and_avoids_hits() {
-    let (mut w, me, guard) = duel(BaseClass::Fighter);
+    let (w, me, _) = duel(BaseClass::Fighter);
+    assert!(!w.mask(me)[ACT_DODGE as usize], "fighters can't dodge");
+    let (mut w, me, guard) = duel(BaseClass::Assassin);
     assert!(w.mask(me)[ACT_DODGE as usize]);
     let before = w.units[me].dist(&w.units[guard]);
     act(&mut w, me, ACT_DODGE);
@@ -149,4 +152,79 @@ fn mastery_follows_the_equipped_weapon() {
     t.equip(Weapon::Greataxe);
     assert_eq!(t.spec.mastery, 1);
     assert_eq!(t.steps, 70_000);
+}
+
+fn far_duel(attacker: BaseClass, d: f32) -> (World, usize, usize) {
+    let mut w = World::new(900);
+    let me = w.add_troop(&attacker.spec(), 10.0, 10.0, Control::External, 0);
+    let guard = w.add_guard(10.0 + d, 10.0);
+    w.add_core(25.0, 25.0);
+    (w, me, guard)
+}
+
+#[test]
+fn charge_closes_the_gap_and_staggers() {
+    let (mut w, me, guard) = far_duel(BaseClass::Fighter, 4.0);
+    assert!(w.mask(me)[ACT_CHARGE as usize]);
+    act(&mut w, me, ACT_CHARGE);
+    assert!(w.units[me].dist(&w.units[guard]) < 1.5);
+    assert!(w.units[guard].hp < GUARD_HP);
+    assert!(w.units[guard].stun > 0);
+}
+
+#[test]
+fn cloaked_troops_cant_be_targeted() {
+    let mut w = World::new(900);
+    let me = w.add_troop(&BaseClass::Assassin.spec(), 10.0, 10.0, Control::External, 0);
+    w.add_tower(11.9, 10.0);
+    w.add_core(25.0, 25.0);
+    act(&mut w, me, ACT_CLOAK);
+    let hp = w.units[me].hp;
+    for _ in 0..20 {
+        act(&mut w, me, ACT_IDLE);
+    }
+    assert_eq!(w.units[me].hp, hp, "the tower can't see it");
+    act(&mut w, me, ACT_HIT_BUILDING);
+    assert_eq!(w.units[me].cloak, 0, "striking breaks the cloak");
+}
+
+#[test]
+fn snares_stun_whoever_steps_in() {
+    let (mut w, me, guard) = far_duel(BaseClass::Archer, 1.5);
+    assert!(w.mask(me)[ACT_SNARE as usize]);
+    act(&mut w, me, ACT_SNARE);
+    assert_eq!(w.traps.len(), 1);
+    for _ in 0..30 {
+        act(&mut w, me, 5); // walk west, the guard follows over the trap
+        if w.units[guard].stun > 0 {
+            break;
+        }
+    }
+    assert!(w.units[guard].stun > 0, "the guard walked into it");
+    assert!(w.traps.is_empty());
+}
+
+#[test]
+fn wards_and_blinks() {
+    let (mut w, me, _) = duel(BaseClass::Healer);
+    assert!(w.mask(me)[ACT_WARD as usize]);
+    act(&mut w, me, ACT_WARD);
+    assert!(w.units[me].ward > 0);
+    let (mut w, me, guard) = duel(BaseClass::Mage);
+    act(&mut w, me, ACT_BLINK);
+    assert!(w.units[me].dist(&w.units[guard]) > 3.0);
+}
+
+#[test]
+fn specialists_master_their_moves_sooner_than_mixes() {
+    let mut pure = Troop::new(1, "p".into(), BaseClass::Fighter.spec(), 1);
+    let mix = godcore::classes::ClassSpec::blend(&[(BaseClass::Fighter, 40.0), (BaseClass::Archer, 30.0), (BaseClass::Assassin, 30.0)]);
+    let mut jack = Troop::new(2, "j".into(), mix, 2);
+    pure.add_training(300_000);
+    jack.add_training(300_000);
+    assert!(pure.move_practice(Move::Block) > 2.0 * jack.move_practice(Move::Block));
+    assert!(pure.spec.move_power(Move::Block) > jack.spec.move_power(Move::Block));
+    let mut w = World::new(10);
+    let (a, b) = (w.add_troop(&pure.spec, 5.0, 5.0, Control::External, 0), w.add_troop(&jack.spec, 6.0, 5.0, Control::External, 1));
+    assert!(w.units[a].moves[Move::Block as usize] > w.units[b].moves[Move::Block as usize]);
 }

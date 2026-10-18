@@ -216,6 +216,19 @@ impl Game {
                 )
             };
             text(&reward, pr.x + 116.0, pr.y + 98.0, 16.0, MUTED);
+            let kit = spec.moves();
+            let names: Vec<&str> = kit.iter().map(|m| m.name()).collect();
+            let note = if kit.is_empty() {
+                "No class moves".to_string()
+            } else {
+                format!(
+                    "Moves: {}. Training is shared between them: about {} steps to master all {}.",
+                    names.join(", "),
+                    crate::barracks::fmt_steps(kit.len() as u64 * godcore::moves::MOVE_MASTERY_STEPS),
+                    kit.len()
+                )
+            };
+            text(&note, pr.x + 116.0, pr.y + 120.0, 16.0, if kit.len() > 3 { ACCENT } else { TEXT });
         }
 
         let afford = self.profile.gold >= RECRUIT_COST;

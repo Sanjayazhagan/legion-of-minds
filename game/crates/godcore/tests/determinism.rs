@@ -78,5 +78,5 @@ fn golden_fingerprint() {
     );
 }
 
-/// Sim version 2 (dodge, block, weapon skills, 67 inputs, 15 actions).
-const GOLDEN: u64 = 0x80cb_d2d0_de54_bb40;
+/// Sim version 3 (class moves: 74 inputs, 20 actions).
+const GOLDEN: u64 = 0x16fb_6e1b_bf3a_74a4;

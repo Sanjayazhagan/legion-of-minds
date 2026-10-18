@@ -4,29 +4,34 @@ Every troop has its own small brain that learns by trial and error on your compu
 
 ## 1. What a troop sees
 
-Battles run in ticks (30 a second when you watch). Every tick, each trained troop gets a list of 67 numbers describing its surroundings:
+Battles run in ticks (30 a second when you watch). Every tick, each trained troop gets a list of 74 numbers describing its surroundings:
 
 - **Itself:** where it is on the map, its health, whether its weapon is ready, how much time is left, and whether it can hit a unit, hit a building or heal right now.
 - **The 2 nearest buildings:** where they are, how damaged they are, and whether each one is a tower. Attackers see the buildings they are raiding; defenders see the ones they protect.
 - **The 3 nearest enemies:** where they are, how hurt they are, and whether they are about to strike.
 - **The 2 nearest allies, plus the most injured ally nearby.** Healers use this.
 - **The overall picture:** the share of enemy buildings and enemy troops still standing.
-- **Its moves and weapon:** whether dodge, block and its weapon skill are ready, whether its guard is up, how many enemies are close enough for a spin or slam, whether the nearest enemies are stunned or blocking, and which weapon it holds.
+- **Its moves and weapon:** which class moves it has and whether each is ready, whether its weapon skill is ready, whether its guard is up, cloaked or shielded by a ward, how many enemies are close enough for a spin or slam, whether the nearest enemies are stunned or blocking, and which weapon it holds.
 
 Positions are relative ("a guard 3 steps to my left"), so the same brain works on any base layout.
 
 ## 2. What a troop can do
 
-It has 15 actions, borrowed from action RPGs and MOBAs:
+It has 20 actions, borrowed from action RPGs and MOBAs. The last seven are class moves, and a troop can only use the ones its classes bring (section 9):
 
 | Action | What it does |
 |---|---|
 | Stand still, or move in one of 8 directions | |
 | Hit unit / hit building | Attack the nearest enemy unit or building in range |
 | Heal | Heal the most injured ally in range (healing classes) |
-| **Dodge** | Roll away from the nearest threat, untouchable for a moment (1.5 s cooldown) |
-| **Block** | Raise the guard for 0.4 s: take much less damage, but no attacks and half speed |
 | **Weapon skill** | The weapon's special move, on its own cooldown (section 8) |
+| **Dodge** | Roll away from the nearest threat, untouchable for a moment |
+| **Block** | Raise the guard for 0.4 s: take much less damage, but no attacks and half speed |
+| **Charge** | Rush up to 3.5 steps at an enemy just out of reach, hit it and stun it briefly |
+| **Cloak** | Vanish: towers, guards and troops can't target you until you strike |
+| **Blink** | Teleport away from the nearest threat |
+| **Snare** | Drop a hidden trap that hurts and stuns the first enemy to step on it |
+| **Ward** | Shield every ally close by: they take less damage for 1.5 s |
 
 Actions that make no sense right now are blocked, such as attacking out of range, dodging with no enemy near, or using a skill that would hit nothing. The brain only ever chooses between moves that are possible.
 
@@ -34,14 +39,14 @@ Class stats and the weapon decide what those actions achieve: speed, health, ran
 
 ## 3. The brain
 
-The brain is a small neural network: the 67 numbers go in, pass through two layers of "neurons", and come out as a score for each of the 15 actions. Those weights are what training changes. The brain grows as the troop levels up:
+The brain is a small neural network: the 74 numbers go in, pass through two layers of "neurons", and come out as a score for each of the 20 actions. Those weights are what training changes. The brain grows as the troop levels up:
 
 | Troop level | Neurons per layer | Numbers in the brain | Training speed (4-core test machine) |
 |---|---|---|---|
-| 1-2 | 64 | 9,487 | about 7,500 steps/s |
-| 3 | 96 | 17,295 | about 4,600 steps/s |
-| 4 | 128 | 27,151 | about 2,900 steps/s |
-| 5 | 160 | 39,055 | about 2,200 steps/s |
+| 1-2 | 64 | 10,260 | about 7,500 steps/s |
+| 3 | 96 | 18,452 | about 4,600 steps/s |
+| 4 | 128 | 28,692 | about 2,900 steps/s |
+| 5 | 160 | 40,980 | about 2,200 steps/s |
 
 Growing keeps everything the troop learned: the new neurons start with no say in its choices and are trained in from there. A bigger brain can learn more subtle play, but trains slower, which is why it comes with level and not for free. A second network of the same size, the "critic", guesses how well things are going. It is only used during training, to judge whether a move turned out better or worse than expected.
 
@@ -99,7 +104,7 @@ So improving one side gives the other side a harder sparring partner. The Home B
 
 In real battles, tournaments and home defence, the troop plays **without** the training randomness: every tick it takes the action its brain scores highest. The simulation uses only exact, repeatable maths, so the same troops placed in the same spots always fight the same battle, on any computer. That is what makes replays and the "replay check" on the result screen work, and it is what will make it possible to trust a shared troop file in future wars between players.
 
-The whole troop, meaning its class mix, plan, weapon, mastery, both networks and training history, is one file of a few hundred KB (more for big level 5 brains). Troop files from before weapons still load: their brains are grown to take the new inputs and moves, and their past training counts as mastery of their class weapon. That file is what gets exported, and later shared for wars.
+The whole troop, meaning its class mix, plan, weapon, mastery, both networks and training history, is one file of a few hundred KB (more for big level 5 brains). Troop files from before weapons and class moves still load: their brains are grown to take the new inputs and moves, and their past training counts as mastery of their class weapon and as practice of their class moves. That file is what gets exported, and later shared for wars.
 
 ## 8. Weapons and mastery
 
@@ -120,6 +125,31 @@ A class with its own weapon keeps its exact stats; another weapon changes them b
 **Mastery** grows with training steps spent holding that weapon (50k, 150k, 400k, 900k and 1.8M steps for levels 1 to 5, Trained to Grandmaster). Each level adds 5% damage and makes the skill recharge 6% faster, and from Expert (level 3) the skill is 30% stronger. Each weapon keeps its own mastery, so switching weapons means learning again. The brain also sees which weapon it holds, so it can learn different habits for each.
 
 In a 300k-step check of all 9 classes, every one learned to use its skill (1 to 2.5 times per drill), mages and assassins dodged 2 to 4 times per drill, and guards blocked about 37 damage per drill.
+
+## 9. Class moves: jack of all trades, master of none
+
+Every class has its own small kit of moves, and a mix gets the moves of every class it has at least 20% of:
+
+| Class | Moves |
+|---|---|
+| Fighter | Block, Charge |
+| Archer | Dodge, Snare |
+| Healer | Dodge, Ward |
+| Mage | Blink, Ward |
+| Assassin | Dodge, Cloak |
+| Paladin | Block, Ward |
+| Guard (defender) | Block, Ward |
+| Sentry (defender) | Dodge, Snare |
+| Keeper (defender) | Ward |
+| Warlock (defender) | Blink, Snare |
+| Hunter (defender) | Charge, Snare |
+
+A mix gets these moves at full strength, not weaker copies. What it costs is **practice**. Every move starts at 40% strength (longer cooldowns, shorter and weaker effects) and reaches 100% after 300k steps of practice. Each training step is shared evenly between all of a troop's moves, so:
+
+- a pure Fighter (2 moves) masters Block and Charge in 600k steps;
+- a Fighter 40 / Archer 30 / Assassin 30 mix (5 moves) needs 1.5M steps to master the same Block, and after 300k steps its Block is still at 52% strength where the Fighter's is at 70%.
+
+The brain also has more choices to learn when to use. A mix can do more things, but a specialist does its few things better for the same training time. The recruit screen shows the kit and how long it takes to master, and the barracks shows how practised each move is.
 
 ## In one line
 
