@@ -1,0 +1,28 @@
+[package]
+name = "bag-server"
+version.workspace = true
+edition.workspace = true
+description = "Become a God online backend: accounts, published bases, matchmaking, server-checked raids"
+
+[dependencies]
+bag-protocol = { path = "../protocol" }
+godcore.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "migrate", "macros"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tower-http = { version = "0.6", features = ["trace", "limit", "timeout"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+url = "2"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+bag-client = { path = "../client" }

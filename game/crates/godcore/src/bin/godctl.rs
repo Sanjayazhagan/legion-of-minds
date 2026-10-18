@@ -1,0 +1,362 @@
+//! Headless tools: train, evaluate and battle troops from the command line.
+//!
+//!   godctl train --class fighter --steps 300000 --out fighter.troop.json
+//!   godctl train --class fighter+healer --steps 300000 --out priest.troop.json
+//!   godctl train --class mage:50,healer:30,fighter:20 --solo 40 --focus 40,30,10,20 --out m.troop.json
+//!   godctl eval fighter.troop.json
+//!   godctl battle --base 1 a.troop.json b.troop.json
+//!   godctl baseline
+
+use godcore::battle::{fingerprint, run_defense_drill, run_drill, tournament, Battle};
+use godcore::classes::{BaseClass, ClassSpec, TrainPlan};
+use godcore::env::{DrillEnv, EpisodeInfo};
+use godcore::ppo::{PpoConfig, Trainer};
+use godcore::scenario::{Drill, BASES};
+use godcore::sim::Outcome;
+use godcore::troop::{CurvePoint, Skills, Troop};
+
+fn parse_class(s: &str) -> ClassSpec {
+    let base = |n: &str| match n {
+        "fighter" => BaseClass::Fighter,
+        "archer" => BaseClass::Archer,
+        "healer" => BaseClass::Healer,
+        "guard" => BaseClass::Guard,
+        "sentry" => BaseClass::Sentry,
+        "keeper" => BaseClass::Keeper,
+        "mage" => BaseClass::Mage,
+        "assassin" => BaseClass::Assassin,
+        "paladin" => BaseClass::Paladin,
+        "warlock" => BaseClass::Warlock,
+        "hunter" => BaseClass::Hunter,
+        _ => panic!("unknown class {n}"),
+    };
+    if s.contains(',') || (s.contains(':') && !s.contains('+')) {
+        // Any number of classes: name:percent,name:percent,...
+        let parts: Vec<(BaseClass, f32)> = s
+            .split(',')
+            .map(|p| {
+                let (n, w) = p.split_once(':').expect("use name:percent");
+                (base(n), w.parse::<f32>().unwrap())
+            })
+            .collect();
+        return ClassSpec::blend(&parts);
+    }
+    if let Some((a, rest)) = s.split_once('+') {
+        let (b, t) = rest
+            .split_once(':')
+            .map(|(b, t)| (b, t.parse().unwrap()))
+            .unwrap_or((rest, 0.5));
+        ClassSpec::hybrid(base(a), base(b), t)
+    } else {
+        base(s).spec()
+    }
+}
+
+fn arg(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .map(|i| args[i + 1].clone())
+}
+
+fn summary(eps: &[EpisodeInfo]) -> String {
+    let s = Skills::from_episodes(eps);
+    let n = eps.len().max(1) as f32;
+    let avg = |f: &dyn Fn(&EpisodeInfo) -> f32| eps.iter().map(f).sum::<f32>() / n;
+    format!(
+        "win {:5.1}%  survive {:5.1}%  guards {:4.2}  buildings {:4.2}  healed {:5.1}  skill {:4.1} dodge {:4.1} evade {:4.1} block {:5.1}  (n={})",
+        s.win * 100.0,
+        s.survival * 100.0,
+        s.guard_share,
+        s.building_share,
+        s.healed,
+        avg(&|e| e.skills),
+        avg(&|e| e.dodges),
+        avg(&|e| e.evaded),
+        avg(&|e| e.blocked),
+        s.episodes
+    )
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(|s| s.as_str()) {
+        Some("train") => {
+            let spec = parse_class(&arg(&args, "--class").unwrap_or("fighter".into()));
+            let steps: u64 = arg(&args, "--steps")
+                .map(|s| s.parse().unwrap())
+                .unwrap_or(300_000);
+            let seed: u64 = arg(&args, "--seed")
+                .map(|s| s.parse().unwrap())
+                .unwrap_or(1);
+            let out = arg(&args, "--out").unwrap_or("troop.troop.json".into());
+            let mut troop = match arg(&args, "--from") {
+                Some(p) => Troop::load_json(&std::fs::read_to_string(p).unwrap()).unwrap(),
+                None => Troop::new(seed, "Cli".into(), spec, seed),
+            };
+            troop.level = arg(&args, "--level").map(|s| s.parse().unwrap()).unwrap_or(5);
+            troop.upgrade_brain();
+            if let Some(w) = arg(&args, "--weapon") {
+                let w = godcore::weapons::Weapon::ALL
+                    .into_iter()
+                    .find(|x| format!("{x:?}").eq_ignore_ascii_case(&w))
+                    .unwrap_or_else(|| panic!("unknown weapon {w}"));
+                troop.equip(w);
+            }
+            println!(
+                "{} with {} (mastery {}), brain {:?} = {} numbers",
+                troop.spec.name,
+                troop.weapon().name(),
+                troop.spec.mastery,
+                troop.actor.dims,
+                troop.brain_params()
+            );
+            let mut cfg = PpoConfig::default();
+            if let Some(v) = arg(&args, "--nsteps") {
+                cfg.n_steps = v.parse().unwrap();
+            }
+            if let Some(v) = arg(&args, "--epochs") {
+                cfg.epochs = v.parse().unwrap();
+            }
+            if let Some(v) = arg(&args, "--mb") {
+                cfg.minibatch = v.parse().unwrap();
+            }
+            if let Some(v) = arg(&args, "--lr") {
+                cfg.lr = v.parse().unwrap();
+            }
+            if let Some(v) = arg(&args, "--envs") {
+                cfg.n_envs = v.parse().unwrap();
+            }
+            if arg(&args, "--solo").is_some() || arg(&args, "--focus").is_some() || arg(&args, "--selfplay").is_some() {
+                let mut plan = TrainPlan::default_for(&troop.spec);
+                if let Some(v) = arg(&args, "--solo") {
+                    plan.solo = v.parse().unwrap();
+                }
+                if let Some(v) = arg(&args, "--selfplay") {
+                    plan.self_play = v.parse().unwrap();
+                }
+                if let Some(v) = arg(&args, "--focus") {
+                    let f: Vec<u32> = v.split(',').map(|x| x.parse().unwrap()).collect();
+                    plan.focus = [f[0], f[1], f[2], f[3]];
+                }
+                // Rebuild from the blend so a plan given again with --from isn't applied twice.
+                let name = troop.spec.name.clone();
+                troop.spec = ClassSpec::planned(&troop.spec.parents, plan).with_gear_of(&troop.spec);
+                troop.spec.name = name;
+            }
+            if let Some(v) = arg(&args, "--timeout") {
+                troop.spec.weights.timeout = v.parse().unwrap();
+            }
+            if let Some(v) = arg(&args, "--bw") {
+                troop.spec.weights.building_dmg = v.parse().unwrap();
+            }
+            if let Some(v) = arg(&args, "--tick") {
+                troop.spec.weights.tick = v.parse().unwrap();
+            }
+            let pool = arg(&args, "--vs").map(|list| {
+                std::sync::Arc::new(
+                    list.split(',')
+                        .map(|f| {
+                            let t = Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap();
+                            (t.spec, t.actor)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            });
+            let mut tr = Trainer::with_opponents(
+                &troop.spec,
+                troop.actor.clone(),
+                troop.critic.clone(),
+                seed,
+                cfg,
+                pool,
+            );
+            tr.steps_done = troop.steps;
+            let t0 = std::time::Instant::now();
+            let mut recent: Vec<EpisodeInfo> = Vec::new();
+            while tr.steps_done < troop.steps + steps {
+                let rep = tr.iterate();
+                recent.extend_from_slice(&rep.episodes);
+                let keep = recent.len().saturating_sub(300);
+                recent.drain(..keep);
+                println!(
+                    "{:>8} steps  {:5.1}s/it  ent {:.2}  {}",
+                    rep.steps_done,
+                    rep.seconds,
+                    rep.entropy,
+                    summary(&recent)
+                );
+                let s = Skills::from_episodes(&recent);
+                troop.curve.push(CurvePoint {
+                    steps: rep.steps_done,
+                    win: s.win,
+                    died: 1.0 - s.survival,
+                    timeout: 0.0,
+                    ret: 0.0,
+                });
+                troop.skills = s;
+            }
+            if let Some(l) = troop.add_training(tr.steps_done - troop.steps) {
+                println!("weapon mastery up: {}", godcore::weapons::MASTERY_TITLES[l as usize]);
+            }
+            troop.actor = tr.actor;
+            troop.critic = tr.critic;
+            std::fs::write(&out, troop.save_json()).unwrap();
+            let secs = t0.elapsed().as_secs_f32();
+            println!(
+                "trained {} steps in {:.0}s ({:.0} steps/s) -> {out}",
+                steps,
+                secs,
+                steps as f32 / secs
+            );
+        }
+        Some("eval") => {
+            let t = Troop::load_json(&std::fs::read_to_string(&args[2]).unwrap()).unwrap();
+            if t.spec.role == godcore::classes::Role::Defend {
+                let eps: Vec<EpisodeInfo> = (0..200)
+                    .map(|s| run_defense_drill(&t, 50_000 + s).0)
+                    .collect();
+                let lost = eps.iter().map(|e| e.destruction).sum::<f32>() / eps.len() as f32;
+                println!(
+                    "defence     {}  base lost {:.0}%",
+                    summary(&eps),
+                    lost * 100.0
+                );
+                return;
+            }
+            for drill in [Drill::Solo, Drill::Squad] {
+                let eps: Vec<EpisodeInfo> = (0..200)
+                    .map(|s| run_drill(&t, drill, 50_000 + s).0)
+                    .collect();
+                println!("{:<11} {}", drill.name(), summary(&eps));
+            }
+        }
+        Some("baseline") => {
+            // Untrained and scripted reference numbers.
+            for name in ["fighter", "archer", "healer", "fighter+healer"] {
+                let spec = parse_class(name);
+                let t = Troop::new(1, "x".into(), spec.clone(), 1);
+                for drill in [Drill::Solo, Drill::Squad] {
+                    let eps: Vec<EpisodeInfo> = (0..200)
+                        .map(|s| run_drill(&t, drill, 50_000 + s).0)
+                        .collect();
+                    println!(
+                        "untrained {name:<15} {:<11} {}",
+                        drill.name(),
+                        summary(&eps)
+                    );
+                }
+            }
+            for name in ["guard", "sentry", "keeper"] {
+                let t = Troop::new(1, "x".into(), parse_class(name), 1);
+                let eps: Vec<EpisodeInfo> = (0..200)
+                    .map(|s| run_defense_drill(&t, 50_000 + s).0)
+                    .collect();
+                println!("untrained {name:<15} defence     {}", summary(&eps));
+            }
+            // Scripted fighter in the trained troop's slot.
+            for drill in [Drill::Solo, Drill::Squad] {
+                let mut eps = Vec::new();
+                for s in 0..200 {
+                    let mut env = DrillEnv::fixed(BaseClass::Fighter.spec(), drill, 50_000 + s);
+                    loop {
+                        let a = env.world.scripted_action(0);
+                        if let (_, Some(i)) = env.step(a) {
+                            eps.push(i);
+                            break;
+                        }
+                    }
+                }
+                println!(
+                    "scripted  fighter         {:<11} {}",
+                    drill.name(),
+                    summary(&eps)
+                );
+            }
+        }
+        Some("battle") => {
+            let base = &BASES[arg(&args, "--base")
+                .map(|s| s.parse().unwrap())
+                .unwrap_or(0)];
+            let files: Vec<&String> = args[2..].iter().filter(|a| a.ends_with(".json")).collect();
+            let deploy: Vec<(Troop, (f32, f32))> = files
+                .iter()
+                .enumerate()
+                .map(|(k, f)| {
+                    (
+                        Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap(),
+                        (4.0 + 1.5 * k as f32, 3.0),
+                    )
+                })
+                .collect();
+            let mut b = Battle::new(base, deploy.clone());
+            b.run();
+            let mut b2 = Battle::new(base, deploy);
+            b2.run();
+            println!(
+                "{}: {:?} after {} ticks, {:.0}% destroyed, {} stars, {} troops left, replay identical: {}",
+                base.name,
+                b.outcome(),
+                b.world.tick,
+                b.world.destruction() * 100.0,
+                b.world.stars(),
+                b.world.troops_alive(),
+                fingerprint(&b.world) == fingerprint(&b2.world)
+            );
+            assert!(b.outcome() != Outcome::Running);
+        }
+        Some("defend") => {
+            // godctl defend d1.json d2.json [--wave K | --army a1.json,a2.json]
+            let load = |f: &str| Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap();
+            let files: Vec<&String> = args[2..]
+                .iter()
+                .take_while(|a| !a.starts_with("--"))
+                .collect();
+            let spots = godcore::scenario::home_spots(files.len());
+            let defs: Vec<(Troop, (f32, f32))> =
+                files.iter().zip(spots).map(|(f, p)| (load(f), p)).collect();
+            let wave =
+                arg(&args, "--wave").map(|w| godcore::scenario::WAVES[w.parse::<usize>().unwrap()]);
+            let army: Vec<(Troop, (f32, f32))> = arg(&args, "--army")
+                .map(|l| {
+                    l.split(',')
+                        .enumerate()
+                        .map(|(k, f)| (load(f), (3.0 + 1.4 * k as f32, 3.0 + 0.6 * k as f32)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let base = arg(&args, "--th")
+                .map(|t| godcore::scenario::HomeBase::full(t.parse().unwrap()))
+                .unwrap_or_else(godcore::scenario::HomeBase::reference);
+            let mut b = Battle::defense(&base, defs, wave.as_ref(), army);
+            b.run();
+            println!(
+                "{:?} after {} ticks: base lost {:.0}%, raiders earned {} stars, {} raiders left",
+                b.outcome(),
+                b.world.tick,
+                b.world.destruction() * 100.0,
+                b.world.stars(),
+                b.world.troops_alive()
+            );
+        }
+        Some("cup") => {
+            let troops: Vec<Troop> = args[2..]
+                .iter()
+                .map(|f| Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap())
+                .collect();
+            for e in tournament(&troops) {
+                println!(
+                    "{:<20} total {:6.1}  solo {:5.1} ({}/{} wins)  squad {:5.1} ({}/{} wins)",
+                    troops[e.troop_index].spec.name,
+                    e.total,
+                    e.solo.score,
+                    e.solo.wins,
+                    e.solo.played,
+                    e.squad.score,
+                    e.squad.wins,
+                    e.squad.played
+                );
+            }
+        }
+        _ => eprintln!("usage: godctl train|eval|baseline|battle|cup ..."),
+    }
+}

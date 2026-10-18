@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/godcore", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+# Never let the compiler fuse or reorder float math: battles must replay bit-for-bit.
+
+[profile.dev]
+opt-level = 2

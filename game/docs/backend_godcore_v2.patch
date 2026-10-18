@@ -1,0 +1,40 @@
+--- /home/claude/bk_orig_protocol_src/lib.rs	2026-10-18 13:59:14.768227573 +0000
++++ crates/protocol/src/lib.rs	2026-10-18 14:00:55.254654372 +0000
+@@ -258,11 +258,20 @@
+     if t.steps > level_cap(t.level) {
+         return bad("troop has more training than its level allows");
+     }
+-    let dims = [OBS_DIM, HIDDEN, HIDDEN, N_ACTIONS];
++    // The brain grows with the troop's level (godcore::ppo::actor_dims).
++    let dims = godcore::ppo::actor_dims(t.level);
+     let n: usize = dims.windows(2).map(|d| d[0] * d[1] + d[1]).sum();
+     if t.actor.dims != dims || t.actor.params.len() != n {
+         return bad("troop brain has the wrong shape");
+     }
++    // Weapon mastery comes from training time with each weapon, which can't
++    // add up to more than the troop's total training.
++    if t.mastery.values().sum::<u64>() > t.steps {
++        return bad("troop has more weapon training than training");
++    }
++    let mut spec = spec;
++    spec.weapon = t.spec.weapon;
++    spec.mastery = t.mastery_of(t.spec.weapon());
+     if t.actor.params.iter().any(|p| !p.is_finite() || p.abs() > 1e6) {
+         return bad("troop brain has invalid numbers");
+     }
+@@ -282,6 +291,7 @@
+         skills: t.skills,
+         seed: t.seed,
+         sessions: t.sessions,
++        mastery: t.mastery.clone(),
+     })
+ }
+ 
+@@ -467,6 +477,7 @@
+ 
+         let mut a = army();
+         a[0].troop.level = 4;
++        a[0].troop.upgrade_brain();
+         assert!(canonical_army(&a, 1).is_err(), "level above Town Hall cap");
+         assert!(canonical_army(&a, 3).is_ok());
+ 

@@ -1,0 +1,94 @@
+wait 1.5
+move 110 88 0.8
+wait 0.3
+click
+wait 1.5
+move 518 327 0.8
+click
+wait 0.3
+type 50
+wait 0.5
+move 518 263 0.6
+click
+wait 0.3
+type 30
+wait 0.5
+move 518 135 0.6
+click
+wait 0.3
+type 20
+wait 1.2
+move 1182 123 0.8
+click
+wait 0.3
+type 30
+wait 0.4
+move 1182 247 0.6
+click
+wait 0.3
+type 15
+move 1182 291 0.5
+click
+wait 0.3
+type 25
+move 1182 335 0.5
+click
+wait 0.3
+type 40
+move 1182 379 0.5
+click
+wait 0.3
+type 20
+wait 1
+move 280 538 0.8
+click
+backspace
+backspace
+backspace
+backspace
+backspace
+backspace
+backspace
+backspace
+backspace
+backspace
+type Seraphina
+wait 2.5
+move 1110 760 0.8
+wait 0.3
+click
+wait 1.5
+move 1142 680 0.8
+click
+move 1006 735 0.5
+wait 0.2
+click
+move 1000 560 1
+wait 30
+move 1006 745 0.8
+wait 0.3
+click
+wait 2.5
+move 860 26 0.8
+wait 0.3
+click
+wait 1.5
+move 626 243 0.8
+click
+type 70
+wait 0.5
+move 626 368 0.6
+click
+type 25
+move 626 412 0.5
+click
+type 15
+wait 1.5
+move 175 723 0.8
+wait 0.3
+click
+wait 2
+move 1040 26 0.8
+wait 0.3
+click
+wait 3

@@ -1,0 +1,9 @@
+# Keep the build context small: only source the server needs.
+**/target
+game/assets
+game/docs
+prototype
+uploads
+.notes
+backend/bagctl.token
+backend/.env

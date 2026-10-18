@@ -1,0 +1,22 @@
+wait 1.5
+move 490 88 0.8
+wait 0.3
+click
+wait 2
+move 1110 748 0.9
+wait 0.3
+click
+wait 2
+move 800 200 1
+move 800 392 1.5
+wait 1
+move 1155 200 1
+wait 0.3
+click
+move 1000 600 1
+wait 18
+move 882 240 1
+wait 0.3
+click
+move 1000 600 1
+wait 14

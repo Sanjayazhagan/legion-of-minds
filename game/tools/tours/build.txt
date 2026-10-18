@@ -1,0 +1,66 @@
+wait 1.5
+move 700 88 0.9
+wait 0.3
+click
+wait 1.2
+move 1135 86 0.8
+wait 0.3
+click
+wait 1.5
+move 1006 226 0.9
+wait 0.4
+click
+wait 1.5
+move 1197 337 0.9
+wait 0.3
+click
+move 300 470 1.2
+move 290 480 0.4
+wait 0.3
+click
+wait 1
+move 1197 417 1
+wait 0.3
+click
+move 470 460 1.2
+move 460 470 0.4
+wait 0.3
+click
+wait 1
+move 482 390 1
+wait 0.3
+click
+move 460 290 1.2
+wait 0.3
+click
+wait 1
+move 376 400 0.8
+wait 0.2
+wheel 1
+wait 0.15
+wheel 1
+wait 0.15
+wheel 1
+wait 0.15
+wheel 1
+wait 1.5
+wheel -1
+wait 0.15
+wheel -1
+wait 0.15
+wheel -1
+wait 0.15
+wheel -1
+wait 0.15
+wheel -1
+wait 0.15
+wheel -1
+wait 1.5
+wheel 1
+wait 0.15
+wheel 1
+wait 1
+move 877 86 1
+wait 0.3
+click
+wait 2

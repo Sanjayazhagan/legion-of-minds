@@ -1,0 +1,86 @@
+{
+ "untrained (random)": {
+  "win_rate": 0.0,
+  "mean_return": -0.5415320000000002,
+  "died": 0.314,
+  "timeouts": 0.686,
+  "ticks_to_win": null,
+  "hp_left_on_win": null,
+  "action_share": [
+   0.091,
+   0.091,
+   0.089,
+   0.091,
+   0.092,
+   0.091,
+   0.091,
+   0.091,
+   0.092,
+   0.091,
+   0.09
+  ]
+ },
+ "scripted: rush tower": {
+  "win_rate": 0.0,
+  "mean_return": -0.3453839999999999,
+  "died": 1.0,
+  "timeouts": 0.0,
+  "ticks_to_win": null,
+  "hp_left_on_win": null,
+  "action_share": [
+   0.0,
+   0.032,
+   0.03,
+   0.034,
+   0.034,
+   0.031,
+   0.032,
+   0.033,
+   0.035,
+   0.0,
+   0.74
+  ]
+ },
+ "scripted: guards first": {
+  "win_rate": 1.0,
+  "mean_return": 2.1578620000000015,
+  "died": 0.0,
+  "timeouts": 0.0,
+  "ticks_to_win": 142.138,
+  "hp_left_on_win": 18.302,
+  "action_share": [
+   0.0,
+   0.017,
+   0.017,
+   0.019,
+   0.019,
+   0.017,
+   0.018,
+   0.018,
+   0.02,
+   0.305,
+   0.55
+  ]
+ },
+ "trained fighter": {
+  "win_rate": 0.71,
+  "mean_return": 1.2865020000000007,
+  "died": 0.278,
+  "timeouts": 0.012,
+  "ticks_to_win": 146.4112676056338,
+  "hp_left_on_win": 22.174647887323943,
+  "action_share": [
+   0.0,
+   0.028,
+   0.018,
+   0.006,
+   0.036,
+   0.0,
+   0.026,
+   0.027,
+   0.003,
+   0.315,
+   0.541
+  ]
+ }
+}

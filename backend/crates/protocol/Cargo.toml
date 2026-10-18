@@ -1,0 +1,11 @@
+[package]
+name = "bag-protocol"
+version.workspace = true
+edition.workspace = true
+description = "Wire types, validation and the shared raid simulation for Become a God online play"
+
+[dependencies]
+godcore.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
