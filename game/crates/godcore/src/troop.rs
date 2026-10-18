@@ -6,6 +6,7 @@ use crate::env::EpisodeInfo;
 use crate::nn::Mlp;
 use crate::ppo::{actor_dims, critic_dims, new_actor_for, new_critic_for};
 use crate::rng::Rng;
+use crate::moves::{practice_of, Move};
 use crate::weapons::{mastery_level, Weapon};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -111,6 +112,9 @@ pub struct Troop {
     /// Training steps spent holding each weapon.
     #[serde(default)]
     pub mastery: BTreeMap<Weapon, u64>,
+    /// Training steps of practice with each class move.
+    #[serde(default)]
+    pub move_xp: BTreeMap<Move, u64>,
 }
 
 /// Starting score for actions a grown brain has never tried (dodge, block,
@@ -133,6 +137,7 @@ impl Troop {
             seed,
             sessions: 0,
             mastery: BTreeMap::new(),
+            move_xp: BTreeMap::new(),
         }
     }
 
@@ -155,15 +160,39 @@ impl Troop {
         self.spec.mastery = self.mastery_of(w);
     }
 
-    /// Record training: total steps and steps with the equipped weapon.
-    /// Returns the new mastery level if it went up.
+    /// Record training: total steps, steps with the equipped weapon, and
+    /// practice shared evenly across the troop's class moves.
+    /// Returns the new weapon mastery level if it went up.
     pub fn add_training(&mut self, steps: u64) -> Option<u8> {
         let w = self.weapon();
         let before = self.mastery_of(w);
         self.steps += steps;
         *self.mastery.entry(w).or_insert(0) += steps;
         self.spec.mastery = self.mastery_of(w);
+        self.practise_moves(steps);
         (self.spec.mastery > before).then_some(self.spec.mastery)
+    }
+
+    fn practise_moves(&mut self, steps: u64) {
+        let kit = self.spec.moves();
+        if !kit.is_empty() {
+            for m in &kit {
+                *self.move_xp.entry(*m).or_insert(0) += steps / kit.len() as u64;
+            }
+        }
+        self.sync_moves();
+    }
+
+    /// Practice (0 to 1) with a move.
+    pub fn move_practice(&self, m: Move) -> f32 {
+        practice_of(self.move_xp.get(&m).copied().unwrap_or(0))
+    }
+
+    /// Copy move practice into the spec the sim reads.
+    pub fn sync_moves(&mut self) {
+        for m in Move::ALL {
+            self.spec.move_practice[m as usize] = if self.spec.has_move(m) { self.move_practice(m) } else { 0.0 };
+        }
     }
 
     /// Bring the brain up to the size and shape this level calls for,
@@ -217,6 +246,11 @@ impl Troop {
         if t.mastery.is_empty() && t.steps > 0 {
             t.mastery.insert(t.weapon(), t.steps);
         }
+        if t.move_xp.is_empty() && t.steps > 0 {
+            let steps = t.steps;
+            t.practise_moves(steps);
+        }
+        t.sync_moves();
         t.spec.mastery = t.mastery_of(t.weapon());
         t.upgrade_brain();
         Ok(t)

@@ -193,7 +193,11 @@ impl Game {
             self.confirm_release = false;
             return Screen::Armoury(crate::armoury::ArmouryState { idx: i });
         }
-        y += 40.0;
+        y += 26.0;
+        let kit = t.spec.moves();
+        let moves: Vec<String> = kit.iter().map(|m| format!("{} {:.0}%", m.name(), t.move_practice(*m) * 100.0)).collect();
+        text(&format!("Moves practised: {}", if moves.is_empty() { "none".to_string() } else { moves.join(", ") }), x, y + 8.0, 18.0, TEXT);
+        y += 30.0;
         text(
             &format!(
                 "Training {} / {} steps (level {} cap)",
@@ -264,7 +268,7 @@ impl Game {
         let win: Vec<f32> = t.curve.iter().map(|p| p.win).collect();
         let surv: Vec<f32> = t.curve.iter().map(|p| 1.0 - p.died).collect();
         chart(
-            Rect::new(x, y, d.w - 48.0, 160.0),
+            Rect::new(x, y, d.w - 48.0, 144.0),
             &[
                 (
                     &win,
@@ -279,7 +283,7 @@ impl Game {
             ],
             &format!("{} steps", fmt_steps(t.steps)),
         );
-        y += 180.0;
+        y += 164.0;
 
         // Actions
         let can_train = t.steps_left() > 0;

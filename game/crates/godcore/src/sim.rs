@@ -7,15 +7,16 @@
 //! `Rng`. The same layout, models and actions give the same battle anywhere.
 
 use crate::classes::ClassSpec;
+use crate::moves::{Move, N_MOVES};
 use crate::weapons::{mastery_dmg, mastery_skill_cd, mastery_skill_power, Skill, Weapon};
 use serde::{Deserialize, Serialize};
 
 pub const ARENA: f32 = 32.0;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
-pub const SIM_VERSION: u32 = 2;
-pub const OBS_DIM: usize = 67;
-pub const N_ACTIONS: usize = 15;
+pub const SIM_VERSION: u32 = 3;
+pub const OBS_DIM: usize = 74;
+pub const N_ACTIONS: usize = 20;
 /// The first observation features and actions, as they were before dodge,
 /// block and skills (brains from older saves are grown from these).
 pub const OBS_DIM_V1: usize = 47;
@@ -31,12 +32,37 @@ pub const ACT_DODGE: u8 = 12;
 pub const ACT_BLOCK: u8 = 13;
 /// Use the weapon's skill.
 pub const ACT_SKILL: u8 = 14;
+/// Class moves (see `moves`): only classes with the move can use them.
+pub const ACT_CHARGE: u8 = 15;
+pub const ACT_CLOAK: u8 = 16;
+pub const ACT_BLINK: u8 = 17;
+pub const ACT_SNARE: u8 = 18;
+pub const ACT_WARD: u8 = 19;
 
 const DODGE_DIST: f32 = 2.4;
 const DODGE_INVULN: u32 = 6;
 const DODGE_CD: u32 = 45;
 const BLOCK_TICKS: u32 = 12;
 const BLOCK_CD: u32 = 30;
+const CHARGE_REACH: f32 = 6.0;
+const CHARGE_DIST: f32 = 3.5;
+const CHARGE_CD: u32 = 90;
+const CLOAK_TICKS: u32 = 60;
+const CLOAK_CD: u32 = 180;
+const BLINK_INVULN: u32 = 4;
+const BLINK_CD: u32 = 120;
+const SNARE_CD: u32 = 100;
+const SNARE_LIFE: u32 = 450;
+const SNARE_RADIUS: f32 = 0.9;
+const MAX_SNARES: usize = 2;
+const WARD_RADIUS: f32 = 3.0;
+const WARD_TICKS: u32 = 45;
+const WARD_CD: u32 = 160;
+
+/// A class move's cooldown: weaker (mixed-in) versions recharge slower.
+fn move_cd(base: u32, power: f32) -> u32 {
+    (base as f32 / power).round() as u32
+}
 /// Enemy units this close count as a threat (for dodge and block).
 const THREAT_RANGE: f32 = 3.0;
 
@@ -151,9 +177,16 @@ pub struct Unit {
     pub skill_cd_max: u32,
     /// Skill strength multiplier (weapon mastery).
     pub skill_power: f32,
-    pub dodge_cd: u32,
+    /// Strength of each class move (0 = not in this troop's kit).
+    pub moves: [f32; N_MOVES],
+    /// Cooldown of each class move.
+    pub move_cd: [u32; N_MOVES],
     pub block_ticks: u32,
-    pub block_cd: u32,
+    /// Untargetable until it strikes.
+    pub cloak: u32,
+    /// Shielded by an ally's ward: damage taken is cut by `ward_power`.
+    pub ward: u32,
+    pub ward_power: f32,
     /// Share of damage still taken while blocking.
     pub block_taken: f32,
     /// Stunned units skip their turns.
@@ -188,6 +221,29 @@ pub enum EventKind {
     Stun,
     /// A weapon skill: `from` the user, `to` the target or centre.
     Skill(Skill),
+    /// A rush at an enemy: `from` start, `to` where it stopped.
+    Charge,
+    /// A unit vanished.
+    Cloak,
+    /// A teleport: `from` start, `to` end.
+    Blink,
+    /// A trap was set (at `to`).
+    TrapSet,
+    /// A trap went off (at `to`).
+    TrapHit,
+    /// A ward went up around `from`.
+    Ward,
+}
+
+/// A hidden snare on the ground.
+#[derive(Clone, Copy, Debug)]
+pub struct Trap {
+    pub x: f32,
+    pub y: f32,
+    pub team: Team,
+    pub owner: usize,
+    pub power: f32,
+    pub ttl: u32,
 }
 
 /// What happened this tick, for drawing.
@@ -204,6 +260,7 @@ pub struct World {
     pub max_ticks: u32,
     pub units: Vec<Unit>,
     pub events: Vec<Event>,
+    pub traps: Vec<Trap>,
     total_building_hp: f32,
 }
 
@@ -225,6 +282,7 @@ impl World {
             max_ticks,
             units: Vec::new(),
             events: Vec::new(),
+            traps: Vec::new(),
             total_building_hp: 0.0,
         }
     }
@@ -266,9 +324,12 @@ impl World {
             skill_cd: 0,
             skill_cd_max: 0,
             skill_power: 1.0,
-            dodge_cd: 0,
+            moves: [0.0; N_MOVES],
+            move_cd: [0; N_MOVES],
             block_ticks: 0,
-            block_cd: 0,
+            cloak: 0,
+            ward: 0,
+            ward_power: 0.0,
             block_taken: 1.0,
             stun: 0,
             invuln: 0,
@@ -324,7 +385,11 @@ impl World {
         u.skill = Some(ws.skill);
         u.skill_cd_max = (ws.skill_cd as f32 * mastery_skill_cd(m)).round() as u32;
         u.skill_power = mastery_skill_power(m);
-        u.block_taken = ws.block_taken;
+        for m in Move::ALL {
+            u.moves[m as usize] = spec.move_power(m);
+        }
+        // A mixed-in block keeps less of the weapon's protection.
+        u.block_taken = 1.0 - (1.0 - ws.block_taken) * u.moves[Move::Block as usize];
         u.tag = tag;
         self.push(u)
     }
@@ -411,7 +476,7 @@ impl World {
         let me = &self.units[i];
         let mut best: Option<(usize, f32)> = None;
         for (j, u) in self.units.iter().enumerate() {
-            if j == i || !u.alive || !pred(u) {
+            if j == i || !u.alive || !pred(u) || (u.cloak > 0 && u.team != me.team) {
                 continue;
             }
             let d = me.dist(u) - if u.kind.is_building() { u.radius } else { 0.0 };
@@ -428,7 +493,7 @@ impl World {
             .units
             .iter()
             .enumerate()
-            .filter(|(j, u)| *j != i && u.alive && pred(u))
+            .filter(|(j, u)| *j != i && u.alive && pred(u) && !(u.cloak > 0 && u.team != me.team))
             .map(|(j, u)| (j, me.dist(u)))
             .collect();
         // Stable sort with index tie-break keeps this deterministic.
@@ -498,9 +563,17 @@ impl World {
         }
         if me.kind == Kind::Troop {
             let threat = self.threat(i).is_some();
-            m[ACT_DODGE as usize] = me.dodge_cd == 0 && threat;
-            m[ACT_BLOCK as usize] = me.block_cd == 0 && threat;
+            let ready = |mv: Move| me.moves[mv as usize] > 0.0 && me.move_cd[mv as usize] == 0;
+            m[ACT_DODGE as usize] = ready(Move::Dodge) && threat;
+            m[ACT_BLOCK as usize] = ready(Move::Block) && threat;
             m[ACT_SKILL as usize] = me.skill_cd == 0 && self.skill_ready(i);
+            m[ACT_CHARGE as usize] = ready(Move::Charge) && self.charge_target(i).is_some();
+            m[ACT_CLOAK as usize] = ready(Move::Cloak) && me.cloak == 0 && threat;
+            m[ACT_BLINK as usize] = ready(Move::Blink) && threat;
+            m[ACT_SNARE as usize] = ready(Move::Snare)
+                && self.traps.iter().filter(|t| t.owner == i).count() < MAX_SNARES
+                && self.nearest(i, |u| u.team != me.team && !u.kind.is_building()).is_some_and(|(_, d)| d <= 8.0);
+            m[ACT_WARD as usize] = ready(Move::Ward) && self.ward_useful(i);
         }
         m
     }
@@ -511,7 +584,7 @@ impl World {
         let me = &self.units[i];
         let mut best: Option<(usize, f32)> = None;
         for (j, u) in self.units.iter().enumerate() {
-            if !u.alive || u.team == me.team || u.kind == Kind::Core {
+            if !u.alive || u.team == me.team || u.kind == Kind::Core || u.cloak > 0 {
                 continue;
             }
             let d = me.dist(u);
@@ -521,6 +594,24 @@ impl World {
             }
         }
         best.map(|b| b.0)
+    }
+
+    /// An enemy unit worth charging: in sight, not already in reach.
+    fn charge_target(&self, i: usize) -> Option<usize> {
+        let me = &self.units[i];
+        let team = me.team;
+        self.nearest(i, |u| u.team != team && !u.kind.is_building())
+            .filter(|&(_, d)| d > me.range && d <= CHARGE_REACH)
+            .map(|b| b.0)
+    }
+
+    /// A ward helps when an ally nearby (or this unit) is under threat.
+    fn ward_useful(&self, i: usize) -> bool {
+        let me = &self.units[i];
+        (0..self.units.len()).any(|k| {
+            let u = &self.units[k];
+            u.alive && u.team == me.team && u.kind == Kind::Troop && me.dist(u) <= WARD_RADIUS && u.ward == 0 && self.threat(k).is_some()
+        })
     }
 
     /// Enemies within `r` of (x, y), buildings measured to their edge.
@@ -709,7 +800,7 @@ impl World {
         put(&mut o, mask[ACT_SKILL as usize] as u8 as f32);
         put(&mut o, (me.block_ticks > 0) as u8 as f32);
         put(&mut o, frac(me.skill_cd, me.skill_cd_max));
-        put(&mut o, frac(me.dodge_cd, DODGE_CD));
+        put(&mut o, frac(me.move_cd[Move::Dodge as usize], DODGE_CD));
         // Crowd: enemy units close enough for a spin or slam (1)
         put(&mut o, self.enemies_near(team, me.x, me.y, 2.2, false).len() as f32 / 4.0);
         // The three nearest enemies again: stunned, guard up (2 each)
@@ -727,6 +818,12 @@ impl World {
         for w in Weapon::ALL {
             put(&mut o, (me.weapon == Some(w)) as u8 as f32);
         }
+        // Class moves ready (5), cloaked, warded (sim version 3)
+        for a in [ACT_CHARGE, ACT_CLOAK, ACT_BLINK, ACT_SNARE, ACT_WARD] {
+            put(&mut o, mask[a as usize] as u8 as f32);
+        }
+        put(&mut o, (me.cloak > 0) as u8 as f32);
+        put(&mut o, (me.ward > 0) as u8 as f32);
         debug_assert_eq!(k, OBS_DIM);
         o
     }
@@ -779,6 +876,8 @@ impl World {
             self.troop_act(i, a);
         }
 
+        self.spring_traps();
+
         // Guards: chase troops that come close, otherwise walk home.
         for i in 0..n {
             if !self.units[i].alive || self.units[i].kind != Kind::Guard {
@@ -825,6 +924,9 @@ impl World {
             return;
         }
         let mut amount = amount;
+        if self.units[to].ward > 0 {
+            amount *= 1.0 - self.units[to].ward_power;
+        }
         if self.units[to].block_ticks > 0 {
             let kept = amount * self.units[to].block_taken;
             self.units[to].stats.blocked += amount - kept;
@@ -857,7 +959,10 @@ impl World {
     fn troop_act(&mut self, i: usize, a: u8) {
         {
             let u = &mut self.units[i];
-            for t in [&mut u.cd, &mut u.skill_cd, &mut u.dodge_cd, &mut u.block_cd, &mut u.block_ticks, &mut u.invuln] {
+            for t in [&mut u.cd, &mut u.skill_cd, &mut u.block_ticks, &mut u.invuln, &mut u.cloak, &mut u.ward] {
+                *t = t.saturating_sub(1);
+            }
+            for t in u.move_cd.iter_mut() {
                 *t = t.saturating_sub(1);
             }
             if u.stun > 0 {
@@ -884,7 +989,7 @@ impl World {
                 self.move_unit(i, ux * DODGE_DIST, uy * DODGE_DIST);
                 let u = &mut self.units[i];
                 u.invuln = DODGE_INVULN;
-                u.dodge_cd = DODGE_CD;
+                u.move_cd[Move::Dodge as usize] = move_cd(DODGE_CD, u.moves[Move::Dodge as usize]);
                 u.stats.dodges += 1;
                 let to = self.pos(i);
                 self.events.push(Event { kind: EventKind::Dodge, from, to });
@@ -892,7 +997,52 @@ impl World {
             ACT_BLOCK if m[ACT_BLOCK as usize] => {
                 let u = &mut self.units[i];
                 u.block_ticks = BLOCK_TICKS;
-                u.block_cd = BLOCK_CD;
+                u.move_cd[Move::Block as usize] = move_cd(BLOCK_CD, u.moves[Move::Block as usize]);
+            }
+            ACT_CHARGE if m[ACT_CHARGE as usize] => self.charge(i),
+            ACT_CLOAK if m[ACT_CLOAK as usize] => {
+                let u = &mut self.units[i];
+                let p = u.moves[Move::Cloak as usize];
+                u.cloak = (CLOAK_TICKS as f32 * p).round() as u32;
+                u.move_cd[Move::Cloak as usize] = move_cd(CLOAK_CD, p);
+                let at = self.pos(i);
+                self.events.push(Event { kind: EventKind::Cloak, from: at, to: at });
+            }
+            ACT_BLINK if m[ACT_BLINK as usize] => {
+                let j = self.threat(i).unwrap();
+                let p = self.units[i].moves[Move::Blink as usize];
+                let (from, (tx, ty)) = (self.pos(i), self.pos(j));
+                let (dx, dy) = (from.0 - tx, from.1 - ty);
+                let d = (dx * dx + dy * dy).sqrt();
+                let (ux, uy) = if d > 1e-4 { (dx / d, dy / d) } else { (-1.0, 0.0) };
+                let dist = 3.0 + 1.5 * p;
+                self.move_unit(i, ux * dist, uy * dist);
+                let u = &mut self.units[i];
+                u.invuln = BLINK_INVULN;
+                u.move_cd[Move::Blink as usize] = move_cd(BLINK_CD, p);
+                u.stats.dodges += 1;
+                let to = self.pos(i);
+                self.events.push(Event { kind: EventKind::Blink, from, to });
+            }
+            ACT_SNARE if m[ACT_SNARE as usize] => {
+                let (team, (x, y)) = (self.units[i].team, self.pos(i));
+                let p = self.units[i].moves[Move::Snare as usize];
+                self.traps.push(Trap { x, y, team, owner: i, power: p, ttl: SNARE_LIFE });
+                self.units[i].move_cd[Move::Snare as usize] = move_cd(SNARE_CD, p);
+                self.events.push(Event { kind: EventKind::TrapSet, from: (x, y), to: (x, y) });
+            }
+            ACT_WARD if m[ACT_WARD as usize] => {
+                let (team, p) = (self.units[i].team, self.units[i].moves[Move::Ward as usize]);
+                for k in 0..self.units.len() {
+                    let u = &self.units[k];
+                    if u.alive && u.team == team && u.kind == Kind::Troop && self.units[i].dist(u) <= WARD_RADIUS {
+                        self.units[k].ward = WARD_TICKS;
+                        self.units[k].ward_power = 0.5 * p;
+                    }
+                }
+                self.units[i].move_cd[Move::Ward as usize] = move_cd(WARD_CD, p);
+                let at = self.pos(i);
+                self.events.push(Event { kind: EventKind::Ward, from: at, to: at });
             }
             ACT_SKILL if m[ACT_SKILL as usize] => self.use_skill(i),
             ACT_HIT_UNIT if m[ACT_HIT_UNIT as usize] => {
@@ -924,6 +1074,7 @@ impl World {
 
     fn strike(&mut self, i: usize, j: usize) {
         self.units[i].cd = self.units[i].cd_max;
+        self.units[i].cloak = 0;
         let kind = if self.units[i].range > 2.5 {
             EventKind::Arrow
         } else {
@@ -949,6 +1100,54 @@ impl World {
         }
     }
 
+    fn charge(&mut self, i: usize) {
+        let j = self.charge_target(i).unwrap();
+        let p = self.units[i].moves[Move::Charge as usize];
+        let from = self.pos(i);
+        let (tx, ty) = self.pos(j);
+        let (dx, dy) = (tx - from.0, ty - from.1);
+        let d = (dx * dx + dy * dy).sqrt();
+        let step = (d - 0.8).min(CHARGE_DIST).max(0.0);
+        self.move_unit(i, dx / d * step, dy / d * step);
+        self.units[i].move_cd[Move::Charge as usize] = move_cd(CHARGE_CD, p);
+        self.units[i].cloak = 0;
+        let to = self.pos(i);
+        self.events.push(Event { kind: EventKind::Charge, from, to });
+        if self.units[i].dist(&self.units[j]) <= self.units[i].range + 0.5 {
+            let dmg = self.units[i].dmg * 1.2 * p;
+            self.damage(i, j, dmg);
+            self.stun(j, (10.0 * p).round() as u32);
+        }
+    }
+
+    /// Traps go off under the first enemy unit standing on them.
+    fn spring_traps(&mut self) {
+        let mut k = 0;
+        while k < self.traps.len() {
+            let t = self.traps[k];
+            let hit = (0..self.units.len()).find(|&j| {
+                let u = &self.units[j];
+                u.alive && u.team != t.team && !u.kind.is_building() && {
+                    let (dx, dy) = (u.x - t.x, u.y - t.y);
+                    (dx * dx + dy * dy).sqrt() <= SNARE_RADIUS
+                }
+            });
+            if let Some(j) = hit {
+                self.events.push(Event { kind: EventKind::TrapHit, from: (t.x, t.y), to: (t.x, t.y) });
+                self.damage(t.owner, j, 6.0 * t.power);
+                self.stun(j, (15.0 * t.power).round() as u32);
+                self.traps.remove(k);
+                continue;
+            }
+            self.traps[k].ttl -= 1;
+            if self.traps[k].ttl == 0 {
+                self.traps.remove(k);
+            } else {
+                k += 1;
+            }
+        }
+    }
+
     fn stun(&mut self, j: usize, ticks: u32) {
         let u = &mut self.units[j];
         if !u.alive || u.kind.is_building() || u.invuln > 0 {
@@ -967,6 +1166,7 @@ impl World {
         let me = self.pos(i);
         self.units[i].skill_cd = self.units[i].skill_cd_max;
         self.units[i].stats.skills += 1;
+        self.units[i].cloak = 0;
         let mut to = me;
         match skill {
             Skill::ShieldBash => {

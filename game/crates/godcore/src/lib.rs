@@ -9,6 +9,7 @@
 pub mod battle;
 pub mod classes;
 pub mod env;
+pub mod moves;
 pub mod nn;
 pub mod ppo;
 pub mod rng;
