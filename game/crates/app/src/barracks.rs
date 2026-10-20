@@ -43,6 +43,10 @@ impl Game {
             self.confirm_release = false;
             return Screen::Home(crate::home::HomeState::new(self));
         }
+        if self.ui.button_ex(Rect::new(820.0, ui_y, 200.0, 44.0), "Team training", self.troops.len() >= 2, false) {
+            self.confirm_release = false;
+            return Screen::Team(crate::teamtrain::TeamState::new(self));
+        }
 
         // Roster list
         let list = Rect::new(20.0, 124.0, 400.0, H - 144.0);

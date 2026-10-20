@@ -143,7 +143,7 @@ pub fn greedy_action(actor: &Mlp, obs: &[f32], mask: &[bool; N_ACTIONS], cache: 
     best as u8
 }
 
-fn sample(logp: &[f32; N_ACTIONS], rng: &mut Rng) -> u8 {
+pub(crate) fn sample(logp: &[f32; N_ACTIONS], rng: &mut Rng) -> u8 {
     let u = rng.f32();
     let mut acc = 0.0;
     let mut last = 0;
@@ -180,15 +180,15 @@ struct Worker {
 /// A run of one agent slot's transitions, ending in a terminal state or cut
 /// off by the end of the rollout (then bootstrapped with `last_val`).
 #[derive(Default)]
-struct Segment {
-    obs: Vec<f32>,
-    mask: Vec<[bool; N_ACTIONS]>,
-    act: Vec<u8>,
-    logp: Vec<f32>,
-    val: Vec<f32>,
-    rew: Vec<f32>,
-    terminal: bool,
-    last_val: f32,
+pub(crate) struct Segment {
+    pub(crate) obs: Vec<f32>,
+    pub(crate) mask: Vec<[bool; N_ACTIONS]>,
+    pub(crate) act: Vec<u8>,
+    pub(crate) logp: Vec<f32>,
+    pub(crate) val: Vec<f32>,
+    pub(crate) rew: Vec<f32>,
+    pub(crate) terminal: bool,
+    pub(crate) last_val: f32,
 }
 
 pub struct Trainer {
@@ -324,146 +324,23 @@ impl Trainer {
             .collect();
 
         // ---- Advantages (GAE) per segment, then flattened buffers.
-        let mut obs = Vec::new();
-        let mut masks = Vec::new();
-        let mut acts = Vec::new();
-        let mut old_logp = Vec::new();
-        let mut adv = Vec::new();
-        let mut rets = Vec::new();
         let mut episodes = Vec::new();
-        for (segs, eps) in &per_env {
-            for seg in segs {
-                let len = seg.act.len();
-                let mut a = vec![0.0f32; len];
-                let mut gae = 0.0;
-                for t in (0..len).rev() {
-                    let (next_v, nonterm) = if t + 1 == len {
-                        if seg.terminal {
-                            (0.0, 0.0)
-                        } else {
-                            (seg.last_val, 1.0)
-                        }
-                    } else {
-                        (seg.val[t + 1], 1.0)
-                    };
-                    let delta = seg.rew[t] + self.cfg.gamma * next_v * nonterm - seg.val[t];
-                    gae = delta + self.cfg.gamma * self.cfg.lambda * nonterm * gae;
-                    a[t] = gae;
-                }
-                for t in 0..len {
-                    rets.push(a[t] + seg.val[t]);
-                }
-                adv.extend_from_slice(&a);
-                obs.extend_from_slice(&seg.obs);
-                masks.extend_from_slice(&seg.mask);
-                acts.extend_from_slice(&seg.act);
-                old_logp.extend_from_slice(&seg.logp);
-            }
+        for (_, eps) in &per_env {
             episodes.extend_from_slice(eps);
         }
-        let n = acts.len();
+        let batch = Batch::from_segments(per_env.iter().flat_map(|(segs, _)| segs.iter()), &self.cfg);
+        let n = batch.acts.len();
 
         // ---- PPO update.
-        let mut idx: Vec<usize> = (0..n).collect();
-        let (na, nc) = (self.actor.n_params(), self.critic.n_params());
-        let cfg = self.cfg;
-        let (mut pl_sum, mut vl_sum, mut ent_sum, mut batches) = (0.0, 0.0, 0.0, 0);
-        for _ in 0..cfg.epochs {
-            for i in (1..n).rev() {
-                let j = self.rng.below(i + 1);
-                idx.swap(i, j);
-            }
-            for mb in idx.chunks(cfg.minibatch) {
-                let b = mb.len() as f32;
-                let mean = mb.iter().map(|&i| adv[i]).sum::<f32>() / b;
-                let var = mb.iter().map(|&i| (adv[i] - mean).powi(2)).sum::<f32>() / b;
-                let std = var.sqrt() + 1e-8;
-                let actor = &self.actor;
-                let critic = &self.critic;
-                // Fixed-size chunks summed in order: same result for any thread count.
-                let parts: Vec<Grads> = mb
-                    .par_chunks(128)
-                    .map(|chunk| {
-                        let mut g = Grads {
-                            a: vec![0.0; na],
-                            c: vec![0.0; nc],
-                            ..Default::default()
-                        };
-                        let (mut ca, mut cc, mut scratch) =
-                            (Cache::default(), Cache::default(), Vec::new());
-                        let mut lp = [0.0f32; N_ACTIONS];
-                        let mut d_logits = [0.0f32; N_ACTIONS];
-                        for &i in chunk {
-                            let o = &obs[i * OBS_DIM..(i + 1) * OBS_DIM];
-                            let mask = &masks[i];
-                            let a = acts[i] as usize;
-                            let ad = (adv[i] - mean) / std;
-                            actor.forward(o, &mut ca);
-                            masked_log_probs(actor.output(&ca), mask, &mut lp);
-                            let ratio = (lp[a] - old_logp[i]).exp();
-                            let s1 = ratio * ad;
-                            let clipped = ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip);
-                            let s2 = clipped * ad;
-                            g.pl += -s1.min(s2);
-                            let g_logp = if s1 <= s2 || (ratio - clipped).abs() < 1e-12 {
-                                -ad * ratio
-                            } else {
-                                0.0
-                            };
-                            let mut h = 0.0;
-                            for k in 0..N_ACTIONS {
-                                if mask[k] {
-                                    h -= lp[k].exp() * lp[k];
-                                }
-                            }
-                            g.ent += h;
-                            for k in 0..N_ACTIONS {
-                                d_logits[k] = if mask[k] {
-                                    let p = lp[k].exp();
-                                    let ind = if k == a { 1.0 } else { 0.0 };
-                                    (g_logp * (ind - p) + cfg.ent_coef * p * (lp[k] + h)) / b
-                                } else {
-                                    0.0
-                                };
-                            }
-                            actor.backward(&ca, &d_logits, &mut g.a, &mut scratch);
-                            critic.forward(o, &mut cc);
-                            let v = critic.output(&cc)[0];
-                            let diff = v - rets[i];
-                            g.vl += diff * diff;
-                            critic.backward(
-                                &cc,
-                                &[cfg.vf_coef * 2.0 * diff / b],
-                                &mut g.c,
-                                &mut scratch,
-                            );
-                        }
-                        g
-                    })
-                    .collect();
-                let mut ga = vec![0.0f32; na];
-                let mut gc = vec![0.0f32; nc];
-                for p in &parts {
-                    for k in 0..na {
-                        ga[k] += p.a[k];
-                    }
-                    for k in 0..nc {
-                        gc[k] += p.c[k];
-                    }
-                    pl_sum += p.pl / b;
-                    vl_sum += p.vl / b;
-                    ent_sum += p.ent / b;
-                }
-                batches += 1;
-                let norm = (ga.iter().chain(gc.iter()).map(|x| x * x).sum::<f32>()).sqrt();
-                if norm > cfg.max_grad_norm {
-                    let s = cfg.max_grad_norm / norm;
-                    ga.iter_mut().chain(gc.iter_mut()).for_each(|x| *x *= s);
-                }
-                self.opt_a.step(&mut self.actor.params, &ga, cfg.lr);
-                self.opt_c.step(&mut self.critic.params, &gc, cfg.lr);
-            }
-        }
+        let (pl_sum, vl_sum, ent_sum, batches) = ppo_update(
+            &self.cfg,
+            &mut self.actor,
+            &mut self.critic,
+            &mut self.opt_a,
+            &mut self.opt_c,
+            &mut self.rng,
+            &batch,
+        );
         self.steps_done += n as u64;
         let bn = batches.max(1) as f32;
         IterReport {
@@ -475,4 +352,159 @@ impl Trainer {
             seconds: t0.elapsed().as_secs_f32(),
         }
     }
+}
+
+/// One brain's rollout, flattened, with advantages and returns.
+pub(crate) struct Batch {
+    obs: Vec<f32>,
+    masks: Vec<[bool; N_ACTIONS]>,
+    pub(crate) acts: Vec<u8>,
+    old_logp: Vec<f32>,
+    adv: Vec<f32>,
+    rets: Vec<f32>,
+}
+
+impl Batch {
+    /// Advantages (GAE) per segment, then flattened buffers.
+    pub(crate) fn from_segments<'a>(segs: impl Iterator<Item = &'a Segment>, cfg: &PpoConfig) -> Batch {
+        let mut b = Batch { obs: Vec::new(), masks: Vec::new(), acts: Vec::new(), old_logp: Vec::new(), adv: Vec::new(), rets: Vec::new() };
+        for seg in segs {
+            let len = seg.act.len();
+            let mut a = vec![0.0f32; len];
+            let mut gae = 0.0;
+            for t in (0..len).rev() {
+                let (next_v, nonterm) = if t + 1 == len {
+                    if seg.terminal {
+                        (0.0, 0.0)
+                    } else {
+                        (seg.last_val, 1.0)
+                    }
+                } else {
+                    (seg.val[t + 1], 1.0)
+                };
+                let delta = seg.rew[t] + cfg.gamma * next_v * nonterm - seg.val[t];
+                gae = delta + cfg.gamma * cfg.lambda * nonterm * gae;
+                a[t] = gae;
+            }
+            for t in 0..len {
+                b.rets.push(a[t] + seg.val[t]);
+            }
+            b.adv.extend_from_slice(&a);
+            b.obs.extend_from_slice(&seg.obs);
+            b.masks.extend_from_slice(&seg.mask);
+            b.acts.extend_from_slice(&seg.act);
+            b.old_logp.extend_from_slice(&seg.logp);
+        }
+        b
+    }
+}
+
+/// The PPO update for one brain. Returns summed policy loss, value loss and
+/// entropy, and the number of minibatches.
+pub(crate) fn ppo_update(
+    cfg: &PpoConfig,
+    actor: &mut Mlp,
+    critic: &mut Mlp,
+    opt_a: &mut Adam,
+    opt_c: &mut Adam,
+    rng: &mut Rng,
+    batch: &Batch,
+) -> (f32, f32, f32, usize) {
+    let Batch { obs, masks, acts, old_logp, adv, rets } = batch;
+    let n = acts.len();
+    let mut idx: Vec<usize> = (0..n).collect();
+    let (na, nc) = (actor.n_params(), critic.n_params());
+    let cfg = *cfg;
+    let (mut pl_sum, mut vl_sum, mut ent_sum, mut batches) = (0.0, 0.0, 0.0, 0);
+    for _ in 0..cfg.epochs {
+        for i in (1..n).rev() {
+            let j = rng.below(i + 1);
+            idx.swap(i, j);
+        }
+        for mb in idx.chunks(cfg.minibatch) {
+            let b = mb.len() as f32;
+            let mean = mb.iter().map(|&i| adv[i]).sum::<f32>() / b;
+            let var = mb.iter().map(|&i| (adv[i] - mean).powi(2)).sum::<f32>() / b;
+            let std = var.sqrt() + 1e-8;
+            let actor_r = &*actor;
+            let critic_r = &*critic;
+            // Fixed-size chunks summed in order: same result for any thread count.
+            let parts: Vec<Grads> = mb
+                .par_chunks(128)
+                .map(|chunk| {
+                    let mut g = Grads {
+                        a: vec![0.0; na],
+                        c: vec![0.0; nc],
+                        ..Default::default()
+                    };
+                    let (mut ca, mut cc, mut scratch) = (Cache::default(), Cache::default(), Vec::new());
+                    let mut lp = [0.0f32; N_ACTIONS];
+                    let mut d_logits = [0.0f32; N_ACTIONS];
+                    for &i in chunk {
+                        let o = &obs[i * OBS_DIM..(i + 1) * OBS_DIM];
+                        let mask = &masks[i];
+                        let a = acts[i] as usize;
+                        let ad = (adv[i] - mean) / std;
+                        actor_r.forward(o, &mut ca);
+                        masked_log_probs(actor_r.output(&ca), mask, &mut lp);
+                        let ratio = (lp[a] - old_logp[i]).exp();
+                        let s1 = ratio * ad;
+                        let clipped = ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip);
+                        let s2 = clipped * ad;
+                        g.pl += -s1.min(s2);
+                        let g_logp = if s1 <= s2 || (ratio - clipped).abs() < 1e-12 {
+                            -ad * ratio
+                        } else {
+                            0.0
+                        };
+                        let mut h = 0.0;
+                        for k in 0..N_ACTIONS {
+                            if mask[k] {
+                                h -= lp[k].exp() * lp[k];
+                            }
+                        }
+                        g.ent += h;
+                        for k in 0..N_ACTIONS {
+                            d_logits[k] = if mask[k] {
+                                let p = lp[k].exp();
+                                let ind = if k == a { 1.0 } else { 0.0 };
+                                (g_logp * (ind - p) + cfg.ent_coef * p * (lp[k] + h)) / b
+                            } else {
+                                0.0
+                            };
+                        }
+                        actor_r.backward(&ca, &d_logits, &mut g.a, &mut scratch);
+                        critic_r.forward(o, &mut cc);
+                        let v = critic_r.output(&cc)[0];
+                        let diff = v - rets[i];
+                        g.vl += diff * diff;
+                        critic_r.backward(&cc, &[cfg.vf_coef * 2.0 * diff / b], &mut g.c, &mut scratch);
+                    }
+                    g
+                })
+                .collect();
+            let mut ga = vec![0.0f32; na];
+            let mut gc = vec![0.0f32; nc];
+            for p in &parts {
+                for k in 0..na {
+                    ga[k] += p.a[k];
+                }
+                for k in 0..nc {
+                    gc[k] += p.c[k];
+                }
+                pl_sum += p.pl / b;
+                vl_sum += p.vl / b;
+                ent_sum += p.ent / b;
+            }
+            batches += 1;
+            let norm = (ga.iter().chain(gc.iter()).map(|x| x * x).sum::<f32>()).sqrt();
+            if norm > cfg.max_grad_norm {
+                let s = cfg.max_grad_norm / norm;
+                ga.iter_mut().chain(gc.iter_mut()).for_each(|x| *x *= s);
+            }
+            opt_a.step(&mut actor.params, &ga, cfg.lr);
+            opt_c.step(&mut critic.params, &gc, cfg.lr);
+        }
+    }
+    (pl_sum, vl_sum, ent_sum, batches)
 }

@@ -78,5 +78,5 @@ fn golden_fingerprint() {
     );
 }
 
-/// Sim version 3 (class moves: 74 inputs, 20 actions).
-const GOLDEN: u64 = 0x16fb_6e1b_bf3a_74a4;
+/// Sim version 4 (teammate inputs: 88 inputs, 20 actions).
+const GOLDEN: u64 = 0x0f9d_bb6c_c52a_e756;

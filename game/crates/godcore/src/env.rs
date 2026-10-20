@@ -325,7 +325,7 @@ impl RlEnv for DrillEnv {
 
 /// Potential for shaping: distance to the nearest enemy (attackers) or to
 /// their post (defenders), and to the nearest ally.
-fn potential(w: &World, i: usize, approach: f32, follow: f32) -> f32 {
+pub(crate) fn potential(w: &World, i: usize, approach: f32, follow: f32) -> f32 {
     if approach == 0.0 && follow == 0.0 {
         return 0.0;
     }

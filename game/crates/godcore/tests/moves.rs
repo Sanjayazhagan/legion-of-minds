@@ -5,6 +5,7 @@ use godcore::nn::{Cache, Mlp};
 use godcore::ppo::{actor_dims, hidden_for_level};
 use godcore::rng::Rng;
 use godcore::sim::*;
+use godcore::sim::Role;
 use godcore::troop::Troop;
 use godcore::moves::Move;
 use godcore::weapons::{mastery_level, Weapon};
@@ -253,4 +254,39 @@ fn players_pick_the_brain_size() {
     // The pick survives a save.
     let back = Troop::load_json(&t.save_json()).unwrap();
     assert_eq!(back.hidden(), 256);
+}
+
+#[test]
+fn teammates_see_each_others_roles() {
+    let mut w = World::new(900);
+    let tank = w.add_troop(&BaseClass::Paladin.spec(), 10.0, 10.0, Control::External, 0);
+    let healer = w.add_troop(&BaseClass::Healer.spec(), 11.0, 10.0, Control::External, 1);
+    w.add_guard(9.0, 10.0);
+    w.add_core(25.0, 25.0);
+    assert_eq!(w.units[tank].role(), Role::Tank);
+    assert_eq!(w.units[healer].role(), Role::Healer);
+    let o = w.observe(healer);
+    // The healer's nearest ally is the tank, and the guard is on it.
+    let base = OBS_DIM - 14;
+    assert_eq!(&o[base..base + 4], &[1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(o[base + 4], 1.0, "the tank is under threat");
+}
+
+#[test]
+fn a_team_trains_together_and_keeps_its_own_brains() {
+    use godcore::team::{team_problem, TeamTrainer};
+    let a = Troop::new(1, "a".into(), BaseClass::Paladin.spec(), 1);
+    let b = Troop::new(2, "b".into(), BaseClass::Healer.spec(), 2);
+    let g = Troop::new(3, "g".into(), BaseClass::Guard.spec(), 3);
+    assert!(team_problem(&[a.spec.clone(), g.spec.clone()]).is_some(), "attackers and defenders can't mix");
+    let mut troops = vec![a, b];
+    let cfg = godcore::ppo::PpoConfig { n_envs: 2, n_steps: 64, ..Default::default() };
+    let before = troops[1].actor.params.clone();
+    let mut tr = TeamTrainer::for_troops(&troops, 7, cfg, None);
+    let rep = tr.iterate();
+    assert!(rep.steps.iter().all(|&s| s > 0));
+    tr.finish(&mut troops, &rep.episodes);
+    assert!(troops.iter().all(|t| t.steps > 0 && t.team_steps == t.steps));
+    assert_ne!(troops[1].actor.params, before, "the healer's own brain learned");
+    assert_ne!(troops[0].actor.params, troops[1].actor.params);
 }
