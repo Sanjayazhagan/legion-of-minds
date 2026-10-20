@@ -266,10 +266,19 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
     if t.steps > level_cap(t.level) {
         return bad("troop has more training than its level allows");
     }
-    // The brain grows with the troop's level (godcore::ppo::actor_dims).
-    let dims = godcore::ppo::actor_dims(t.level);
+    // Players pick the brain size, but only from godcore's list.
+    let dims = &t.actor.dims;
+    if !godcore::ppo::actor_dims_ok(dims) {
+        return bad(format!(
+            "troop brain size must be one of {:?} neurons per layer",
+            godcore::ppo::HIDDEN_SIZES
+        ));
+    }
+    if t.brain.is_some_and(|h| h != dims[1]) {
+        return bad("troop brain doesn't match its chosen size");
+    }
     let n: usize = dims.windows(2).map(|d| d[0] * d[1] + d[1]).sum();
-    if t.actor.dims != dims || t.actor.params.len() != n {
+    if t.actor.params.len() != n {
         return bad("troop brain has the wrong shape");
     }
     // Weapon mastery comes from training time with each weapon, which can't
@@ -305,6 +314,7 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
         sessions: t.sessions,
         mastery: t.mastery.clone(),
         move_xp: t.move_xp.clone(),
+        brain: Some(t.actor.dims[1]),
     };
     // Move practice comes from the troop's own practice record, never from
     // the client's copy in the spec.
@@ -692,16 +702,55 @@ mod tests {
     }
 
     #[test]
-    fn brain_size_must_match_level() {
+    fn any_listed_brain_size_is_accepted() {
+        use godcore::ppo::HIDDEN_SIZES;
+        let s = canonical_snapshot(&snapshot()).unwrap();
+        for h in HIDDEN_SIZES {
+            let mut a = army();
+            assert!(a[0].troop.set_brain(h), "{h}");
+            let c = canonical_army(&a, 1).unwrap();
+            assert_eq!(c[0].troop.actor.dims[1], h);
+            assert_eq!(c[0].troop.brain, Some(h));
+            assert_eq!(run_raid(&s, &a), run_raid(&s, &c), "{h}");
+        }
+        // Old troops with no pick: whatever size their level grew them to.
         let mut a = army();
-        a[0].troop.level = 3; // brain still the level 1 size
-        assert!(canonical_army(&a, 3).is_err());
+        a[0].troop.brain = None;
+        a[0].troop.level = 3;
         a[0].troop.upgrade_brain();
         assert!(canonical_army(&a, 3).is_ok());
-        let mut b = army();
-        b[0].troop.upgrade_brain();
-        b[0].troop.actor = a[0].troop.actor.clone(); // level 3 brain on a level 1 troop
-        assert!(canonical_army(&b, 3).is_err());
+    }
+
+    #[test]
+    fn unlisted_or_mismatched_brain_sizes_are_rejected() {
+        use godcore::nn::Mlp;
+        use godcore::ppo::actor_dims_h;
+        use godcore::rng::Rng;
+        for h in [0usize, 1, 32, 100, 65, 512, 4096] {
+            let mut a = army();
+            a[0].troop.actor = Mlp::new(&actor_dims_h(h.max(1)), 0.01, &mut Rng::new(1));
+            a[0].troop.brain = Some(h);
+            assert!(canonical_army(&a, 1).is_err(), "{h} neurons");
+            a[0].troop.brain = None;
+            assert!(canonical_army(&a, 1).is_err(), "{h} neurons, no pick");
+        }
+        // Layers of different sizes, or the wrong input/output size.
+        let mut a = army();
+        a[0].troop.actor = Mlp::new(&[OBS_DIM, 128, 64, godcore::sim::N_ACTIONS], 0.01, &mut Rng::new(1));
+        assert!(canonical_army(&a, 1).is_err());
+        let mut a = army();
+        a[0].troop.actor = Mlp::new(&[OBS_DIM - 1, 64, 64, godcore::sim::N_ACTIONS], 0.01, &mut Rng::new(1));
+        assert!(canonical_army(&a, 1).is_err());
+        // A brain that doesn't match the chosen size.
+        let mut a = army();
+        a[0].troop.set_brain(128);
+        a[0].troop.brain = Some(256);
+        assert!(canonical_army(&a, 1).is_err());
+        // Params cut short.
+        let mut a = army();
+        a[0].troop.set_brain(192);
+        a[0].troop.actor.params.truncate(1000);
+        assert!(canonical_army(&a, 1).is_err());
     }
 
     #[test]
