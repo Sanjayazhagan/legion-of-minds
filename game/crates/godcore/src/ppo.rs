@@ -44,9 +44,9 @@ impl Default for PpoConfig {
     }
 }
 
-/// Neurons per hidden layer at each troop level. The brain grows when a
-/// troop levels up (keeping what it learned), so stronger troops can learn
-/// more but train a little slower.
+/// Neurons per hidden layer at each troop level, for troops whose player
+/// hasn't picked a brain size (troops from before the choice existed). Their
+/// brain grows when they level up, keeping what it learned.
 pub fn hidden_for_level(level: u32) -> usize {
     match level {
         0..=2 => HIDDEN,
@@ -56,16 +56,23 @@ pub fn hidden_for_level(level: u32) -> usize {
     }
 }
 
-/// Every hidden size a troop brain can have.
-pub const HIDDEN_SIZES: [usize; 4] = [64, 96, 128, 160];
+/// Every hidden size a troop brain can have. Players pick one; bigger brains
+/// train slower and need more practice but can play the hardest fights better.
+pub const HIDDEN_SIZES: [usize; 6] = [64, 96, 128, 160, 192, 256];
 
 pub fn actor_dims(level: u32) -> Vec<usize> {
-    let h = hidden_for_level(level);
-    vec![OBS_DIM, h, h, N_ACTIONS]
+    actor_dims_h(hidden_for_level(level))
 }
 
 pub fn critic_dims(level: u32) -> Vec<usize> {
-    let h = hidden_for_level(level);
+    critic_dims_h(hidden_for_level(level))
+}
+
+pub fn actor_dims_h(h: usize) -> Vec<usize> {
+    vec![OBS_DIM, h, h, N_ACTIONS]
+}
+
+pub fn critic_dims_h(h: usize) -> Vec<usize> {
     vec![OBS_DIM, h, h, 1]
 }
 

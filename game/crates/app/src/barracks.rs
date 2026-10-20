@@ -181,6 +181,19 @@ impl Game {
             18.0,
             MUTED,
         );
+        if let Some(next) = t.next_brain() {
+            let gb = Rect::new(d.x + d.w - 184.0, y - 12.0, 160.0, 28.0);
+            if self.ui.button(gb, &format!("Grow to {next}")) {
+                self.troops[i].set_brain(next);
+                self.save_all();
+                let t = &self.troops[i];
+                self.toast(format!(
+                    "{}'s brain grew to {next} neurons per layer. It keeps what it learned, trains slower, and needs more practice to use the extra room.",
+                    t.name
+                ));
+                return Screen::Barracks;
+            }
+        }
         y += 36.0;
         // Weapon and mastery
         let w = t.weapon();
@@ -314,15 +327,13 @@ impl Game {
             false,
         ) {
             self.profile.gold -= cost;
+            let before = self.troops[i].hidden();
             self.troops[i].level_up();
             self.save_all();
             let cap = fmt_steps(self.troops[i].cap());
-            let n = self.troops[i].actor.dims[1];
-            self.toast(format!(
-                "{} reached level {}: trains up to {cap} steps, brain grew to {n} neurons per layer",
-                self.troops[i].name,
-                level + 1
-            ));
+            let n = self.troops[i].hidden();
+            let grew = if n > before { format!(", brain grew to {n} neurons per layer") } else { String::new() };
+            self.toast(format!("{} reached level {}: trains up to {cap} steps{grew}", self.troops[i].name, level + 1));
         }
         if self
             .ui

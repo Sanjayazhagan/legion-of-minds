@@ -94,7 +94,16 @@ fn main() {
                 None => Troop::new(seed, "Cli".into(), spec, seed),
             };
             troop.level = arg(&args, "--level").map(|s| s.parse().unwrap()).unwrap_or(5);
-            troop.upgrade_brain();
+            match arg(&args, "--brain") {
+                // Neurons per layer; without it a new troop gets the size for its level.
+                Some(h) => assert!(troop.set_brain(h.parse().unwrap()), "brain must be one of {:?} and not smaller than now", godcore::ppo::HIDDEN_SIZES),
+                None => {
+                    if arg(&args, "--from").is_none() {
+                        troop.brain = None;
+                    }
+                    troop.upgrade_brain();
+                }
+            }
             if let Some(w) = arg(&args, "--weapon") {
                 let w = godcore::weapons::Weapon::ALL
                     .into_iter()
