@@ -164,7 +164,12 @@ impl Game {
             "class"
         };
         text(
-            &format!("Level {} {}  ({kind})", t.level, t.spec.name),
+            &format!(
+                "Level {} {}  ({kind}), area talents reach {}",
+                t.level,
+                t.spec.name,
+                if t.spec.talents == 1 { "1 unit".to_string() } else { format!("{} units", t.spec.talents) }
+            ),
             x + 76.0,
             y + 26.0,
             20.0,
@@ -332,11 +337,16 @@ impl Game {
         ) {
             self.profile.gold -= cost;
             let before = self.troops[i].hidden();
+            let reach = self.troops[i].spec.talents;
             self.troops[i].level_up();
             self.save_all();
             let cap = fmt_steps(self.troops[i].cap());
             let n = self.troops[i].hidden();
-            let grew = if n > before { format!(", brain grew to {n} neurons per layer") } else { String::new() };
+            let mut grew = if n > before { format!(", brain grew to {n} neurons per layer") } else { String::new() };
+            let r = self.troops[i].spec.talents;
+            if r > reach {
+                grew += &format!(", area talents now reach {r} units");
+            }
             self.toast(format!("{} reached level {}: trains up to {cap} steps{grew}", self.troops[i].name, level + 1));
         }
         if self
