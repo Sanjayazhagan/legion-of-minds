@@ -39,16 +39,27 @@ Class stats and the weapon decide what those actions achieve: speed, health, ran
 
 ## 3. The brain
 
-The brain is a small neural network: the 74 numbers go in, pass through two layers of "neurons", and come out as a score for each of the 20 actions. Those weights are what training changes. The brain grows as the troop levels up:
+The brain is a small neural network: the 74 numbers go in, pass through two layers of "neurons", and come out as a score for each of the 20 actions. Those weights are what training changes. **The player picks the brain size** when recruiting (64, 96, 128, 160, 192 or 256 neurons per layer) and can grow it later in the barracks:
 
-| Troop level | Neurons per layer | Numbers in the brain | Training speed (4-core test machine) |
-|---|---|---|---|
-| 1-2 | 64 | 10,260 | about 7,500 steps/s |
-| 3 | 96 | 18,452 | about 4,600 steps/s |
-| 4 | 128 | 28,692 | about 2,900 steps/s |
-| 5 | 160 | 40,980 | about 2,200 steps/s |
+| Neurons per layer | Numbers in the brain | Training speed (4-core test machine) |
+|---|---|---|
+| 64 | 10,260 | about 7,500 steps/s |
+| 96 | 18,452 | about 4,600 steps/s |
+| 128 | 28,692 | about 2,900 steps/s |
+| 160 | 40,980 | about 2,300 steps/s |
+| 192 | 55,316 | not measured |
+| 256 | 90,132 | about 1,050 steps/s |
 
-Growing keeps everything the troop learned: the new neurons start with no say in its choices and are trained in from there. A bigger brain can learn more subtle play, but trains slower, which is why it comes with level and not for free. A second network of the same size, the "critic", guesses how well things are going. It is only used during training, to judge whether a move turned out better or worse than expected.
+Growing keeps everything the troop learned: the new neurons start with no say in its choices and are trained in from there. A brain never shrinks. Troops from before the choice existed keep growing with their level as they used to (64 at levels 1-2, then 96, 128, 160).
+
+What we measured comparing 160 and 256 at level 5 (Fighter, Mage and a Fighter/Archer/Assassin mix, 900k steps, half the drills against trained defenders, 2 seeds each):
+
+- The bigger brain trains about 2.2 times slower and starts behind (Mage at 300k steps: 30% drill wins vs 44%), then catches up by 900k steps.
+- After that, neither size is reliably better. The first seed made 256 look stronger against trained defenders (10 to 13 points more of the base destroyed), but the second seed reversed it for the Mage and the mix. The gap between seeds was bigger than the gap between brain sizes.
+
+So brain size is the player's bet: bigger is slower to train and slower to learn, and the game doesn't yet have fights hard enough to show a clear payoff.
+
+A second network of the same size, the "critic", guesses how well things are going. It is only used during training, to judge whether a move turned out better or worse than expected.
 
 The game uses no machine-learning library. The network, its learning and the battle simulation are all plain Rust in the game itself, and run on the CPU.
 
