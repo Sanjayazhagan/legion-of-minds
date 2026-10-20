@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 pub const ARENA: f32 = 32.0;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
-pub const SIM_VERSION: u32 = 4;
-pub const OBS_DIM: usize = 88;
-pub const N_ACTIONS: usize = 20;
+pub const SIM_VERSION: u32 = 5;
+pub const OBS_DIM: usize = 90;
+pub const N_ACTIONS: usize = 21;
 /// The first observation features and actions, as they were before dodge,
 /// block and skills (brains from older saves are grown from these).
 pub const OBS_DIM_V1: usize = 47;
@@ -25,6 +25,7 @@ pub const N_ACTIONS_V1: usize = 12;
 pub const ACT_IDLE: u8 = 0;
 pub const ACT_HIT_UNIT: u8 = 9;
 pub const ACT_HIT_BUILDING: u8 = 10;
+/// Heal the nearest ally (`ACT_HEAL`) or the second nearest (`ACT_HEAL_2`).
 pub const ACT_HEAL: u8 = 11;
 /// Roll away from the nearest threat, untouchable for a moment.
 pub const ACT_DODGE: u8 = 12;
@@ -38,6 +39,7 @@ pub const ACT_CLOAK: u8 = 16;
 pub const ACT_BLINK: u8 = 17;
 pub const ACT_SNARE: u8 = 18;
 pub const ACT_WARD: u8 = 19;
+pub const ACT_HEAL_2: u8 = 20;
 
 const DODGE_DIST: f32 = 2.4;
 const DODGE_INVULN: u32 = 6;
@@ -171,6 +173,8 @@ pub struct Unit {
     pub style: u8,
     /// Attacks also hit enemies this close to the target, for half damage.
     pub splash: f32,
+    /// Most units a multi-target talent reaches (from the troop's level).
+    pub talents: u8,
     pub weapon: Option<Weapon>,
     pub skill: Option<Skill>,
     pub skill_cd: u32,
@@ -357,6 +361,7 @@ impl World {
             last_action: 0,
             style: 0,
             splash: 0.0,
+            talents: crate::classes::TALENT_MAX,
             weapon: None,
             skill: None,
             skill_cd: 0,
@@ -419,6 +424,7 @@ impl World {
             }
         }
         u.splash = spec.splash;
+        u.talents = spec.talents;
         u.weapon = Some(w);
         u.skill = Some(ws.skill);
         u.skill_cd_max = (ws.skill_cd as f32 * mastery_skill_cd(m)).round() as u32;
@@ -540,25 +546,28 @@ impl World {
         v
     }
 
-    fn heal_target(&self, i: usize) -> Option<usize> {
+    /// The ally a heal would land on: the nearest (slot 0) or second
+    /// nearest (slot 1) ally, the same two the troop sees, if hurt and in
+    /// reach. The troop picks whom to heal; nothing picks for it.
+    fn heal_target(&self, i: usize, slot: usize) -> Option<usize> {
         let me = &self.units[i];
         if me.heal <= 0.0 {
             return None;
         }
-        let mut best: Option<(usize, f32)> = None;
-        for (j, u) in self.units.iter().enumerate() {
-            if j == i || !u.alive || u.team != me.team || u.kind.is_building() || u.hp >= u.max_hp {
-                continue;
-            }
-            if me.dist(u) > me.heal_range {
-                continue;
-            }
-            let frac = u.hp / u.max_hp;
-            if best.map_or(true, |(_, bf)| frac < bf) {
-                best = Some((j, frac));
-            }
-        }
-        best.map(|b| b.0)
+        let team = me.team;
+        let al = self.nearest_k(i, 2, |u| u.team == team && !u.kind.is_building());
+        al.get(slot)
+            .filter(|&&(j, d)| d <= me.heal_range && self.units[j].hp < self.units[j].max_hp)
+            .map(|&(j, _)| j)
+    }
+
+    /// Keep at most the troop's talent reach of `units`, best first by `key`
+    /// (lower first, index breaks ties so it stays deterministic).
+    fn reach(&self, i: usize, mut units: Vec<usize>, key: impl Fn(usize) -> f32) -> Vec<usize> {
+        let mut v: Vec<(usize, f32)> = units.drain(..).map(|k| (k, key(k))).collect();
+        v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap().then(a.0.cmp(&b.0)));
+        v.truncate(self.units[i].talents as usize);
+        v.into_iter().map(|(k, _)| k).collect()
     }
 
     fn unit_target(&self, i: usize) -> Option<usize> {
@@ -597,7 +606,8 @@ impl World {
         if me.cd == 0 {
             m[ACT_HIT_UNIT as usize] = me.dmg > 0.0 && self.unit_target(i).is_some();
             m[ACT_HIT_BUILDING as usize] = me.dmg > 0.0 && self.building_target(i).is_some();
-            m[ACT_HEAL as usize] = self.heal_target(i).is_some();
+            m[ACT_HEAL as usize] = self.heal_target(i, 0).is_some();
+            m[ACT_HEAL_2 as usize] = self.heal_target(i, 1).is_some();
         }
         if me.kind == Kind::Troop {
             let threat = self.threat(i).is_some();
@@ -875,13 +885,17 @@ impl World {
                 put(&mut o, self.threat(j).is_some() as u8 as f32);
                 let a = u.last_action;
                 put(&mut o, matches!(a, ACT_HIT_UNIT | ACT_HIT_BUILDING | ACT_SKILL | ACT_CHARGE) as u8 as f32);
-                put(&mut o, (a == ACT_HEAL || a == ACT_WARD) as u8 as f32);
+                put(&mut o, (a == ACT_HEAL || a == ACT_HEAL_2 || a == ACT_WARD) as u8 as f32);
             } else {
                 for _ in 0..7 {
                     put(&mut o, 0.0);
                 }
             }
         }
+        // Whom this troop can heal right now, and how far its talents reach
+        // (sim version 5).
+        put(&mut o, mask[ACT_HEAL_2 as usize] as u8 as f32);
+        put(&mut o, me.talents as f32 / crate::classes::TALENT_MAX as f32);
         debug_assert_eq!(k, OBS_DIM);
         o
     }
@@ -1091,12 +1105,17 @@ impl World {
             }
             ACT_WARD if m[ACT_WARD as usize] => {
                 let (team, p) = (self.units[i].team, self.units[i].moves[Move::Ward as usize]);
-                for k in 0..self.units.len() {
-                    let u = &self.units[k];
-                    if u.alive && u.team == team && u.kind == Kind::Troop && self.units[i].dist(u) <= WARD_RADIUS {
-                        self.units[k].ward = WARD_TICKS;
-                        self.units[k].ward_power = 0.5 * p;
-                    }
+                // Shields the allies most under attack first, then the nearest.
+                let near: Vec<usize> = (0..self.units.len())
+                    .filter(|&k| {
+                        let u = &self.units[k];
+                        u.alive && u.team == team && u.kind == Kind::Troop && self.units[i].dist(u) <= WARD_RADIUS
+                    })
+                    .collect();
+                let me = &self.units[i];
+                for k in self.reach(i, near, |k| me.dist(&self.units[k]) - if self.threat(k).is_some() { 100.0 } else { 0.0 }) {
+                    self.units[k].ward = WARD_TICKS;
+                    self.units[k].ward_power = 0.5 * p;
                 }
                 self.units[i].move_cd[Move::Ward as usize] = move_cd(WARD_CD, p);
                 let at = self.pos(i);
@@ -1111,8 +1130,8 @@ impl World {
                 let j = self.building_target(i).unwrap();
                 self.strike(i, j);
             }
-            ACT_HEAL if m[ACT_HEAL as usize] => {
-                let j = self.heal_target(i).unwrap();
+            ACT_HEAL | ACT_HEAL_2 if m[a as usize] => {
+                let j = self.heal_target(i, (a == ACT_HEAL_2) as usize).unwrap();
                 let amount = self.units[i]
                     .heal
                     .min(self.units[j].max_hp - self.units[j].hp);
@@ -1151,7 +1170,8 @@ impl World {
                     k != j && u.alive && u.team != team && u.dist(&self.units[j]) <= splash
                 })
                 .collect();
-            for k in near {
+            let t = &self.units[j];
+            for k in self.reach(i, near, |k| t.dist(&self.units[k])) {
                 self.damage(i, k, dmg * 0.5);
             }
             self.events.push(Event { kind: EventKind::Blast, from: to, to });
@@ -1234,12 +1254,16 @@ impl World {
                 self.stun(j, 20);
             }
             Skill::Whirlwind => {
-                for k in self.enemies_near(team, me.0, me.1, 2.2, true) {
+                let near = self.enemies_near(team, me.0, me.1, 2.2, true);
+                let u = &self.units[i];
+                for k in self.reach(i, near, |k| u.dist(&self.units[k])) {
                     self.damage(i, k, base * 1.3);
                 }
             }
             Skill::GroundSlam => {
-                for k in self.enemies_near(team, me.0, me.1, 2.0, true) {
+                let near = self.enemies_near(team, me.0, me.1, 2.0, true);
+                let u = &self.units[i];
+                for k in self.reach(i, near, |k| u.dist(&self.units[k])) {
                     self.damage(i, k, base);
                     self.stun(k, 15);
                 }
@@ -1258,7 +1282,8 @@ impl World {
             }
             Skill::Volley => {
                 let range = self.units[i].range;
-                let targets = self.nearest_k(i, 3, |u| u.team != team && !u.kind.is_building());
+                let reach = (self.units[i].talents as usize).min(3);
+                let targets = self.nearest_k(i, reach, |u| u.team != team && !u.kind.is_building());
                 for (j, d) in targets {
                     if d <= range {
                         let p = self.pos(j);
@@ -1271,19 +1296,23 @@ impl World {
                 let j = self.unit_target(i).or_else(|| self.building_target(i)).unwrap();
                 to = self.pos(j);
                 self.damage(i, j, base * 2.0);
-                for k in self.enemies_near(team, to.0, to.1, 2.5, true) {
-                    if k != j {
-                        self.damage(i, k, base);
-                    }
+                let near: Vec<usize> = self.enemies_near(team, to.0, to.1, 2.5, true).into_iter().filter(|&k| k != j).collect();
+                let t = &self.units[j];
+                for k in self.reach(i, near, |k| t.dist(&self.units[k])) {
+                    self.damage(i, k, base);
                 }
             }
             Skill::HealingNova => {
                 let amount = (15.0 + self.units[i].heal) * power;
-                for k in 0..self.units.len() {
+                // Heals the most hurt allies first.
+                let near: Vec<usize> = (0..self.units.len())
+                    .filter(|&k| {
+                        let u = &self.units[k];
+                        u.alive && u.team == team && u.kind == Kind::Troop && self.units[i].dist(u) <= 3.5 && u.hp < u.max_hp
+                    })
+                    .collect();
+                for k in self.reach(i, near, |k| self.units[k].hp / self.units[k].max_hp) {
                     let u = &self.units[k];
-                    if !u.alive || u.team != team || u.kind != Kind::Troop || self.units[i].dist(u) > 3.5 {
-                        continue;
-                    }
                     let h = amount.min(u.max_hp - u.hp);
                     self.units[k].hp += h;
                     self.units[i].stats.heal += h;

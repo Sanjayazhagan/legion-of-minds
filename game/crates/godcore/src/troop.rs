@@ -1,7 +1,7 @@
 //! A trained troop as the player owns it: class, level, brain and history.
 //! Saved as one small JSON file, which is also what gets shared for wars.
 
-use crate::classes::ClassSpec;
+use crate::classes::{talents_for_level, ClassSpec};
 use crate::env::EpisodeInfo;
 use crate::nn::Mlp;
 use crate::ppo::{actor_dims_h, critic_dims_h, hidden_for_level, new_actor_for, new_critic_for, HIDDEN_SIZES};
@@ -131,6 +131,8 @@ const NEW_ACTION_BIAS: f32 = -2.0;
 impl Troop {
     pub fn new(id: u64, name: String, spec: ClassSpec, seed: u64) -> Self {
         let mut rng = Rng::new(seed);
+        let mut spec = spec;
+        spec.talents = talents_for_level(1);
         Troop {
             id,
             name,
@@ -224,8 +226,9 @@ impl Troop {
         practice_of(self.move_xp.get(&m).copied().unwrap_or(0))
     }
 
-    /// Copy move practice into the spec the sim reads.
+    /// Copy move practice and the level's talent reach into the spec the sim reads.
     pub fn sync_moves(&mut self) {
+        self.spec.talents = talents_for_level(self.level);
         for m in Move::ALL {
             self.spec.move_practice[m as usize] = if self.spec.has_move(m) { self.move_practice(m) } else { 0.0 };
         }
@@ -260,6 +263,7 @@ impl Troop {
     /// Level up (the caller pays). Troops with no brain pick grow with level.
     pub fn level_up(&mut self) {
         self.level += 1;
+        self.sync_moves();
         self.upgrade_brain();
     }
 

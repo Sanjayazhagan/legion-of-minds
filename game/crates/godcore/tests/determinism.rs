@@ -78,5 +78,5 @@ fn golden_fingerprint() {
     );
 }
 
-/// Sim version 4 (teammate inputs: 88 inputs, 20 actions).
-const GOLDEN: u64 = 0x0f9d_bb6c_c52a_e756;
+/// Sim version 5 (chosen heal targets, level-limited talents: 90 inputs, 21 actions).
+const GOLDEN: u64 = 0x4ed9_6914_eabf_c077;

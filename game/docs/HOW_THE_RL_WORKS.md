@@ -4,12 +4,12 @@ Every troop has its own small brain that learns by trial and error on your compu
 
 ## 1. What a troop sees
 
-Battles run in ticks (30 a second when you watch). Every tick, each trained troop gets a list of 88 numbers describing its surroundings:
+Battles run in ticks (30 a second when you watch). Every tick, each trained troop gets a list of 90 numbers describing its surroundings:
 
 - **Itself:** where it is on the map, its health, whether its weapon is ready, how much time is left, and whether it can hit a unit, hit a building or heal right now.
 - **The 2 nearest buildings:** where they are, how damaged they are, and whether each one is a tower. Attackers see the buildings they are raiding; defenders see the ones they protect.
 - **The 3 nearest enemies:** where they are, how hurt they are, and whether they are about to strike.
-- **The 2 nearest allies, plus the most injured ally nearby.** Healers use this. For each of the 2 nearest allies it also sees their role (tank, striker, ranged or healer), whether something is attacking them, and whether they are fighting or healing right now (section 10).
+- **The 2 nearest allies, plus the most injured ally nearby.** Healers use this. For each of the 2 nearest allies it also sees their role (tank, striker, ranged or healer), whether something is attacking them, and whether they are fighting or healing right now (section 10). It also sees which of the two it could heal right now and how far its talents reach (section 11).
 - **The overall picture:** the share of enemy buildings and enemy troops still standing.
 - **Its moves and weapon:** which class moves it has and whether each is ready, whether its weapon skill is ready, whether its guard is up, cloaked or shielded by a ward, how many enemies are close enough for a spin or slam, whether the nearest enemies are stunned or blocking, and which weapon it holds.
 
@@ -17,13 +17,13 @@ Positions are relative ("a guard 3 steps to my left"), so the same brain works o
 
 ## 2. What a troop can do
 
-It has 20 actions, borrowed from action RPGs and MOBAs. The last seven are class moves, and a troop can only use the ones its classes bring (section 9):
+It has 21 actions, borrowed from action RPGs and MOBAs. The last seven are class moves, and a troop can only use the ones its classes bring (section 9):
 
 | Action | What it does |
 |---|---|
 | Stand still, or move in one of 8 directions | |
 | Hit unit / hit building | Attack the nearest enemy unit or building in range |
-| Heal | Heal the most injured ally in range (healing classes) |
+| Heal ally 1 / Heal ally 2 | Heal the nearest or the second nearest ally (healing classes). The troop picks whom; the game does not pick for it (section 11) |
 | **Weapon skill** | The weapon's special move, on its own cooldown (section 8) |
 | **Dodge** | Roll away from the nearest threat, untouchable for a moment |
 | **Block** | Raise the guard for 0.4 s: take much less damage, but no attacks and half speed |
@@ -39,7 +39,7 @@ Class stats and the weapon decide what those actions achieve: speed, health, ran
 
 ## 3. The brain
 
-The brain is a small neural network: the 88 numbers go in, pass through two layers of "neurons", and come out as a score for each of the 20 actions. Those weights are what training changes. **The player picks the brain size** when recruiting (64, 96, 128, 160, 192 or 256 neurons per layer) and can grow it later in the barracks:
+The brain is a small neural network: the 90 numbers go in, pass through two layers of "neurons", and come out as a score for each of the 21 actions. Those weights are what training changes. **The player picks the brain size** when recruiting (64, 96, 128, 160, 192 or 256 neurons per layer) and can grow it later in the barracks:
 
 | Neurons per layer | Numbers in the brain | Training speed (4-core test machine) |
 |---|---|---|
@@ -129,7 +129,7 @@ Every troop holds a weapon. Its class weapon is free; others are unlocked once w
 | Twin daggers | Fast light stabs, quicker feet | Shadowstep: blink to a target up to 6 away and strike for 3x |
 | Crossbow | Shoots from range | Volley: hits the 3 nearest enemies |
 | Fire staff | Spells from range | Fireball: 2x on the target plus a blast around it |
-| Holy wand | Weak hits, stronger heals (or a small heal for anyone) | Healing Nova: heals every ally nearby |
+| Holy wand | Weak hits, stronger heals (or a small heal for anyone) | Healing Nova: heals the most hurt allies nearby, as many as its level allows |
 
 A class with its own weapon keeps its exact stats; another weapon changes them by the difference between the two weapons. A fighter with a crossbow really shoots, and an archer with daggers really stabs.
 
@@ -164,6 +164,8 @@ The brain also has more choices to learn when to use. A mix can do more things, 
 
 ## 10. Team training
 
+(Measured under sim version 4, before section 11's rules. Section 11 re-measures team training under the new rules.)
+
 Normal squad drills put a troop next to scripted fighters, so it learns to stick with allies but never learns a real teammate. **Team training** puts 2 to 5 of your own troops of one side (attackers or defenders) into the same drills:
 
 - **Each troop keeps its own brain.** A Paladin learns to be the Paladin of *this* team, and the Healer learns to keep *that* Paladin alive.
@@ -196,6 +198,37 @@ Those drills are the kind the "together" troops trained in, so the attack teams 
 | Citadel | lost, 7% | 9%, 1 troop still alive at time out | lost, 5% | lost, 15% |
 
 Together-trained teams won the easy bases faster with nobody lost, and seed 2 took Twin Gate, which no apart team managed. Seed 1 did worse at Twin Gate. Nobody can beat Citadel yet. Short version: team training makes troops play as a team, and it usually helps, but it is not a guaranteed win, and run-to-run luck still matters.
+
+## 11. Whom to heal, and talents that grow with level
+
+**Heals pick a target.** Earlier, the game chose the heal target for the troop: the most hurt ally in reach. Now a healer has two heal actions, "heal my nearest ally" and "heal my second nearest ally". It sees both allies' health, role and whether they are under attack, so it has to learn whom to save first. A heal is always one ally at a time.
+
+**Talents that reach several units are limited by level.** Healing Nova, Ward, Mage and Warlock splash, Whirlwind, Ground Slam, Volley and the extra Fireball blast reach at most this many units:
+
+| Troop level | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| Units reached | 1 | 2 | 2 | 3 | 4 |
+
+When there are more units in range than that, healing talents go to the most hurt first, Ward goes to allies under attack first, and damage talents hit the closest first. Built-in enemy bases keep the full reach of 4. The barracks shows each troop's reach, and the level-up message says when it grows.
+
+### Measured
+
+Paladin + Archer + Healer, 4 seeds at level 1 and 4 at level 5, 300 team drills per check. "Apart" is 600k solo steps per troop; "together" is 300k solo plus 300k team steps, the same total.
+
+| Level | Seed | Team wins, apart → together | Healer alive at end | Healer HP healed per drill | Heals that went to the Paladin |
+|---|---|---|---|---|---|
+| 1 | 1 | 56% → 96% | 46% → 97% | 221 → 424 | 76% → 72% |
+| 1 | 2 | 82% → 96% | 89% → 95% | 322 → 339 | 73% → 77% |
+| 1 | 3 | 92% → 91% | 62% → 95% | 247 → 387 | 84% → 86% |
+| 1 | 4 | 34% → 88% | 48% → 91% | 259 → 347 | 73% → 78% |
+| 5 | 1 | 54% → 99% | 20% → 98% | 109 → 357 | 80% → 84% |
+| 5 | 2 | 67% → 92% | 74% → 93% | 229 → 445 | 82% → 75% |
+| 5 | 3 | 74% → 88% | 47% → 91% | 202 → 354 | 74% → 73% |
+| 5 | 4 | 79% → 90% | 90% → 89% | 179 → 331 | 48% → 81% |
+
+What the troops learned to prioritise: healers send about three quarters of their heals to the Paladin, the tank in front. They learn this even in solo training, and team training keeps it. The "most hurt" ally is not always the right pick: the Archer often has less health left but is out of danger behind the Paladin.
+
+Under the new rules, team training helped on 7 of 8 runs and drew on the 8th. Teams trained together won 88 to 99% of team drills, against 34 to 92% for the same troops trained apart. The Healer survived far more often and healed more on every run. Level 1 and level 5 teams ended up about the same, because this team's basic heals are single target anyway. Reach matters most for Mages, Warlocks and Holy Wand users. Their strength at each level has not been re-measured yet.
 
 ## In one line
 
