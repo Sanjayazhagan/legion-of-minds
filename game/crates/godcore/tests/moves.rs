@@ -133,6 +133,7 @@ fn old_saves_grow_new_inputs_and_moves() {
 #[test]
 fn levelling_up_grows_the_brain() {
     let mut t = Troop::new(1, "t".into(), BaseClass::Mage.spec(), 5);
+    t.brain = None; // a troop from before players picked brain sizes
     assert_eq!(t.actor.dims[1], hidden_for_level(1));
     let small = t.brain_params();
     while t.level < 5 {
@@ -227,4 +228,29 @@ fn specialists_master_their_moves_sooner_than_mixes() {
     let mut w = World::new(10);
     let (a, b) = (w.add_troop(&pure.spec, 5.0, 5.0, Control::External, 0), w.add_troop(&jack.spec, 6.0, 5.0, Control::External, 1));
     assert!(w.units[a].moves[Move::Block as usize] > w.units[b].moves[Move::Block as usize]);
+}
+
+#[test]
+fn players_pick_the_brain_size() {
+    let mut t = Troop::new(1, "t".into(), BaseClass::Fighter.spec(), 5);
+    assert_eq!(t.hidden(), 64);
+    t.level_up();
+    assert_eq!(t.hidden(), 64, "picked brains don't grow on their own");
+    let small = t.actor.clone();
+    assert!(t.set_brain(256));
+    assert_eq!(t.actor.dims, godcore::ppo::actor_dims_h(256));
+    assert!(!t.set_brain(128), "brains never shrink");
+    assert!(!t.set_brain(200), "only listed sizes");
+    assert_eq!(t.next_brain(), None);
+    // Growing keeps what it learned.
+    let x: Vec<f32> = (0..OBS_DIM).map(|k| (k as f32 * 0.7).cos()).collect();
+    let (mut c1, mut c2) = (Cache::default(), Cache::default());
+    small.forward(&x, &mut c1);
+    t.actor.forward(&x, &mut c2);
+    for a in 0..N_ACTIONS {
+        assert!((small.output(&c1)[a] - t.actor.output(&c2)[a]).abs() < 1e-4);
+    }
+    // The pick survives a save.
+    let back = Troop::load_json(&t.save_json()).unwrap();
+    assert_eq!(back.hidden(), 256);
 }

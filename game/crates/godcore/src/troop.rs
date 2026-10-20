@@ -4,7 +4,7 @@
 use crate::classes::ClassSpec;
 use crate::env::EpisodeInfo;
 use crate::nn::Mlp;
-use crate::ppo::{actor_dims, critic_dims, new_actor_for, new_critic_for};
+use crate::ppo::{actor_dims_h, critic_dims_h, hidden_for_level, new_actor_for, new_critic_for, HIDDEN_SIZES};
 use crate::rng::Rng;
 use crate::moves::{practice_of, Move};
 use crate::weapons::{mastery_level, Weapon};
@@ -115,6 +115,10 @@ pub struct Troop {
     /// Training steps of practice with each class move.
     #[serde(default)]
     pub move_xp: BTreeMap<Move, u64>,
+    /// Neurons per layer the player picked. None for troops from before the
+    /// choice existed: their brain grows with level as it used to.
+    #[serde(default)]
+    pub brain: Option<usize>,
 }
 
 /// Starting score for actions a grown brain has never tried (dodge, block,
@@ -138,7 +142,35 @@ impl Troop {
             sessions: 0,
             mastery: BTreeMap::new(),
             move_xp: BTreeMap::new(),
+            brain: Some(crate::ppo::HIDDEN),
         }
+    }
+
+    /// Neurons per layer the brain has now.
+    pub fn hidden(&self) -> usize {
+        self.actor.dims[1]
+    }
+
+    /// Neurons per layer the brain should have: the player's pick, or for
+    /// older troops with no pick, the size for their level.
+    pub fn target_hidden(&self) -> usize {
+        self.brain.unwrap_or_else(|| hidden_for_level(self.level))
+    }
+
+    /// The player picks a brain size. Brains can grow (keeping what they
+    /// learned) but never shrink. Returns false if the size isn't allowed.
+    pub fn set_brain(&mut self, h: usize) -> bool {
+        if !HIDDEN_SIZES.contains(&h) || h < self.hidden() {
+            return false;
+        }
+        self.brain = Some(h);
+        self.upgrade_brain();
+        true
+    }
+
+    /// The next bigger brain size, if there is one.
+    pub fn next_brain(&self) -> Option<usize> {
+        HIDDEN_SIZES.iter().copied().find(|&h| h > self.hidden())
     }
 
     pub fn weapon(&self) -> Weapon {
@@ -195,12 +227,13 @@ impl Troop {
         }
     }
 
-    /// Bring the brain up to the size and shape this level calls for,
+    /// Bring the brain up to the chosen size and the current input shape,
     /// keeping everything it learned. Returns true if it changed.
     pub fn upgrade_brain(&mut self) -> bool {
         let mut rng = Rng::new(self.seed ^ 0x6272_6169_6e00 ^ self.level as u64);
         let mut changed = false;
-        let target = actor_dims(self.level);
+        let h = self.target_hidden();
+        let target = actor_dims_h(h);
         if self.actor.dims != target {
             // Never shrink a brain that is already bigger.
             let dims: Vec<usize> = target.iter().zip(&self.actor.dims).map(|(t, o)| *t.max(o)).collect();
@@ -209,7 +242,7 @@ impl Troop {
                 changed = true;
             }
         }
-        let target = critic_dims(self.level);
+        let target = critic_dims_h(h);
         if self.critic.dims != target && self.critic.dims.len() == target.len() {
             let dims: Vec<usize> = target.iter().zip(&self.critic.dims).map(|(t, o)| *t.max(o)).collect();
             if let Some(c) = self.critic.grow(&dims, 0.0, &mut rng) {
@@ -220,7 +253,7 @@ impl Troop {
         changed
     }
 
-    /// Level up (the caller pays) and grow the brain to match.
+    /// Level up (the caller pays). Troops with no brain pick grow with level.
     pub fn level_up(&mut self) {
         self.level += 1;
         self.upgrade_brain();
