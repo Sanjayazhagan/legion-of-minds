@@ -1,6 +1,6 @@
 //! Profiles, renaming, the leaderboard and publishing a base.
 
-use crate::auth::{clean_name, AuthUser, SameRules};
+use crate::auth::{clean_name, AuthUser, SameRulesJson};
 use crate::error::{ApiError, ApiResult};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
@@ -110,9 +110,8 @@ pub async fn leaderboard(
 /// Checked and stored as a new immutable snapshot.
 pub async fn publish_base(
     State(st): State<AppState>,
-    _v: SameRules,
     user: AuthUser,
-    Json(snap): Json<BaseSnapshot>,
+    SameRulesJson(snap): SameRulesJson<BaseSnapshot>,
 ) -> ApiResult<Json<Published>> {
     let snap = canonical_snapshot(&snap)?;
     let id = Uuid::new_v4();
