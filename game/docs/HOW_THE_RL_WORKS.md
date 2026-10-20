@@ -4,12 +4,12 @@ Every troop has its own small brain that learns by trial and error on your compu
 
 ## 1. What a troop sees
 
-Battles run in ticks (30 a second when you watch). Every tick, each trained troop gets a list of 74 numbers describing its surroundings:
+Battles run in ticks (30 a second when you watch). Every tick, each trained troop gets a list of 88 numbers describing its surroundings:
 
 - **Itself:** where it is on the map, its health, whether its weapon is ready, how much time is left, and whether it can hit a unit, hit a building or heal right now.
 - **The 2 nearest buildings:** where they are, how damaged they are, and whether each one is a tower. Attackers see the buildings they are raiding; defenders see the ones they protect.
 - **The 3 nearest enemies:** where they are, how hurt they are, and whether they are about to strike.
-- **The 2 nearest allies, plus the most injured ally nearby.** Healers use this.
+- **The 2 nearest allies, plus the most injured ally nearby.** Healers use this. For each of the 2 nearest allies it also sees their role (tank, striker, ranged or healer), whether something is attacking them, and whether they are fighting or healing right now (section 10).
 - **The overall picture:** the share of enemy buildings and enemy troops still standing.
 - **Its moves and weapon:** which class moves it has and whether each is ready, whether its weapon skill is ready, whether its guard is up, cloaked or shielded by a ward, how many enemies are close enough for a spin or slam, whether the nearest enemies are stunned or blocking, and which weapon it holds.
 
@@ -39,16 +39,16 @@ Class stats and the weapon decide what those actions achieve: speed, health, ran
 
 ## 3. The brain
 
-The brain is a small neural network: the 74 numbers go in, pass through two layers of "neurons", and come out as a score for each of the 20 actions. Those weights are what training changes. **The player picks the brain size** when recruiting (64, 96, 128, 160, 192 or 256 neurons per layer) and can grow it later in the barracks:
+The brain is a small neural network: the 88 numbers go in, pass through two layers of "neurons", and come out as a score for each of the 20 actions. Those weights are what training changes. **The player picks the brain size** when recruiting (64, 96, 128, 160, 192 or 256 neurons per layer) and can grow it later in the barracks:
 
 | Neurons per layer | Numbers in the brain | Training speed (4-core test machine) |
 |---|---|---|
-| 64 | 10,260 | about 7,500 steps/s |
-| 96 | 18,452 | about 4,600 steps/s |
-| 128 | 28,692 | about 2,900 steps/s |
-| 160 | 40,980 | about 2,300 steps/s |
-| 192 | 55,316 | not measured |
-| 256 | 90,132 | about 1,050 steps/s |
+| 64 | 11,156 | about 7,500 steps/s |
+| 96 | 19,796 | about 4,600 steps/s |
+| 128 | 30,484 | about 2,900 steps/s |
+| 160 | 43,220 | about 2,300 steps/s |
+| 192 | 58,004 | not measured |
+| 256 | 93,716 | about 1,050 steps/s |
 
 Growing keeps everything the troop learned: the new neurons start with no say in its choices and are trained in from there. A brain never shrinks. Troops from before the choice existed keep growing with their level as they used to (64 at levels 1-2, then 96, 128, 160).
 
@@ -161,6 +161,41 @@ A mix gets these moves at full strength, not weaker copies. What it costs is **p
 - a Fighter 40 / Archer 30 / Assassin 30 mix (5 moves) needs 1.5M steps to master the same Block, and after 300k steps its Block is still at 52% strength where the Fighter's is at 70%.
 
 The brain also has more choices to learn when to use. A mix can do more things, but a specialist does its few things better for the same training time. The recruit screen shows the kit and how long it takes to master, and the barracks shows how practised each move is.
+
+## 10. Team training
+
+Normal squad drills put a troop next to scripted fighters, so it learns to stick with allies but never learns a real teammate. **Team training** puts 2 to 5 of your own troops of one side (attackers or defenders) into the same drills:
+
+- **Each troop keeps its own brain.** A Paladin learns to be the Paladin of *this* team, and the Healer learns to keep *that* Paladin alive.
+- **Teammates are visible.** Each troop sees its 2 nearest teammates' roles, whether they are under attack and whether they are fighting or healing.
+- **Shared reward.** Each troop's reward is 50% its own (from its own class and plan) and 50% the team's average, so saving a teammate or finishing the building a teammate is hitting pays off.
+- **Fair training time.** Every troop's own decisions count as its training: towards its level cap, weapon mastery and move practice. A team of 3 takes about 3 times as long as one troop.
+
+Team raids face a bigger base than solo raids (3 towers, a core and 5 guards, plus 2 guards for each troop above 3). Team defences fight a raid that grows with the team, and the built-in guards only appear when the team has no frontline troop of its own. Half the drills can use your own trained troops of the other side, as in normal training.
+
+### Does it work? (measured)
+
+Two teams, each trained 2 ways with the same total budget per troop (600k steps): **apart** (600k solo) and **together** (300k solo then 300k team training). 2 seeds each, 300 team drills per check.
+
+| Team | Seed | Team drill wins, apart → together | What changed |
+|---|---|---|---|
+| Paladin + Archer + Healer (attack) | 1 | 45% → 65% | Healer heals 220 → 324 per drill, Healer alive at the end 51% → 74% |
+| | 2 | 91% → 90% | Healer heals 205 → 339, Healer alive 67% → 89%, Paladin alive 80% → 94% |
+| Guard + Sentry + Keeper (defence) | 1 | 89% → 99.7% | Base damage 14% → 1%, Guard alive 63% → 97%, Keeper alive 62% → 94% |
+| | 2 | 99% → 99.7% | Guard alive 83% → 98%, Keeper alive 85% → 99.7% |
+
+The clearest change is behaviour, and it shows on every run: troops trained together keep each other alive. The Healer heals far more and the frontline survives far longer. Win rates went up a lot on one seed and stayed level on the other, which was already near the top.
+
+Those drills are the kind the "together" troops trained in, so the attack teams were also sent against the 4 real enemy bases (one battle each):
+
+| Base | Seed 1 apart | Seed 1 together | Seed 2 apart | Seed 2 together |
+|---|---|---|---|---|
+| Outpost | win, 282 ticks | win, 217 ticks | win, 235 ticks | win, 221 ticks |
+| Fort | win, 401 ticks | win, 306 ticks | win, 2 troops left | win, all 3 left |
+| Twin Gate | lost, 38% | lost, 26% | lost, 65% | **win, 100%** |
+| Citadel | lost, 7% | 9%, 1 troop still alive at time out | lost, 5% | lost, 15% |
+
+Together-trained teams won the easy bases faster with nobody lost, and seed 2 took Twin Gate, which no apart team managed. Seed 1 did worse at Twin Gate. Nobody can beat Citadel yet. Short version: team training makes troops play as a team, and it usually helps, but it is not a guaranteed win, and run-to-run luck still matters.
 
 ## In one line
 

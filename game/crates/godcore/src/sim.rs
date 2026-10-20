@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 pub const ARENA: f32 = 32.0;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
-pub const SIM_VERSION: u32 = 3;
-pub const OBS_DIM: usize = 74;
+pub const SIM_VERSION: u32 = 4;
+pub const OBS_DIM: usize = 88;
 pub const N_ACTIONS: usize = 20;
 /// The first observation features and actions, as they were before dodge,
 /// block and skills (brains from older saves are grown from these).
@@ -244,6 +244,44 @@ pub struct Trap {
     pub owner: usize,
     pub power: f32,
     pub ttl: u32,
+}
+
+/// A unit's job in a team, as its teammates see it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Holds the front: melee with a block.
+    Tank,
+    /// Melee damage without a block.
+    Striker,
+    /// Fights from range.
+    Ranged,
+    /// Heals.
+    Healer,
+}
+
+impl Role {
+    pub const ALL: [Role; 4] = [Role::Tank, Role::Striker, Role::Ranged, Role::Healer];
+
+    /// The role a troop of this class mix plays.
+    pub fn of_spec(spec: &ClassSpec) -> Role {
+        let mut w = World::new(1);
+        let i = w.add_troop(spec, 1.0, 1.0, Control::External, 0);
+        w.units[i].role()
+    }
+}
+
+impl Unit {
+    pub fn role(&self) -> Role {
+        if self.heal >= 5.0 {
+            Role::Healer
+        } else if self.range >= 2.5 {
+            Role::Ranged
+        } else if self.moves[Move::Block as usize] > 0.0 {
+            Role::Tank
+        } else {
+            Role::Striker
+        }
+    }
 }
 
 /// What happened this tick, for drawing.
@@ -824,6 +862,26 @@ impl World {
         }
         put(&mut o, (me.cloak > 0) as u8 as f32);
         put(&mut o, (me.ward > 0) as u8 as f32);
+        // The two nearest allies again, for teamwork (sim version 4): their
+        // role, whether something is attacking them, and whether they are
+        // fighting or healing right now (7 each).
+        for s in 0..2 {
+            if let Some(&(j, _)) = al.get(s) {
+                let u = &self.units[j];
+                let role = u.role();
+                for r in Role::ALL {
+                    put(&mut o, (role == r) as u8 as f32);
+                }
+                put(&mut o, self.threat(j).is_some() as u8 as f32);
+                let a = u.last_action;
+                put(&mut o, matches!(a, ACT_HIT_UNIT | ACT_HIT_BUILDING | ACT_SKILL | ACT_CHARGE) as u8 as f32);
+                put(&mut o, (a == ACT_HEAL || a == ACT_WARD) as u8 as f32);
+            } else {
+                for _ in 0..7 {
+                    put(&mut o, 0.0);
+                }
+            }
+        }
         debug_assert_eq!(k, OBS_DIM);
         o
     }

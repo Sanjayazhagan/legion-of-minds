@@ -218,6 +218,94 @@ fn main() {
                 steps as f32 / secs
             );
         }
+        Some("team") => {
+            // godctl team --troops a.json,b.json --steps N [--seed S] [--vs d.json,..] [--suffix .team]
+            let files: Vec<String> = arg(&args, "--troops").expect("--troops a.json,b.json").split(',').map(String::from).collect();
+            let mut troops: Vec<Troop> = files.iter().map(|f| Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap()).collect();
+            let specs: Vec<_> = troops.iter().map(|t| t.spec.clone()).collect();
+            if let Some(p) = godcore::team::team_problem(&specs) {
+                panic!("{p}");
+            }
+            let steps: u64 = arg(&args, "--steps").map(|s| s.parse().unwrap()).unwrap_or(300_000);
+            let seed: u64 = arg(&args, "--seed").map(|s| s.parse().unwrap()).unwrap_or(1);
+            let suffix = arg(&args, "--suffix").unwrap_or(".team".into());
+            let pool = arg(&args, "--vs").map(|list| {
+                std::sync::Arc::new(
+                    list.split(',')
+                        .map(|f| {
+                            let t = Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap();
+                            (t.spec, t.actor)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            });
+            for t in &troops {
+                println!("{} ({}), brain {:?}", t.name, t.spec.name, t.actor.dims);
+            }
+            let mut tr = godcore::team::TeamTrainer::for_troops(&troops, seed, PpoConfig::default(), pool);
+            let t0 = std::time::Instant::now();
+            let mut recent: Vec<EpisodeInfo> = Vec::new();
+            while tr.members.iter().map(|m| m.steps).min().unwrap_or(0) < steps {
+                let rep = tr.iterate();
+                recent.extend_from_slice(&rep.episodes);
+                let keep = recent.len().saturating_sub(300);
+                recent.drain(..keep);
+                println!("{:>8} steps each  {:5.1}s/it  {}", tr.members[0].steps, rep.seconds, summary(&recent));
+            }
+            tr.finish(&mut troops, &recent);
+            for (t, f) in troops.iter().zip(&files) {
+                let out = format!("{}{}.json", f.trim_end_matches(".json"), suffix);
+                std::fs::write(&out, t.save_json()).unwrap();
+                println!("{} -> {out}", t.name);
+            }
+            println!("team trained in {:.0}s", t0.elapsed().as_secs_f32());
+        }
+        Some("teameval") => {
+            // godctl teameval a.json,b.json [n]: the team plays fixed team drills with no randomness.
+            let troops: Vec<Troop> = args[2].split(',').map(|f| Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap()).collect();
+            let n: u64 = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(200);
+            let specs: Vec<_> = troops.iter().map(|t| t.spec.clone()).collect();
+            let k = troops.len();
+            let (mut wins, mut destr) = (0, 0.0);
+            let mut alive = vec![0u32; k];
+            let (mut dmg, mut heal, mut blocked) = (vec![0.0f32; k], vec![0.0f32; k], vec![0.0f32; k]);
+            let mut cache = godcore::nn::Cache::default();
+            for s in 0..n {
+                let mut env = godcore::team::TeamEnv::new(specs.clone(), 70_000 + s, None);
+                loop {
+                    let acts: Vec<u8> = (0..k)
+                        .map(|j| if env.active(j) { godcore::ppo::greedy_action(&troops[j].actor, &env.obs(j), &env.mask(j), &mut cache) } else { 0 })
+                        .collect();
+                    // Read the end state before the env resets itself.
+                    let before: Vec<_> = (0..k).map(|j| (env.world.units[j].alive, env.world.units[j].stats)).collect();
+                    let out = env.act(&acts);
+                    if let Some(e) = out.episode {
+                        wins += e.won as u32;
+                        destr += e.destruction;
+                        for j in 0..k {
+                            let (a, st) = before[j];
+                            alive[j] += (a && !out.done.is_empty()) as u32;
+                            dmg[j] += st.unit_dmg + st.building_dmg;
+                            heal[j] += st.heal;
+                            blocked[j] += st.blocked;
+                        }
+                        break;
+                    }
+                }
+            }
+            let nf = n as f32;
+            println!("team wins {:.1}%  destruction {:.0}%", wins as f32 / nf * 100.0, destr / nf * 100.0);
+            for j in 0..k {
+                println!(
+                    "  {:<28} alive at end {:>5.1}%  damage {:>6.1}  healed {:>5.1}  blocked {:>5.1}",
+                    troops[j].spec.name,
+                    alive[j] as f32 / nf * 100.0,
+                    dmg[j] / nf,
+                    heal[j] / nf,
+                    blocked[j] / nf
+                );
+            }
+        }
         Some("eval") => {
             let t = Troop::load_json(&std::fs::read_to_string(&args[2]).unwrap()).unwrap();
             if t.spec.role == godcore::classes::Role::Defend {

@@ -119,6 +119,9 @@ pub struct Troop {
     /// choice existed: their brain grows with level as it used to.
     #[serde(default)]
     pub brain: Option<usize>,
+    /// Training steps spent in team training (also counted in `steps`).
+    #[serde(default)]
+    pub team_steps: u64,
 }
 
 /// Starting score for actions a grown brain has never tried (dodge, block,
@@ -143,6 +146,7 @@ impl Troop {
             mastery: BTreeMap::new(),
             move_xp: BTreeMap::new(),
             brain: Some(crate::ppo::HIDDEN),
+            team_steps: 0,
         }
     }
 
