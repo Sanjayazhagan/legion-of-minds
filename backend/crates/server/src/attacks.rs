@@ -2,7 +2,7 @@
 //! on their own machine, and sends their army and placement. The server
 //! re-runs the raid with the same code; its result is the one that counts.
 
-use crate::auth::{AuthUser, SameRules};
+use crate::auth::{AuthUser, SameRules, SameRulesJson};
 use crate::error::{ApiError, ApiResult};
 use crate::players::{load_user, public};
 use crate::AppState;
@@ -103,10 +103,9 @@ const GRACE_SECS: i64 = 60;
 
 pub async fn submit(
     State(st): State<AppState>,
-    _v: SameRules,
     user: AuthUser,
     Path(attack_id): Path<Uuid>,
-    Json(req): Json<AttackSubmit>,
+    SameRulesJson(req): SameRulesJson<AttackSubmit>,
 ) -> ApiResult<Json<AttackOutcome>> {
     let row: Option<(Uuid, String, String, DateTime<Utc>, i32)> = sqlx::query_as(
         "SELECT a.defender_id, a.status, s.data, a.expires_at, a.sim_version

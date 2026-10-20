@@ -8,13 +8,15 @@
 use crate::error::{ApiError, ApiResult};
 use crate::players::load_user;
 use crate::AppState;
-use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::body::Bytes;
+use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use serde::de::DeserializeOwned;
 use bag_protocol::{
     AuthResponse, DevLoginRequest, LoginPoll, LoginPollResponse, LoginStart, LoginStartRequest,
     Providers, MAX_NAME, SIM_VERSION, SIM_VERSION_HEADER,
@@ -96,26 +98,47 @@ impl FromRequestParts<AppState> for AuthUser {
 /// only works when both sides run the same rules.
 pub struct SameRules;
 
+fn same_rules(headers: &HeaderMap) -> Result<(), ApiError> {
+    let theirs = headers
+        .get(SIM_VERSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u32>().ok());
+    if theirs == Some(SIM_VERSION) {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "update_required",
+            format!("this server runs battle rules v{SIM_VERSION}; update the game to play online"),
+        ))
+    }
+}
+
 impl FromRequestParts<AppState> for SameRules {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, _: &AppState) -> Result<Self, ApiError> {
-        let theirs = parts
-            .headers
-            .get(SIM_VERSION_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u32>().ok());
-        if theirs == Some(SIM_VERSION) {
-            Ok(SameRules)
-        } else {
-            Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "update_required",
-                format!(
-                    "this server runs battle rules v{SIM_VERSION}; update the game to play online"
-                ),
-            ))
-        }
+        same_rules(&parts.headers).map(|()| SameRules)
+    }
+}
+
+/// A JSON body from a game on the same battle rules. Unlike `SameRules`, it
+/// reads the whole body before answering `update_required`: answering first
+/// drops the connection while a big upload (a base, an army) is still being
+/// sent, and the old game sees a broken pipe instead of the 409.
+pub struct SameRulesJson<T>(pub T);
+
+impl<T: DeserializeOwned> FromRequest<AppState> for SameRulesJson<T> {
+    type Rejection = Response;
+
+    async fn from_request(req: Request, st: &AppState) -> Result<Self, Response> {
+        let rules = same_rules(req.headers());
+        let body = Bytes::from_request(req, st)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        rules.map_err(IntoResponse::into_response)?;
+        let Json(v) = Json::<T>::from_bytes(&body).map_err(IntoResponse::into_response)?;
+        Ok(SameRulesJson(v))
     }
 }
 

@@ -233,9 +233,13 @@ async fn tampered_raids_are_caught() {
         assert_eq!(raw(&godcore::sim::SIM_VERSION.to_string()).status(), 422);
 
         // A game on different battle rules can't publish or raid.
-        let old = raw("1");
-        assert_eq!(old.status(), 409);
-        assert!(old.text().unwrap().contains("update_required"));
+        // Every time, not just when the server happens to read the upload
+        // before answering.
+        for _ in 0..20 {
+            let old = raw("1");
+            assert_eq!(old.status(), 409);
+            assert!(old.text().unwrap().contains("update_required"));
+        }
     })
     .await;
 }
