@@ -274,8 +274,12 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
     }
     // Weapon mastery comes from training time with each weapon, which can't
     // add up to more than the troop's total training.
-    if t.mastery.values().sum::<u64>() > t.steps {
+    if total(t.mastery.values()) > t.steps {
         return bad("troop has more weapon training than training");
+    }
+    // Class moves share the troop's training time between them.
+    if total(t.move_xp.values()) > t.steps {
+        return bad("troop has more move practice than training");
     }
     let mut spec = spec;
     spec.weapon = t.spec.weapon;
@@ -284,7 +288,7 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
         return bad("troop brain has invalid numbers");
     }
     let name: String = t.name.trim().chars().take(MAX_NAME).collect();
-    Ok(Troop {
+    let mut out = Troop {
         id: t.id,
         name: if name.is_empty() { "Troop".into() } else { name },
         spec,
@@ -300,7 +304,17 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
         seed: t.seed,
         sessions: t.sessions,
         mastery: t.mastery.clone(),
-    })
+        move_xp: t.move_xp.clone(),
+    };
+    // Move practice comes from the troop's own practice record, never from
+    // the client's copy in the spec.
+    out.sync_moves();
+    Ok(out)
+}
+
+/// Sum without wrapping, so huge values can't overflow past a check.
+fn total<'a>(v: impl Iterator<Item = &'a u64>) -> u64 {
+    v.fold(0u64, |a, b| a.saturating_add(*b))
 }
 
 fn finite(x: f32, y: f32) -> bool {
@@ -633,6 +647,48 @@ mod tests {
         let mut b = a.clone();
         b[0].troop.mastery.insert(Weapon::Daggers, 290_000);
         assert!(canonical_army(&b, 1).is_err());
+    }
+
+    #[test]
+    fn move_practice_comes_from_the_practice_record() {
+        use godcore::moves::Move;
+        let mut a = army();
+        // A Battle Priest (fighter and healer moves) trained 200k steps.
+        let t = &mut a[0].troop;
+        t.spec = ClassSpec::blend(&[(BaseClass::Fighter, 50.0), (BaseClass::Healer, 50.0)]);
+        t.add_training(200_000);
+        let real = t.spec.move_practice;
+        assert!(real.iter().any(|p| *p > 0.0), "has practised moves");
+        let c = canonical_army(&a, 1).unwrap();
+        assert_eq!(c[0].troop.spec.move_practice, real);
+        assert_eq!(c[0].troop.move_xp, a[0].troop.move_xp);
+        let s = canonical_snapshot(&snapshot()).unwrap();
+        assert_eq!(run_raid(&s, &a), run_raid(&s, &c));
+
+        // Claimed full strength without the practice is reset.
+        let mut b = a.clone();
+        b[0].troop.spec.move_practice = [1.0; godcore::moves::N_MOVES];
+        assert_eq!(canonical_army(&b, 1).unwrap()[0].troop.spec.move_practice, real);
+
+        // Practice for a move the classes don't have counts for nothing.
+        let mut b = a.clone();
+        b[0].troop.steps += 10;
+        b[0].troop.move_xp.insert(Move::Blink, 10);
+        let c = canonical_army(&b, 1).unwrap();
+        assert_eq!(c[0].troop.spec.move_practice[Move::Blink as usize], 0.0);
+
+        // Practice can't add up to more than the training, even by overflow.
+        let mut b = a.clone();
+        b[0].troop.move_xp.insert(Move::Charge, 250_000);
+        assert!(canonical_army(&b, 1).is_err());
+        let mut b = a.clone();
+        b[0].troop.move_xp.insert(Move::Block, u64::MAX);
+        b[0].troop.move_xp.insert(Move::Charge, 2);
+        assert!(canonical_army(&b, 1).is_err(), "wrapping sum");
+        let mut b = a.clone();
+        b[0].troop.mastery.insert(godcore::weapons::Weapon::Daggers, u64::MAX);
+        b[0].troop.mastery.insert(godcore::weapons::Weapon::Crossbow, 2);
+        assert!(canonical_army(&b, 1).is_err(), "wrapping mastery sum");
     }
 
     #[test]
