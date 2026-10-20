@@ -5,6 +5,7 @@ use godcore::nn::{Cache, Mlp};
 use godcore::ppo::{actor_dims, hidden_for_level};
 use godcore::rng::Rng;
 use godcore::sim::*;
+use godcore::sim::Role;
 use godcore::troop::Troop;
 use godcore::moves::Move;
 use godcore::weapons::{mastery_level, Weapon};
@@ -253,4 +254,84 @@ fn players_pick_the_brain_size() {
     // The pick survives a save.
     let back = Troop::load_json(&t.save_json()).unwrap();
     assert_eq!(back.hidden(), 256);
+}
+
+#[test]
+fn teammates_see_each_others_roles() {
+    let mut w = World::new(900);
+    let tank = w.add_troop(&BaseClass::Paladin.spec(), 10.0, 10.0, Control::External, 0);
+    let healer = w.add_troop(&BaseClass::Healer.spec(), 11.0, 10.0, Control::External, 1);
+    w.add_guard(9.0, 10.0);
+    w.add_core(25.0, 25.0);
+    assert_eq!(w.units[tank].role(), Role::Tank);
+    assert_eq!(w.units[healer].role(), Role::Healer);
+    let o = w.observe(healer);
+    // The healer's nearest ally is the tank, and the guard is on it.
+    let base = OBS_DIM - 16;
+    assert_eq!(&o[base..base + 4], &[1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(o[base + 4], 1.0, "the tank is under threat");
+}
+
+#[test]
+fn a_team_trains_together_and_keeps_its_own_brains() {
+    use godcore::team::{team_problem, TeamTrainer};
+    let a = Troop::new(1, "a".into(), BaseClass::Paladin.spec(), 1);
+    let b = Troop::new(2, "b".into(), BaseClass::Healer.spec(), 2);
+    let g = Troop::new(3, "g".into(), BaseClass::Guard.spec(), 3);
+    assert!(team_problem(&[a.spec.clone(), g.spec.clone()]).is_some(), "attackers and defenders can't mix");
+    let mut troops = vec![a, b];
+    let cfg = godcore::ppo::PpoConfig { n_envs: 2, n_steps: 64, ..Default::default() };
+    let before = troops[1].actor.params.clone();
+    let mut tr = TeamTrainer::for_troops(&troops, 7, cfg, None);
+    let rep = tr.iterate();
+    assert!(rep.steps.iter().all(|&s| s > 0));
+    tr.finish(&mut troops, &rep.episodes);
+    assert!(troops.iter().all(|t| t.steps > 0 && t.team_steps == t.steps));
+    assert_ne!(troops[1].actor.params, before, "the healer's own brain learned");
+    assert_ne!(troops[0].actor.params, troops[1].actor.params);
+}
+
+#[test]
+fn healers_choose_whom_to_heal() {
+    let mut w = World::new(900);
+    let healer = w.add_troop(&BaseClass::Healer.spec(), 10.0, 10.0, Control::External, 0);
+    let near = w.add_troop(&BaseClass::Fighter.spec(), 11.0, 10.0, Control::External, 1);
+    let far = w.add_troop(&BaseClass::Fighter.spec(), 10.0, 12.0, Control::External, 2);
+    w.add_core(25.0, 25.0);
+    w.units[near].hp -= 20.0;
+    w.units[far].hp -= 30.0;
+    let m = w.mask(healer);
+    assert!(m[ACT_HEAL as usize] && m[ACT_HEAL_2 as usize]);
+    // Healing the nearest ally leaves the more hurt one alone: the troop
+    // picks, the sim no longer does.
+    let before = w.units[near].hp;
+    act(&mut w, healer, ACT_HEAL);
+    assert!(w.units[near].hp > before);
+    assert_eq!(w.units[far].max_hp - w.units[far].hp, 30.0);
+}
+
+#[test]
+fn talents_reach_more_units_with_level() {
+    let mut t = Troop::new(1, "Nova".into(), BaseClass::Healer.spec(), 3);
+    assert_eq!(t.spec.talents, 1);
+    for _ in 0..4 {
+        t.level_up();
+    }
+    assert_eq!(t.spec.talents, 4);
+    // A level 1 Healing Nova heals one ally, the most hurt.
+    let mut spec = BaseClass::Healer.spec();
+    spec.weapon = Some(Weapon::HolyWand);
+    spec.talents = 1;
+    let mut w = World::new(900);
+    let me = w.add_troop(&spec, 10.0, 10.0, Control::External, 0);
+    let a = w.add_troop(&BaseClass::Fighter.spec(), 11.0, 10.0, Control::External, 1);
+    let b = w.add_troop(&BaseClass::Fighter.spec(), 10.0, 11.0, Control::External, 2);
+    w.add_core(25.0, 25.0);
+    w.units[a].hp -= 10.0;
+    w.units[b].hp -= 40.0;
+    w.units[me].skill_cd = 0;
+    assert!(w.mask(me)[ACT_SKILL as usize]);
+    act(&mut w, me, ACT_SKILL);
+    assert_eq!(w.units[a].max_hp - w.units[a].hp, 10.0, "only one ally healed");
+    assert!(w.units[b].max_hp - w.units[b].hp < 40.0);
 }

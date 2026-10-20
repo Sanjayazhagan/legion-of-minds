@@ -501,3 +501,81 @@ pub const WAVES: [Wave; 4] = [
 
 /// Where a wave or an invading army enters the home base: bottom-left edge.
 pub const RAID_ENTRY: (f32, f32) = (4.0, 4.0);
+
+// ------------------------------------------------------------- team drills
+
+/// Fewest and most troops a team can train together.
+pub const MIN_TEAM: usize = 2;
+pub const MAX_TEAM: usize = 5;
+
+/// A team raid: the team's troops are units 0..n, in order. A team smaller
+/// than 3 is topped up with scripted fighters; a bigger one faces more guards.
+pub fn build_team_drill(team: &[ClassSpec], rng: &mut Rng) -> World {
+    let mut w = World::new(DRILL_TICKS);
+    let tx = C + rng.range(-2.0, 2.0);
+    let ty = C + rng.range(-2.0, 2.0);
+    let dist = rng.range(7.5, 10.5);
+    let (sx, sy) = around(rng, tx, ty, dist);
+    for (k, spec) in team.iter().enumerate() {
+        let (x, y) = if k == 0 { (sx, sy) } else { around(rng, sx, sy, 1.0) };
+        w.add_troop(spec, x, y, Control::External, k);
+    }
+    let fighter = crate::classes::BaseClass::Fighter.spec();
+    for _ in team.len()..3 {
+        let (fx, fy) = around(rng, sx, sy, 1.0);
+        w.add_troop(&fighter, fx, fy, Control::Scripted, 0);
+    }
+    let (ux, uy) = rng.unit_vec();
+    w.add_core(tx, ty);
+    const S: f32 = 0.866_025_4;
+    for (c, s) in [(1.0f32, 0.0f32), (-0.5, S), (-0.5, -S)] {
+        let (rx, ry) = (ux * c - uy * s, ux * s + uy * c);
+        w.add_tower(
+            (tx + rx * SQUAD_TOWER_R).clamp(1.0, ARENA - 1.0),
+            (ty + ry * SQUAD_TOWER_R).clamp(1.0, ARENA - 1.0),
+        );
+    }
+    for _ in 0..SQUAD_GUARDS + 2 * team.len().saturating_sub(3) {
+        let (gx, gy) = around(rng, tx, ty, 2.5);
+        w.add_guard(gx, gy);
+    }
+    w
+}
+
+/// A team defence: the team's defenders are units 0..n, in order, around a
+/// core and towers. Built-in guards hold the front only when the team has no
+/// melee troop of its own. Returns the world and where the raid comes from.
+pub fn build_team_defense(team: &[ClassSpec], rng: &mut Rng) -> (World, (f32, f32)) {
+    let mut w = World::new(DRILL_TICKS);
+    let cx = C + rng.range(-2.0, 2.0);
+    let cy = C + rng.range(-2.0, 2.0);
+    for (k, spec) in team.iter().enumerate() {
+        let (x, y) = around(rng, cx, cy, 2.5);
+        w.add_troop_on(crate::sim::Team::Defend, spec, x, y, Control::External, k);
+    }
+    w.add_core(cx, cy);
+    if team.iter().all(|s| s.range > 2.5 || s.can_heal()) {
+        let g = crate::classes::BaseClass::Guard.spec();
+        for _ in 0..2 {
+            let (x, y) = around(rng, cx, cy, 3.0);
+            let i = w.add_guard(x, y);
+            let u = &mut w.units[i];
+            u.max_hp = g.hp;
+            u.hp = g.hp;
+            u.dmg = g.dmg;
+            u.cd_max = g.cooldown;
+        }
+    }
+    let towers = if rng.chance(0.5) { 1 } else { 2 };
+    let (ux, uy) = rng.unit_vec();
+    for t in 0..towers {
+        let s = if t == 0 { 1.0 } else { -1.0 };
+        w.add_tower(cx + s * uy * 3.5, cy - s * ux * 3.5);
+    }
+    let dist = rng.range(9.0, 16.0);
+    let from = (
+        (cx + ux * dist).clamp(1.0, ARENA - 1.0),
+        (cy + uy * dist).clamp(1.0, ARENA - 1.0),
+    );
+    (w, from)
+}

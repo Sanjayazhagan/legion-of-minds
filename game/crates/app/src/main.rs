@@ -11,6 +11,7 @@ mod home;
 mod recruit;
 mod render;
 mod scene;
+mod teamtrain;
 mod save;
 mod tournament;
 mod training;
@@ -34,6 +35,7 @@ pub enum Screen {
     Home(home::HomeState),
     Replay(tournament::ReplayState),
     Armoury(armoury::ArmouryState),
+    Team(teamtrain::TeamState),
 }
 
 pub struct Game {
@@ -113,6 +115,7 @@ fn demo_screen(g: &mut Game) -> Option<Screen> {
         "defend" => Screen::Battle(home::HomeState::demo_battle(g, 1)),
         "build" => Screen::Home(home::HomeState::demo_build(g)),
         "armoury" => Screen::Armoury(armoury::ArmouryState { idx: 0 }),
+        "team" => Screen::Team(teamtrain::TeamState::demo(g)),
         _ => return None,
     })
 }
@@ -198,6 +201,7 @@ async fn main() {
             Screen::Replay(s) => game.replay(s),
             Screen::Home(s) => game.home(s),
             Screen::Armoury(s) => game.armoury(s),
+            Screen::Team(s) => game.team_training(s),
         };
         game.draw_toast();
         frame += 1;

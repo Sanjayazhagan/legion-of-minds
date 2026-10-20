@@ -12,7 +12,7 @@ use godcore::classes::{BaseClass, ClassSpec, TrainPlan};
 use godcore::env::{DrillEnv, EpisodeInfo};
 use godcore::ppo::{PpoConfig, Trainer};
 use godcore::scenario::{Drill, BASES};
-use godcore::sim::Outcome;
+use godcore::sim::{Outcome, ACT_HEAL, ACT_HEAL_2};
 use godcore::troop::{CurvePoint, Skills, Troop};
 
 fn parse_class(s: &str) -> ClassSpec {
@@ -94,6 +94,7 @@ fn main() {
                 None => Troop::new(seed, "Cli".into(), spec, seed),
             };
             troop.level = arg(&args, "--level").map(|s| s.parse().unwrap()).unwrap_or(5);
+            troop.sync_moves();
             match arg(&args, "--brain") {
                 // Neurons per layer; without it a new troop gets the size for its level.
                 Some(h) => assert!(troop.set_brain(h.parse().unwrap()), "brain must be one of {:?} and not smaller than now", godcore::ppo::HIDDEN_SIZES),
@@ -217,6 +218,161 @@ fn main() {
                 secs,
                 steps as f32 / secs
             );
+        }
+        Some("team") => {
+            // godctl team --troops a.json,b.json --steps N [--seed S] [--vs d.json,..] [--suffix .team]
+            let files: Vec<String> = arg(&args, "--troops").expect("--troops a.json,b.json").split(',').map(String::from).collect();
+            let mut troops: Vec<Troop> = files.iter().map(|f| Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap()).collect();
+            let specs: Vec<_> = troops.iter().map(|t| t.spec.clone()).collect();
+            if let Some(p) = godcore::team::team_problem(&specs) {
+                panic!("{p}");
+            }
+            let steps: u64 = arg(&args, "--steps").map(|s| s.parse().unwrap()).unwrap_or(300_000);
+            let seed: u64 = arg(&args, "--seed").map(|s| s.parse().unwrap()).unwrap_or(1);
+            let suffix = arg(&args, "--suffix").unwrap_or(".team".into());
+            let pool = arg(&args, "--vs").map(|list| {
+                std::sync::Arc::new(
+                    list.split(',')
+                        .map(|f| {
+                            let t = Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap();
+                            (t.spec, t.actor)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            });
+            for t in &troops {
+                println!("{} ({}), brain {:?}", t.name, t.spec.name, t.actor.dims);
+            }
+            let mut tr = godcore::team::TeamTrainer::for_troops(&troops, seed, PpoConfig::default(), pool);
+            let t0 = std::time::Instant::now();
+            let mut recent: Vec<EpisodeInfo> = Vec::new();
+            while tr.members.iter().map(|m| m.steps).min().unwrap_or(0) < steps {
+                let rep = tr.iterate();
+                recent.extend_from_slice(&rep.episodes);
+                let keep = recent.len().saturating_sub(300);
+                recent.drain(..keep);
+                println!("{:>8} steps each  {:5.1}s/it  {}", tr.members[0].steps, rep.seconds, summary(&recent));
+            }
+            tr.finish(&mut troops, &recent);
+            for (t, f) in troops.iter().zip(&files) {
+                let out = format!("{}{}.json", f.trim_end_matches(".json"), suffix);
+                std::fs::write(&out, t.save_json()).unwrap();
+                println!("{} -> {out}", t.name);
+            }
+            println!("team trained in {:.0}s", t0.elapsed().as_secs_f32());
+        }
+        Some("teameval") => {
+            // godctl teameval a.json,b.json [n]: the team plays fixed team drills with no randomness.
+            let troops: Vec<Troop> = args[2].split(',').map(|f| Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap()).collect();
+            let n: u64 = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(200);
+            let specs: Vec<_> = troops.iter().map(|t| t.spec.clone()).collect();
+            let k = troops.len();
+            let (mut wins, mut destr) = (0, 0.0);
+            let mut alive = vec![0u32; k];
+            let (mut dmg, mut heal, mut blocked) = (vec![0.0f32; k], vec![0.0f32; k], vec![0.0f32; k]);
+            let mut cache = godcore::nn::Cache::default();
+            // Heals where both nearest allies could be healed: how often the
+            // more hurt one was picked, and, when only one of them was under
+            // attack, how often that one was.
+            let (mut choices, mut wise) = (vec![0u32; k], vec![0u32; k]);
+            let (mut threat_choices, mut saved) = (vec![0u32; k], vec![0u32; k]);
+            // Whom each healer's heals went to: team members by index, then others.
+            let mut healed_who = vec![vec![0u32; k + 1]; k];
+            for s in 0..n {
+                let mut env = godcore::team::TeamEnv::new(specs.clone(), 70_000 + s, None);
+                loop {
+                    let acts: Vec<u8> = (0..k)
+                        .map(|j| if env.active(j) { godcore::ppo::greedy_action(&troops[j].actor, &env.obs(j), &env.mask(j), &mut cache) } else { 0 })
+                        .collect();
+                    for j in 0..k {
+                        let (a, m) = (acts[j], env.mask(j));
+                        if env.active(j) && (a == ACT_HEAL || a == ACT_HEAL_2) && m[a as usize] {
+                            let w = &env.world;
+                            let team = w.units[j].team;
+                            let mut al: Vec<(usize, f32)> = (0..w.units.len())
+                                .filter(|&x| x != j && w.units[x].alive && w.units[x].team == team && !w.units[x].kind.is_building())
+                                .map(|x| (x, w.units[j].dist(&w.units[x])))
+                                .collect();
+                            al.sort_by(|p, q| p.1.partial_cmp(&q.1).unwrap().then(p.0.cmp(&q.0)));
+                            let t = al[(a == ACT_HEAL_2) as usize].0;
+                            healed_who[j][t.min(k)] += 1;
+                        }
+                        if env.active(j) && (a == ACT_HEAL || a == ACT_HEAL_2) && m[ACT_HEAL as usize] && m[ACT_HEAL_2 as usize] {
+                            let w = &env.world;
+                            let team = w.units[j].team;
+                            let mut al: Vec<(usize, f32)> = (0..w.units.len())
+                                .filter(|&x| x != j && w.units[x].alive && w.units[x].team == team && !w.units[x].kind.is_building())
+                                .map(|x| (x, w.units[j].dist(&w.units[x])))
+                                .collect();
+                            al.sort_by(|p, q| p.1.partial_cmp(&q.1).unwrap().then(p.0.cmp(&q.0)));
+                            let frac = |x: usize| w.units[x].hp / w.units[x].max_hp;
+                            let (p0, p1) = (frac(al[0].0), frac(al[1].0));
+                            if p0 != p1 {
+                                choices[j] += 1;
+                                wise[j] += ((a == ACT_HEAL) == (p0 < p1)) as u32;
+                            }
+                            // Threat flags of the two allies in the troop's own view.
+                            let o = env.obs(j);
+                            let base = godcore::sim::OBS_DIM - 16;
+                            let (t0, t1) = (o[base + 4] > 0.5, o[base + 11] > 0.5);
+                            if t0 != t1 {
+                                threat_choices[j] += 1;
+                                saved[j] += ((a == ACT_HEAL) == t0) as u32;
+                            }
+                        }
+                    }
+                    // Read the end state before the env resets itself.
+                    let before: Vec<_> = (0..k).map(|j| (env.world.units[j].alive, env.world.units[j].stats)).collect();
+                    let out = env.act(&acts);
+                    if let Some(e) = out.episode {
+                        wins += e.won as u32;
+                        destr += e.destruction;
+                        for j in 0..k {
+                            let (a, st) = before[j];
+                            alive[j] += (a && !out.done.is_empty()) as u32;
+                            dmg[j] += st.unit_dmg + st.building_dmg;
+                            heal[j] += st.heal;
+                            blocked[j] += st.blocked;
+                        }
+                        break;
+                    }
+                }
+            }
+            let nf = n as f32;
+            for j in 0..k {
+                let total: u32 = healed_who[j].iter().sum();
+                if total > 0 {
+                    let parts: Vec<String> = (0..=k)
+                        .map(|x| {
+                            let who = if x < k { troops[x].spec.name.clone() } else { "others".into() };
+                            format!("{who} {:.0}%", healed_who[j][x] as f32 / total as f32 * 100.0)
+                        })
+                        .collect();
+                    println!("  {}'s heals went to: {}", troops[j].spec.name, parts.join(", "));
+                }
+            }
+            println!("team wins {:.1}%  destruction {:.0}%", wins as f32 / nf * 100.0, destr / nf * 100.0);
+            for j in 0..k {
+                println!(
+                    "  {:<28} alive at end {:>5.1}%  damage {:>6.1}  healed {:>5.1}  blocked {:>5.1}{}",
+                    troops[j].spec.name,
+                    alive[j] as f32 / nf * 100.0,
+                    dmg[j] / nf,
+                    heal[j] / nf,
+                    blocked[j] / nf,
+                    if choices[j] > 0 {
+                        format!(
+                            "  picked the more hurt ally {:.0}% of {}, the one under attack {:.0}% of {}",
+                            wise[j] as f32 / choices[j] as f32 * 100.0,
+                            choices[j],
+                            saved[j] as f32 / threat_choices[j].max(1) as f32 * 100.0,
+                            threat_choices[j]
+                        )
+                    } else {
+                        String::new()
+                    }
+                );
+            }
         }
         Some("eval") => {
             let t = Troop::load_json(&std::fs::read_to_string(&args[2]).unwrap()).unwrap();

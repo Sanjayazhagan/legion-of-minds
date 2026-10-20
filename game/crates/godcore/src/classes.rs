@@ -158,6 +158,7 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                talents: TALENT_MAX,
             },
             BaseClass::Archer => ClassSpec {
                 name: "Archer".into(),
@@ -185,6 +186,7 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                talents: TALENT_MAX,
             },
             BaseClass::Healer => ClassSpec {
                 name: "Healer".into(),
@@ -212,6 +214,7 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                talents: TALENT_MAX,
             },
             BaseClass::Guard => ClassSpec {
                 name: "Guard".into(),
@@ -232,6 +235,7 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                talents: TALENT_MAX,
             },
             BaseClass::Sentry => ClassSpec {
                 name: "Sentry".into(),
@@ -252,6 +256,7 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                talents: TALENT_MAX,
             },
             BaseClass::Keeper => ClassSpec {
                 name: "Keeper".into(),
@@ -276,6 +281,7 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                talents: TALENT_MAX,
             },
             BaseClass::Mage => ClassSpec {
                 name: "Mage".into(),
@@ -525,6 +531,22 @@ pub struct ClassSpec {
     /// Practice (0 to 1) with each class move, set from the troop.
     #[serde(default)]
     pub move_practice: [f32; crate::moves::N_MOVES],
+    /// How many units a talent that reaches several at once (Healing Nova,
+    /// Ward, splash and area skills) can reach, set from the troop's level.
+    #[serde(default = "talent_max")]
+    pub talents: u8,
+}
+
+/// Most units a multi-target talent can reach (a level 5 troop).
+pub const TALENT_MAX: u8 = 4;
+
+fn talent_max() -> u8 {
+    TALENT_MAX
+}
+
+/// Units a multi-target talent reaches at each troop level: 1, 2, 2, 3, 4.
+pub fn talents_for_level(level: u32) -> u8 {
+    [1, 2, 2, 3, 4][(level.clamp(1, 5) - 1) as usize]
 }
 
 impl ClassSpec {
@@ -548,6 +570,7 @@ impl ClassSpec {
             weapon: None,
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
+            talents: TALENT_MAX,
         }
     }
 
@@ -615,6 +638,7 @@ impl ClassSpec {
             weapon: None,
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
+            talents: TALENT_MAX,
         }
     }
 
@@ -693,6 +717,7 @@ impl ClassSpec {
             weapon: None,
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
+            talents: TALENT_MAX,
         }
     }
 
@@ -717,6 +742,7 @@ impl ClassSpec {
         self.weapon = other.weapon;
         self.mastery = other.mastery;
         self.move_practice = other.move_practice;
+        self.talents = other.talents;
         self
     }
 

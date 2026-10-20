@@ -78,5 +78,5 @@ fn golden_fingerprint() {
     );
 }
 
-/// Sim version 3 (class moves: 74 inputs, 20 actions).
-const GOLDEN: u64 = 0x16fb_6e1b_bf3a_74a4;
+/// Sim version 5 (chosen heal targets, level-limited talents: 90 inputs, 21 actions).
+const GOLDEN: u64 = 0x4ed9_6914_eabf_c077;
