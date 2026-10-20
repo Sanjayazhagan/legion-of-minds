@@ -706,13 +706,39 @@ mod tests {
 
     #[test]
     fn team_training_is_kept_and_raids_match() {
-        assert_eq!(godcore::sim::SIM_VERSION, 4);
+        assert_eq!(godcore::sim::SIM_VERSION, 5);
         let mut a = army();
         a[0].troop.team_steps = 120_000;
         let c = canonical_army(&a, 1).unwrap();
         assert_eq!(c[0].troop.team_steps, 120_000);
         let s = canonical_snapshot(&snapshot()).unwrap();
         assert_eq!(run_raid(&s, &a), run_raid(&s, &c));
+    }
+
+    #[test]
+    fn talents_come_from_level() {
+        use godcore::classes::{talents_for_level, TALENT_MAX};
+        // A level-1 troop that claims full reach gets talents 1.
+        let mut a = army();
+        assert_eq!(a[0].troop.level, 1);
+        a[0].troop.spec.talents = TALENT_MAX;
+        let c = canonical_army(&a, 1).unwrap();
+        assert_eq!(c[0].troop.spec.talents, 1);
+        // Higher levels get what the game gives them.
+        for level in 1..=5 {
+            let mut a = army();
+            a[0].troop.level = level;
+            a[0].troop.spec.talents = 0;
+            let c = canonical_army(&a, 5).unwrap();
+            assert_eq!(c[0].troop.spec.talents, talents_for_level(level), "level {level}");
+        }
+        // A client that set talents the game's way gets the same raid back.
+        let s = canonical_snapshot(&snapshot()).unwrap();
+        let mut a = army();
+        for p in &mut a {
+            p.troop.sync_moves();
+        }
+        assert_eq!(run_raid(&s, &a), run_raid(&s, &canonical_army(&a, 1).unwrap()));
     }
 
     #[test]
@@ -773,6 +799,10 @@ mod tests {
         let mut a = army();
         a[0].troop.spec = game_blend(&[(Mage, 50), (Healer, 30), (Fighter, 20)]);
         a[1].troop.spec = game_blend(&[(Assassin, 60), (Paladin, 40)]);
+        // The game sets talents and move strength from level when it loads a troop.
+        for p in &mut a {
+            p.troop.sync_moves();
+        }
         let c = canonical_army(&a, 1).unwrap();
         let s = canonical_snapshot(&snapshot()).unwrap();
         // Same result whether the client fights with its own copy or the canonical one.
