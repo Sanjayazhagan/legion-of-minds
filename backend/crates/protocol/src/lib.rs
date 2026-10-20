@@ -315,6 +315,9 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
         mastery: t.mastery.clone(),
         move_xp: t.move_xp.clone(),
         brain: Some(t.actor.dims[1]),
+        // Team training happens on the player's machine and changes nothing
+        // in a battle, so it is kept as sent.
+        team_steps: t.team_steps,
     };
     // Move practice comes from the troop's own practice record, never from
     // the client's copy in the spec.
@@ -699,6 +702,17 @@ mod tests {
         b[0].troop.mastery.insert(godcore::weapons::Weapon::Daggers, u64::MAX);
         b[0].troop.mastery.insert(godcore::weapons::Weapon::Crossbow, 2);
         assert!(canonical_army(&b, 1).is_err(), "wrapping mastery sum");
+    }
+
+    #[test]
+    fn team_training_is_kept_and_raids_match() {
+        assert_eq!(godcore::sim::SIM_VERSION, 4);
+        let mut a = army();
+        a[0].troop.team_steps = 120_000;
+        let c = canonical_army(&a, 1).unwrap();
+        assert_eq!(c[0].troop.team_steps, 120_000);
+        let s = canonical_snapshot(&snapshot()).unwrap();
+        assert_eq!(run_raid(&s, &a), run_raid(&s, &c));
     }
 
     #[test]
