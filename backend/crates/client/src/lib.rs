@@ -21,9 +21,9 @@ use godcore::troop::Troop;
 use reqwest::blocking::{Client as Http, RequestBuilder};
 use serde::de::DeserializeOwned;
 use std::time::{Duration, Instant};
-use uuid::Uuid;
 
 pub use bag_protocol;
+pub use uuid::Uuid;
 
 #[derive(Debug)]
 pub enum Error {
