@@ -13,6 +13,14 @@ impl Game {
         if let Some(g) = crate::gpu_name() {
             text(&format!("Graphics: {g}"), 20.0, H - 4.0, 14.0, MUTED);
         }
+        if let Some(d) = crate::train_device() {
+            let t = match d {
+                Some(d) => format!("Brains of 128+ neurons train on: {d}"),
+                None => "Training on: CPU".to_string(),
+            };
+            let w = measure_text(&t, None, 14, 1.0).width;
+            text(&t, W - 20.0 - w, H - 4.0, 14.0, MUTED);
+        }
         let ui_y = 66.0;
         // Top actions
         if self

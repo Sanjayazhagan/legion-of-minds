@@ -1,0 +1,11 @@
+[package]
+name = "godgpu"
+version.workspace = true
+edition.workspace = true
+description = "Trains troop brains on the GPU (wgpu compute) when there is one; battles stay on the CPU"
+
+[dependencies]
+godcore = { path = "../godcore" }
+wgpu = "24"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }

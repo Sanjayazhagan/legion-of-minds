@@ -141,6 +141,13 @@ pub static NvOptimusEnablement: u32 = 1;
 pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
 
 static GPU_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// What big brains (128+ neurons) train on: a graphics card, or `None` for the CPU.
+static TRAIN_ON: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// The graphics card training uses, once the search for one has finished.
+pub fn train_device() -> Option<Option<&'static str>> {
+    TRAIN_ON.get().map(|d| d.as_deref())
+}
 
 /// The graphics chip drawing the game, as its driver names it (read after
 /// the first frame is on screen, when the driver can answer).
@@ -192,6 +199,13 @@ async fn main() {
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(cores.saturating_sub(1).max(1))
         .build_global();
+    // Look for a graphics card to train big brains on, without holding up
+    // the window. `BAG_CPU_TRAINING=1` keeps all training on the CPU.
+    std::thread::spawn(|| {
+        let dev = if std::env::var_os("BAG_CPU_TRAINING").is_some() { None } else { godgpu::enable() };
+        println!("Training big brains on: {}", dev.as_deref().unwrap_or("CPU"));
+        let _ = TRAIN_ON.set(dev);
+    });
 
     scene::load_library();
     record::start();

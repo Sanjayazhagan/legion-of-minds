@@ -355,13 +355,49 @@ impl Trainer {
 }
 
 /// One brain's rollout, flattened, with advantages and returns.
-pub(crate) struct Batch {
-    obs: Vec<f32>,
-    masks: Vec<[bool; N_ACTIONS]>,
-    pub(crate) acts: Vec<u8>,
-    old_logp: Vec<f32>,
-    adv: Vec<f32>,
-    rets: Vec<f32>,
+pub struct Batch {
+    /// `OBS_DIM` numbers per decision.
+    pub obs: Vec<f32>,
+    pub masks: Vec<[bool; N_ACTIONS]>,
+    pub acts: Vec<u8>,
+    pub old_logp: Vec<f32>,
+    pub adv: Vec<f32>,
+    pub rets: Vec<f32>,
+}
+
+/// Runs the PPO update somewhere faster than this CPU code, such as a GPU.
+/// Training only: battles always run on the CPU so they replay exactly.
+pub trait Accelerator: Send + Sync {
+    /// What it runs on, for the player to see.
+    fn name(&self) -> String;
+    /// The same update as `ppo_update`, consuming `rng` the same way. `None`
+    /// means it couldn't run this time and the CPU should do it.
+    fn update(
+        &self,
+        cfg: &PpoConfig,
+        actor: &mut Mlp,
+        critic: &mut Mlp,
+        opt_a: &mut Adam,
+        opt_c: &mut Adam,
+        rng: &mut Rng,
+        batch: &Batch,
+    ) -> Option<(f32, f32, f32, usize)>;
+}
+
+static ACCELERATOR: std::sync::RwLock<Option<std::sync::Arc<dyn Accelerator>>> = std::sync::RwLock::new(None);
+
+/// Brains smaller than this train on the CPU even with an accelerator: the
+/// copying costs more than the maths saves.
+pub const ACCEL_MIN_HIDDEN: usize = 128;
+
+/// Use `a` for training from now on (`None` goes back to the CPU).
+pub fn set_accelerator(a: Option<std::sync::Arc<dyn Accelerator>>) {
+    *ACCELERATOR.write().unwrap() = a;
+}
+
+/// The accelerator training uses for big brains, if any.
+pub fn accelerator() -> Option<std::sync::Arc<dyn Accelerator>> {
+    ACCELERATOR.read().unwrap().clone()
 }
 
 impl Batch {
@@ -402,6 +438,28 @@ impl Batch {
 /// The PPO update for one brain. Returns summed policy loss, value loss and
 /// entropy, and the number of minibatches.
 pub(crate) fn ppo_update(
+    cfg: &PpoConfig,
+    actor: &mut Mlp,
+    critic: &mut Mlp,
+    opt_a: &mut Adam,
+    opt_c: &mut Adam,
+    rng: &mut Rng,
+    batch: &Batch,
+) -> (f32, f32, f32, usize) {
+    if actor.dims.get(1).is_some_and(|&h| h >= ACCEL_MIN_HIDDEN) {
+        if let Some(acc) = accelerator() {
+            let saved = rng.clone();
+            if let Some(r) = acc.update(cfg, actor, critic, opt_a, opt_c, rng, batch) {
+                return r;
+            }
+            *rng = saved;
+        }
+    }
+    cpu_ppo_update(cfg, actor, critic, opt_a, opt_c, rng, batch)
+}
+
+/// The PPO update on this CPU (also the reference an accelerator must match).
+pub fn cpu_ppo_update(
     cfg: &PpoConfig,
     actor: &mut Mlp,
     critic: &mut Mlp,
