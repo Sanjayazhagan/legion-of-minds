@@ -74,6 +74,26 @@ The server is one container plus a Postgres database. Any host that runs a Docke
 docker build -f backend/Dockerfile -t become-a-god-server .
 ```
 
+### Deploy to the Azure VM with deploy.ps1
+
+`deploy.ps1` works like the portfolio site's: from PowerShell on your laptop it packs the server source, uploads it over `scp` and runs `deploy/server.sh` on the VM over `ssh`. That script does the rest:
+
+- **First deploy only:** it installs build tools, Postgres and Rust, and adds a swap file on a small VM so the build fits in memory. It also creates a Postgres database with a random password. The password stays in the VM's env file and never leaves the VM.
+- **Every deploy:** it builds the server on the VM (Linux can't run a Windows build) and merges `deploy.env` into `<VmPath>/server.env`. It then restarts the `legion-server` systemd service and checks `/health`.
+
+```
+cd backend
+copy deploy.env.example deploy.env      # then fill in the OAuth keys
+.\deploy.ps1                             # http://40.81.20.114:8080
+.\deploy.ps1 -Domain game.example.com    # https, via nginx+certbot or Caddy
+```
+
+The defaults are the portfolio's VM (`azureuser@40.81.20.114`, key `~\.ssh\id_ed25519`). Override them with `-VmHost`, `-VmUser`, `-SshKey`, `-VmPath` or `-Port`.
+
+**Google sign-in needs `-Domain`.** Google only accepts https redirect addresses with a domain name, not a bare IP. Point the domain's DNS at the VM first. If nginx is already on the VM (for example for the portfolio), the script adds a site and gets a certificate with certbot. Otherwise it installs Caddy.
+
+You also need to open the server's ports in the Azure portal (the VM's Networking settings): TCP 8080 inbound without a domain, or 80 and 443 with one.
+
 Set these environment variables on the host (as secrets where the host has them). Never put real values in files or chat.
 
 | Variable | Required | What to set |
