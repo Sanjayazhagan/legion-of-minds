@@ -2,3 +2,7 @@ target/
 .env
 *.token
 videos/
+
+# deploy.ps1
+deploy.env
+deploy.tar.gz
