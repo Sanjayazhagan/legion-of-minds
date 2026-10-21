@@ -20,6 +20,8 @@ pub const SKY: Color = Color::new(0.40, 0.65, 0.98, 1.0);
 pub struct Ui {
     pub mouse: Vec2,
     pub clicked: bool,
+    /// The left button came up this frame (ends a drag).
+    pub released: bool,
     pub right_clicked: bool,
     camera: Camera2D,
 }
@@ -29,6 +31,7 @@ impl Ui {
         Ui {
             mouse: Vec2::ZERO,
             clicked: false,
+            released: false,
             right_clicked: false,
             camera: Camera2D::default(),
         }
@@ -52,9 +55,11 @@ impl Ui {
         let (mx, my) = mouse_position();
         self.mouse = vec2((mx - vx) / s, (my - vy) / s);
         self.clicked = is_mouse_button_pressed(MouseButton::Left);
+        self.released = is_mouse_button_released(MouseButton::Left);
         self.right_clicked = is_mouse_button_pressed(MouseButton::Right);
         if let Some((m, l, r)) = crate::record::input() {
             (self.mouse, self.clicked, self.right_clicked) = (m, l, r);
+            self.released = false;
         }
         self.camera = cam;
         draw_rectangle(0.0, 0.0, W, H, BG);
