@@ -17,6 +17,14 @@ cargo run --release -p become-a-god
 - **Windows, macOS:** nothing else needed.
 - **Linux:** install the window/GL/audio headers first, e.g. `sudo apt install libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev`.
 
+### Graphics
+
+- The game draws with OpenGL, so the picture is always made by the graphics chip, built-in or a separate graphics card. Troop brains and training run on the CPU (see below), on purpose: battles must replay bit-for-bit on the server, and brains this small train faster on the CPU anyway.
+- On Windows laptops with two GPUs, the game asks the NVIDIA and AMD drivers for the fast one. If the driver still picks the built-in chip, choose "High performance" for `become-a-god.exe` in Windows Settings > System > Display > Graphics.
+- The barracks screen shows which chip is drawing the game ("Graphics: ..." at the bottom left), and the game prints the same line when it starts.
+- Units glide between sim ticks, so movement is smooth at any frame rate even though battles run 20 ticks a second.
+- A PC with no working graphics driver at all (some virtual machines and remote desktops) only offers old OpenGL 1.1, which the game can't use. Placing Mesa's software `opengl32.dll` (from https://github.com/pal1000/mesa-dist-win, the "llvmpipe" one) next to `become-a-god.exe` makes it draw on the CPU instead. It runs, but slowly (about 20 frames a second in our tests).
+
 Save data lives in your user data folder (`~/.local/share/become-a-god`, `~/Library/Application Support/become-a-god`, `%APPDATA%\become-a-god`). Set `BAG_SAVE_DIR` to put it elsewhere.
 
 ## How to play

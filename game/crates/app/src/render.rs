@@ -18,6 +18,12 @@ const C: f32 = ARENA / 2.0;
 pub struct Effects {
     items: Vec<(godcore::sim::Event, f32)>,
     anim: Vec<Anim>,
+    /// When the last sim tick arrived, and the usual time between ticks.
+    /// Units are drawn sliding between their last two tick positions, so
+    /// they move smoothly at any frame rate instead of hopping 20 times a
+    /// second.
+    last_tick: f64,
+    tick_gap: f64,
 }
 
 /// Per-unit animation memory, updated once per sim tick.
@@ -25,6 +31,10 @@ pub struct Effects {
 struct Anim {
     x: f32,
     y: f32,
+    /// Position and facing one tick earlier.
+    px: f32,
+    py: f32,
+    pheading: f32,
     /// Facing, radians around the vertical axis (0 = towards the camera).
     heading: f32,
     target_heading: f32,
@@ -48,7 +58,7 @@ fn heading_of(dx: f32, dy: f32) -> f32 {
 
 impl Effects {
     pub fn new() -> Self {
-        Effects { items: Vec::new(), anim: Vec::new() }
+        Effects { items: Vec::new(), anim: Vec::new(), last_tick: 0.0, tick_gap: 0.05 }
     }
 
     pub fn clear(&mut self) {
@@ -59,6 +69,12 @@ impl Effects {
     /// Call once per sim tick.
     pub fn absorb(&mut self, w: &World) {
         let now = crate::record::now();
+        let gap = now - self.last_tick;
+        if gap > 1e-4 {
+            // Several ticks in one frame (fast forward) leave the gap as it was.
+            self.tick_gap = if gap > 0.25 { 0.05 } else { self.tick_gap * 0.7 + gap * 0.3 };
+        }
+        self.last_tick = now;
         for e in &w.events {
             self.items.push((*e, 0.0));
         }
@@ -71,6 +87,9 @@ impl Effects {
                     Anim {
                         x: u.x,
                         y: u.y,
+                        px: u.x,
+                        py: u.y,
+                        pheading: h,
                         heading: h,
                         target_heading: h,
                         still: 1.0,
@@ -133,13 +152,42 @@ impl Effects {
             while dh < -std::f32::consts::PI {
                 dh += std::f32::consts::TAU;
             }
+            a.pheading = a.heading;
             a.heading += dh * 0.45;
             if !u.alive && a.died.is_none() {
                 a.died = Some(now);
             }
+            a.px = a.x;
+            a.py = a.y;
             a.x = u.x;
             a.y = u.y;
         }
+    }
+
+    /// How far (0 to 1) the picture is between the last two ticks.
+    fn blend(&self) -> f32 {
+        ((crate::record::now() - self.last_tick) / self.tick_gap).clamp(0.0, 1.0) as f32
+    }
+
+    /// Where to draw unit `i` this frame and which way it faces.
+    fn smooth(&self, i: usize, u: &Unit) -> (f32, f32, f32) {
+        let Some(a) = self.anim.get(i) else {
+            return (u.x, u.y, 0.0);
+        };
+        let k = self.blend();
+        let (dx, dy) = (a.x - a.px, a.y - a.py);
+        // Blinks and shadowsteps jump; don't slide across the map.
+        if dx * dx + dy * dy > 4.0 || (a.x - u.x).abs() + (a.y - u.y).abs() > 1e-3 {
+            return (u.x, u.y, a.heading);
+        }
+        let mut dh = a.heading - a.pheading;
+        while dh > std::f32::consts::PI {
+            dh -= std::f32::consts::TAU;
+        }
+        while dh < -std::f32::consts::PI {
+            dh += std::f32::consts::TAU;
+        }
+        (a.px + dx * k, a.py + dy * k, a.pheading + dh * k)
     }
 
     pub fn age(&mut self, dt: f32) {
@@ -867,13 +915,21 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
     let friendly = friendly.unwrap_or(if v.home { Team::Defend } else { Team::Attack });
     let looks: Vec<Option<Look>> =
         w.units.iter().enumerate().map(|(i, u)| (u.kind == Kind::Troop).then(|| look(i, u))).collect();
+    // Buildings never move; everyone else is drawn between ticks.
+    let sp: Vec<(f32, f32, f32)> = w
+        .units
+        .iter()
+        .enumerate()
+        .map(|(i, u)| if u.kind.is_building() { (u.x, u.y, 0.0) } else { fx.smooth(i, u) })
+        .collect();
 
     // ---- 3D pass
     let mut flat: Vec<usize> = Vec::new(); // units without a model: 2D fallback
     begin_3d(v.r, v.camera(), false);
     for (i, u) in w.units.iter().enumerate() {
         let a = fx.anim.get(i).copied();
-        let pos = w3(u.x, u.y, 0.0);
+        let (sx, sy, heading) = sp[i];
+        let pos = w3(sx, sy, 0.0);
         if u.kind.is_building() {
             let ours = u.team == friendly;
             let Some(lib) = &lib else {
@@ -948,7 +1004,7 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         if u.cloak > 0 && looks[i].as_ref().map_or(true, |l| l.hostile) {
             continue; // an enemy in cloak is invisible (a shimmer is drawn later)
         }
-        if !draw_character(lib, &fig, npc, pos, a.heading, pose, CHAR_SCALE) {
+        if !draw_character(lib, &fig, npc, pos, heading, pose, CHAR_SCALE) {
             flat.push(i);
         }
     }
@@ -990,7 +1046,7 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
     // ---- 2D fallback for anything without a model
     for &i in &flat {
         let u = &w.units[i];
-        let p = v.p(u.x, u.y);
+        let p = v.p(sp[i].0, sp[i].1);
         match u.kind {
             Kind::Core => art::draw_town_hall(p, u.radius * s, t),
             Kind::Tower if u.style == 1 => art::draw_cannon(p, u.radius * s, vec2(1.0, 0.3), swing_of(u)),
@@ -1032,10 +1088,11 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             Kind::Tower => 4.5,
             _ => 1.25,
         };
-        let top = v.p3(u.x, u.y, head);
+        let (ux, uy, _) = sp[i];
+        let top = v.p3(ux, uy, head);
         if let Some(Some(l)) = looks.get(i) {
             if let Some(n) = &l.name {
-                let foot = v.p(u.x, u.y);
+                let foot = v.p(ux, uy);
                 let d = measure_text(n, None, 14, 1.0);
                 draw_text(n, foot.x - d.width / 2.0, foot.y + 16.0, 14.0, TEXT);
             }
@@ -1048,17 +1105,17 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             }
         }
         if u.cloak > 0 {
-            let c = v.p3(u.x, u.y, 0.6);
+            let c = v.p3(ux, uy, 0.6);
             let shimmer = 0.5 + 0.5 * (t * 6.0 + i as f32).sin();
             draw_circle(c.x, c.y, 0.5 * s, Color::new(0.25, 0.15, 0.35, 0.25 + 0.15 * shimmer));
         }
         if u.ward > 0 {
-            let c = v.p3(u.x, u.y, 0.7);
+            let c = v.p3(ux, uy, 0.7);
             draw_circle(c.x, c.y, 0.62 * s, Color::new(1.0, 0.85, 0.35, 0.12));
             draw_circle_lines(c.x, c.y, 0.62 * s, 2.0, Color::new(1.0, 0.9, 0.5, 0.75));
         }
         if u.block_ticks > 0 {
-            let c = v.p3(u.x, u.y, 0.7);
+            let c = v.p3(ux, uy, 0.7);
             draw_circle(c.x, c.y, 0.55 * s, Color::new(0.45, 0.7, 1.0, 0.18));
             draw_circle_lines(c.x, c.y, 0.55 * s, 2.5, Color::new(0.6, 0.85, 1.0, 0.85));
         }

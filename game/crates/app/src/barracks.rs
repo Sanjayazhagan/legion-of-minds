@@ -9,6 +9,10 @@ use macroquad::prelude::*;
 impl Game {
     pub fn barracks(&mut self) -> Screen {
         self.header("Barracks", false);
+        // Which chip draws the game, so players can check it is the fast one.
+        if let Some(g) = crate::gpu_name() {
+            text(&format!("Graphics: {g}"), 20.0, H - 4.0, 14.0, MUTED);
+        }
         let ui_y = 66.0;
         // Top actions
         if self
