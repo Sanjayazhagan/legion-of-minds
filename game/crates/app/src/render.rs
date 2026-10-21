@@ -44,8 +44,8 @@ const ATTACK_RATE: f32 = 1.25;
 /// swing that has started is finished even if the fight ends.
 const FIGHT_LINGER: f64 = 0.3;
 /// Ground covered per second of each clip, so feet keep pace with the ground.
-const RUN_STRIDE: f32 = 4.2;
-const WALK_STRIDE: f32 = 2.2;
+const RUN_STRIDE: f32 = 2.0;
+const WALK_STRIDE: f32 = 1.3;
 
 /// Per-unit animation memory, updated once per sim tick.
 #[derive(Clone, Copy, Default)]
@@ -270,7 +270,7 @@ impl Effects {
 
     /// How many times faster than normal the battle is running.
     fn speedup(&self) -> f64 {
-        (0.05 / self.tick_gap).clamp(1.0, 4.0)
+        (1.0 / crate::battle_screen::WATCH_TPS as f64 / self.tick_gap).clamp(1.0, 4.0)
     }
 
     /// How far (0 to 1) the picture is between the last two ticks.
