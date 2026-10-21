@@ -1,6 +1,6 @@
 # Become a God
 
-A desktop strategy game where every troop is a tiny reinforcement-learning agent that **you train on your own CPU**. You recruit a troop, give it a training budget, watch it learn in live drills, then send squads against AI-built bases. Defence is RL too: you train defenders, build towers and cannons around your Town Hall, and they hold your base against raid waves or against your own trained army. Everything is Rust and nothing needs a GPU or Python.
+A desktop strategy game where every troop is a tiny reinforcement-learning agent that **you train on your own computer**. You recruit a troop, give it a training budget, watch it learn in live drills, then send squads against AI-built bases. Defence is RL too: you train defenders, build towers and cannons around your Town Hall, and they hold your base against raid waves or against your own trained army. Everything is Rust and nothing needs Python; a graphics card speeds up training big brains but is never required.
 
 ![Barracks](docs/barracks.png)
 
@@ -19,7 +19,9 @@ cargo run --release -p become-a-god
 
 ### Graphics
 
-- The game draws with OpenGL, so the picture is always made by the graphics chip, built-in or a separate graphics card. Troop brains and training run on the CPU (see below), on purpose: battles must replay bit-for-bit on the server, and brains this small train faster on the CPU anyway.
+- The game draws with OpenGL, so the picture is always made by the graphics chip, built-in or a separate graphics card.
+- Battles always run on the CPU, on purpose: they must replay bit-for-bit on the server.
+- Training big brains (128 neurons per layer and up) uses the graphics card when there is one: the slow learning step runs there as compute shaders (wgpu: DirectX 12, Vulkan or Metal), while the practice games stay on the CPU. Small brains, and computers without a usable GPU, train on the CPU as before. The barracks shows which one is used (bottom right). `BAG_CPU_TRAINING=1` forces CPU training. The GPU step gives the same results as the CPU one up to rounding (test in `crates/gpu/tests`); `cargo run --release -p godgpu --bin gpubench -- 256 98304` times both on your machine.
 - On Windows laptops with two GPUs, the game asks the NVIDIA and AMD drivers for the fast one. If the driver still picks the built-in chip, choose "High performance" for `become-a-god.exe` in Windows Settings > System > Display > Graphics.
 - The barracks screen shows which chip is drawing the game ("Graphics: ..." at the bottom left), and the game prints the same line when it starts.
 - Units glide between sim ticks, so movement is smooth at any frame rate even though battles run 20 ticks a second.
