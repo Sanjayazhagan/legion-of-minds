@@ -120,12 +120,40 @@ crates/client     bag-client: blocking client for the desktop game, and the bagc
 migrations        Postgres schema (users, identities, sessions, oauth_logins, snapshots, attacks)
 ```
 
-## Hooking up the game
+## The game's sign-in and Online screens
 
-The game doesn't talk to the server yet. `bag-client` is written for it: blocking calls to run on a background thread, `snapshot_from(&profile.base, &placed_defenders)`, `army_from(...)`, `Client::attack` (fights locally, submits, returns both results), `replay_battle(&replay)` for the battle screen, and `raiders(&replay)` for defence training. The app would add `bag-client = { path = "../../../backend/crates/client" }` and an Online screen: sign in, publish base, find match, raid, defence log with replays.
+The game opens on a sign-in screen: **Sign in with Google**, **Sign in with Discord** (each shown only when the server has it turned on), the test login when `DEV_LOGIN` is on, and **Play offline**. Google and Discord open the player's browser; the game polls until the sign-in finishes there, then carries on by itself. The session is kept in `account.json` in the save folder, so the next start signs in by itself. A saved session the server no longer knows sends the player back to the sign-in screen.
+
+Signed in, the **Online** button in the barracks opens the Online screen:
+
+- **Publish my base**: your home base (buildings and Town Hall) with your first four defenders that the Town Hall allows, placed as on the Home Base screen.
+- **Find an opponent** and **Attack!**: your best attackers (up to five) that your published Town Hall allows. The game fights the raid, the server checks it, and the replay plays with the server's result.
+- **Battle log** with **Watch** for every raid you made or got, and the top 10 players.
+
+Code: `game/crates/app/src/online.rs`, using `bag-client` from here. Every server call runs on a background thread.
+
+**Which server the game talks to:** `BAG_SERVER` when the game starts, else `BAG_SERVER` when the game was built, else `http://localhost:8080`. Build the release game with the hosted address:
+
+```
+BAG_SERVER=https://your-server.example cargo build --release -p become-a-god
+```
+
+**Try it on one machine** (Postgres running):
+
+```
+# terminal 1, in backend/
+DATABASE_URL=postgres://localhost/bag DEV_LOGIN=true cargo run --release -p bag-server
+# terminal 2, in game/
+cargo run --release -p become-a-god
+```
+
+Type a name under "Test login" and sign in. To have someone to raid, sign in a second name with bagctl and publish a base (see above), or run a second copy of the game with its own save folder (`BAG_SAVE_DIR=/tmp/player2`).
+
+Recordings and screenshot tests (`BAG_SCREEN`, `BAG_RECORD`, `BAG_SCREENSHOT`) skip the sign-in screen; `BAG_SCREEN=signin` opens it directly.
 
 ## Not done yet
 
+- **Online raids use your local troops as they are.** There is no army picker yet: the Online screen sends your best attackers and first four defenders.
 - **The game's economy is still local.** Gold, Town Hall level and troop levels live in the player's save file. The server keeps its own trophies and online gold, and trusts the Town Hall level in the published base (it checks buildings and troop levels against it). Moving progression onto the server is the next step against cheating.
 - **Training can't be verified.** The server checks a troop's level and training cap, but a brain trained longer elsewhere would still pass. Signing training runs, or capping by rank, is a later problem.
 - **Weapon ownership isn't checked.** Weapons are bought with gold in the game's save file, so the server accepts any weapon a troop holds (its mastery is still checked). This goes with moving the economy onto the server.
