@@ -127,9 +127,17 @@ impl Game {
         v.ring(ARENA / 2.0, ARENA / 2.0, HOME_RADIUS, 2.0, Color::new(0.6, 0.8, 1.0, 0.8));
         self.fx.clear();
         draw_world(v, &s.preview, &self.fx, &|_, _| unreachable!());
+        // The entry can sit past the edge of the zoomed-in map: keep the
+        // marker and its label inside the map panel.
         let e = v.p(RAID_ENTRY.0, RAID_ENTRY.1);
-        v.ring(RAID_ENTRY.0, RAID_ENTRY.1, 1.6, 3.0, BAD);
-        text_centered("raiders enter here", e.x + 40.0, e.y - 36.0, 16.0, BAD);
+        let (m, rad) = (34.0, 26.0);
+        let c = vec2(e.x.clamp(v.r.x + m, v.r.x + v.r.w - m), e.y.clamp(v.r.y + m, v.r.y + v.r.h - m));
+        draw_circle_lines(c.x, c.y, rad, 3.0, BAD);
+        let label = if c.distance(e) > 1.0 { "raiders come from this corner" } else { "raiders enter here" };
+        let lw = measure_text(label, None, 16, 1.0).width;
+        let lx = (c.x - lw / 2.0).clamp(v.r.x + 6.0, v.r.x + v.r.w - lw - 6.0);
+        draw_rectangle(lx - 4.0, c.y - rad - 24.0, lw + 8.0, 22.0, Color::new(0.05, 0.05, 0.08, 0.75));
+        text(label, lx, c.y - rad - 8.0, 16.0, BAD);
 
         let rx = 754.0;
         let rw = W - rx - 20.0;
@@ -179,7 +187,13 @@ impl Game {
                     };
                     let ok = self.profile.base.fits(ox, oy);
                     draw_building_ghost(v, kind, wx, wy, ok);
-                    if self.ui.clicked {
+                    // Dragging works too: letting go away from where it was
+                    // picked up sets it down.
+                    let dropped = match carry {
+                        Carry::Moving(p) => self.ui.released && ok && ((p.x - ox).powi(2) + (p.y - oy).powi(2)).sqrt() > 0.6,
+                        Carry::New(_) => false,
+                    };
+                    if self.ui.clicked || dropped {
                         if !ok {
                             self.toast(
                                 "Buildings go inside the blue ring, clear of other buildings",
@@ -319,11 +333,12 @@ impl Game {
         let hint = match s.carry {
             Some(Carry::New(_)) => "Click the map to build it. Right-click to cancel.",
             Some(Carry::Moving(_)) => "Click to set it down. Right-click to put it back.",
-            None => "Click a building on the map to move it.",
+            None => "Click or drag a tower or cannon on the map to move it.",
         };
         text(hint, rx, y + 14.0, 16.0, MUTED);
+        text("The Town Hall always stays in the middle.", rx, y + 36.0, 16.0, MUTED);
         if BuildKind::Cannon.max_at(th) == 0 {
-            text("Cannons unlock at Town Hall 2.", rx, y + 36.0, 16.0, MUTED);
+            text("Cannons unlock at Town Hall 2.", rx, y + 58.0, 16.0, MUTED);
         }
 
         if changed {
@@ -516,6 +531,13 @@ impl Game {
             "A wave is held when the raiders leave with no stars.",
             rx,
             y + 196.0,
+            15.0,
+            MUTED,
+        );
+        text(
+            "To move towers and cannons, open Build and click one on the map.",
+            rx,
+            y + 218.0,
             15.0,
             MUTED,
         );
