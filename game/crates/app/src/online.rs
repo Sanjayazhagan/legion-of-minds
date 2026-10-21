@@ -131,6 +131,14 @@ fn unauthorized(e: &str) -> bool {
     e == SIGNED_OUT
 }
 
+/// True when the server address points at this computer (no hosted
+/// server set), so a failed connection means none is running here.
+fn is_this_computer(server: &str) -> bool {
+    let host = server.split("://").nth(1).unwrap_or(server);
+    let host = host.split(['/', ':']).next().unwrap_or("");
+    matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0") || server.contains("[::1]")
+}
+
 /// Open a page in the player's browser.
 fn open_browser(url: &str) -> bool {
     #[cfg(windows)]
@@ -421,20 +429,19 @@ impl Game {
                 y += 60.0;
             }
             Some(Err(_)) => {
-                text_centered(
-                    "Can't reach the server right now.",
-                    W / 2.0,
-                    y + 30.0,
-                    22.0,
-                    BAD,
-                );
-                text_centered(
-                    "Check your internet connection and try again.",
-                    W / 2.0,
-                    y + 56.0,
-                    16.0,
-                    MUTED,
-                );
+                let (head, hint) = if is_this_computer(&self.account.server) {
+                    (
+                        "No game server is running on this computer.",
+                        "Start one (see backend/README.md), or play offline.",
+                    )
+                } else {
+                    (
+                        "Can't reach the game server.",
+                        "Check your internet connection; the server may also be down.",
+                    )
+                };
+                text_centered(head, W / 2.0, y + 30.0, 22.0, BAD);
+                text_centered(hint, W / 2.0, y + 56.0, 16.0, MUTED);
                 y += 74.0;
                 if self.ui.button(Rect::new(x, y, bw, 44.0), "Retry") {
                     let c = self.account.client();
@@ -1194,5 +1201,29 @@ impl Game {
             return Screen::Online(back);
         }
         Screen::OnlineWatch(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_this_computer;
+
+    #[test]
+    fn local_server_addresses() {
+        for s in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080/",
+            "http://[::1]:8080",
+            "localhost",
+        ] {
+            assert!(is_this_computer(s), "{s}");
+        }
+        for s in [
+            "https://bag.fly.dev",
+            "https://localhost.example.com",
+            "http://10.0.0.5:8080",
+        ] {
+            assert!(!is_this_computer(s), "{s}");
+        }
     }
 }
