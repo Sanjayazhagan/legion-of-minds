@@ -120,6 +120,44 @@ fn demo_screen(g: &mut Game) -> Option<Screen> {
     })
 }
 
+/// Laptops with two GPUs: ask the NVIDIA and AMD drivers for the fast one
+/// instead of the power-saving one (build.rs exports these from the exe).
+#[cfg(windows)]
+#[no_mangle]
+#[used]
+#[allow(non_upper_case_globals)]
+pub static NvOptimusEnablement: u32 = 1;
+#[cfg(windows)]
+#[no_mangle]
+#[used]
+#[allow(non_upper_case_globals)]
+pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
+
+static GPU_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The graphics chip drawing the game, as its driver names it (read after
+/// the first frame is on screen, when the driver can answer).
+pub fn gpu_name() -> Option<&'static str> {
+    GPU_NAME.get().map(|s| s.as_str())
+}
+
+fn read_gpu_name() {
+    GPU_NAME.get_or_init(|| {
+        let read = |what: u32| unsafe {
+            let p = macroquad::miniquad::gl::glGetString(what);
+            if p.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(p as _).to_string_lossy().into_owned()
+            }
+        };
+        // GL_RENDERER is 0x1F01.
+        let name = format!("{} (OpenGL {})", read(0x1F01), read(macroquad::miniquad::gl::GL_VERSION));
+        println!("Graphics: {name}");
+        name
+    });
+}
+
 fn window_conf() -> macroquad::conf::Conf {
     macroquad::conf::Conf {
         miniquad_conf: Conf {
@@ -205,6 +243,9 @@ async fn main() {
         };
         game.draw_toast();
         frame += 1;
+        if frame == 2 {
+            read_gpu_name();
+        }
         if record::active() {
             if record::end_frame() {
                 break;
