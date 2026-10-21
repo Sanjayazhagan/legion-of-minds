@@ -8,6 +8,7 @@ mod record;
 mod barracks;
 mod battle_screen;
 mod home;
+mod online;
 mod recruit;
 mod render;
 mod scene;
@@ -36,6 +37,9 @@ pub enum Screen {
     Replay(tournament::ReplayState),
     Armoury(armoury::ArmouryState),
     Team(teamtrain::TeamState),
+    SignIn(online::SignInState),
+    Online(online::OnlineState),
+    OnlineWatch(online::WatchState),
 }
 
 pub struct Game {
@@ -49,6 +53,8 @@ pub struct Game {
     pub toast: Option<(String, f32)>,
     pub roster_scroll: f32,
     pub confirm_release: bool,
+    /// The online session (signed out until the sign-in screen finishes).
+    pub account: online::Account,
 }
 
 impl Game {
@@ -116,6 +122,7 @@ fn demo_screen(g: &mut Game) -> Option<Screen> {
         "build" => Screen::Home(home::HomeState::demo_build(g)),
         "armoury" => Screen::Armoury(armoury::ArmouryState { idx: 0 }),
         "team" => Screen::Team(teamtrain::TeamState::demo(g)),
+        "signin" => Screen::SignIn(online::SignInState::from_game(&g.account)),
         _ => return None,
     })
 }
@@ -205,6 +212,7 @@ async fn main() {
     let store = Store::open();
     let profile = store.load_profile();
     let troops = store.load_troops();
+    let account = online::Account::load(&store.dir);
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -220,8 +228,20 @@ async fn main() {
         toast: None,
         roster_scroll: 0.0,
         confirm_release: false,
+        account,
     };
-    let mut screen = demo_screen(&mut game).unwrap_or(Screen::Barracks);
+    // The game opens on the sign-in screen, except for recordings and
+    // screenshot tests, which go straight to their screen.
+    let scripted = ["BAG_SCREEN", "BAG_RECORD", "BAG_SCREENSHOT"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some());
+    let mut screen = demo_screen(&mut game).unwrap_or_else(|| {
+        if scripted {
+            Screen::Barracks
+        } else {
+            Screen::SignIn(online::SignInState::startup(&game.account))
+        }
+    });
     let autoshot = std::env::var("BAG_SCREENSHOT").ok();
     let shot_frame: u32 = std::env::var("BAG_SHOT_FRAME")
         .ok()
@@ -254,6 +274,9 @@ async fn main() {
             Screen::Home(s) => game.home(s),
             Screen::Armoury(s) => game.armoury(s),
             Screen::Team(s) => game.team_training(s),
+            Screen::SignIn(s) => game.sign_in(s),
+            Screen::Online(s) => game.online(s),
+            Screen::OnlineWatch(s) => game.online_watch(s),
         };
         game.draw_toast();
         frame += 1;

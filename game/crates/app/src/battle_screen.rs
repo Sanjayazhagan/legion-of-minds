@@ -112,6 +112,13 @@ impl BattleState {
     }
 }
 
+/// Sim ticks shown per second at 1x. Playing all 20 ticks of a sim second
+/// made troops sprint and hit five times a second; at 6 they move at a
+/// Clash-of-Clans-like pace, a fighter strikes about every 0.7 s, and a full
+/// battle (900 ticks) lasts 2.5 minutes. Only playback changes: results are
+/// the same.
+pub const WATCH_TPS: f32 = 6.0;
+
 fn base_view() -> View {
     View::new(Rect::new(20.0, 66.0, 714.0, 714.0))
 }
@@ -407,7 +414,7 @@ impl Game {
         self.header(&title, false);
         let dt = crate::record::dt().min(0.1);
         if s.result.is_none() {
-            s.acc += dt * 20.0 * s.speed;
+            s.acc += dt * WATCH_TPS * s.speed;
             while s.acc >= 1.0 && s.battle.outcome() == Outcome::Running {
                 s.acc -= 1.0;
                 s.battle.step();
@@ -443,7 +450,7 @@ impl Game {
         // HUD
         let rx = 754.0;
         let rw = W - rx - 20.0;
-        let secs_left = (w.max_ticks - w.tick) as f32 / 20.0;
+        let secs_left = (w.max_ticks - w.tick) as f32 / WATCH_TPS;
         text(
             &format!("Time left {:.0}s", secs_left),
             rx,

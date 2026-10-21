@@ -24,7 +24,28 @@ pub struct Effects {
     /// second.
     last_tick: f64,
     tick_gap: f64,
+    /// Per unit: the clip drawn last frame, to fade into the next one.
+    blends: std::cell::RefCell<Vec<Blend>>,
 }
+
+/// The clip a character showed last frame and the one it is fading out of.
+#[derive(Clone, Copy, Default)]
+struct Blend {
+    now: Option<(&'static str, f32, bool)>,
+    from: Option<(&'static str, f32, bool)>,
+    at: f64,
+}
+
+/// Seconds a character takes to fade from one animation into the next.
+const BLEND_TIME: f64 = 0.14;
+/// Attacks play this much faster than the clip's own speed.
+const ATTACK_RATE: f32 = 1.25;
+/// The sim hits many times a second; one swing covers several hits, and a
+/// swing that has started is finished even if the fight ends.
+const FIGHT_LINGER: f64 = 0.3;
+/// Ground covered per second of each clip, so feet keep pace with the ground.
+const RUN_STRIDE: f32 = 2.0;
+const WALK_STRIDE: f32 = 1.3;
 
 /// Per-unit animation memory, updated once per sim tick.
 #[derive(Clone, Copy, Default)]
@@ -49,6 +70,25 @@ struct Anim {
     /// A dodge (1) or weapon skill (2) started at `acted`.
     special: u8,
     skill: Option<Skill>,
+    /// The current fight: when its first swing started and the latest hit.
+    fight_start: f64,
+    last_hit: f64,
+    /// Who or what it is hitting.
+    aim: (f32, f32),
+    /// When it was last hit, and which way the blow pushed it.
+    hurt: f64,
+    push: (f32, f32),
+    /// A roll or charge moves several metres in one tick; it is drawn as a
+    /// quick dash from here instead of a jump.
+    slide_from: (f32, f32),
+    slide_at: f64,
+    slide_dur: f32,
+    /// This tick it teleported (blink, shadowstep): draw it at the new spot.
+    jumped: bool,
+    /// Ground speed (per tick, smoothed) and distance covered, for the legs.
+    gait: f32,
+    dist: f32,
+    pdist: f32,
 }
 
 fn heading_of(dx: f32, dy: f32) -> f32 {
@@ -58,12 +98,13 @@ fn heading_of(dx: f32, dy: f32) -> f32 {
 
 impl Effects {
     pub fn new() -> Self {
-        Effects { items: Vec::new(), anim: Vec::new(), last_tick: 0.0, tick_gap: 0.05 }
+        Effects { items: Vec::new(), anim: Vec::new(), last_tick: 0.0, tick_gap: 0.05, blends: Default::default() }
     }
 
     pub fn clear(&mut self) {
         self.items.clear();
         self.anim.clear();
+        self.blends.borrow_mut().clear();
     }
 
     /// Call once per sim tick.
@@ -78,9 +119,15 @@ impl Effects {
         for e in &w.events {
             self.items.push((*e, 0.0));
         }
-        if self.anim.len() != w.units.len() {
-            self.anim = w
-                .units
+        if self.anim.len() > w.units.len() {
+            // A new battle: start over.
+            self.anim.clear();
+            self.blends.borrow_mut().clear();
+        }
+        if self.anim.len() < w.units.len() {
+            // Units joining mid-battle (summons, waves) keep everyone else's state.
+            let have = self.anim.len();
+            let more: Vec<Anim> = w.units[have..]
                 .iter()
                 .map(|u| {
                     let h = heading_of(C - u.x, C - u.y);
@@ -99,9 +146,38 @@ impl Effects {
                         phase: 0.0,
                         special: 0,
                         skill: None,
+                        fight_start: -10.0,
+                        last_hit: -10.0,
+                        aim: (u.x, u.y),
+                        hurt: -10.0,
+                        push: (0.0, 0.0),
+                        slide_from: (u.x, u.y),
+                        slide_at: -10.0,
+                        slide_dur: 0.0,
+                        jumped: false,
+                        gait: 0.0,
+                        dist: 0.0,
+                        pdist: 0.0,
                     }
                 })
                 .collect();
+            self.anim.extend(more);
+        }
+        for a in &mut self.anim {
+            a.jumped = false;
+        }
+        // Who got hit this tick: a flash and a small push away from the blow.
+        for e in &w.events {
+            if !matches!(e.kind, EventKind::Melee | EventKind::GuardHit | EventKind::Arrow | EventKind::TowerShot | EventKind::Blast) {
+                continue;
+            }
+            if let Some(i) = w.units.iter().position(|u| !u.kind.is_building() && (u.x - e.to.0).abs() < 1e-3 && (u.y - e.to.1).abs() < 1e-3) {
+                let (dx, dy) = (e.to.0 - e.from.0, e.to.1 - e.from.1);
+                let d = (dx * dx + dy * dy).sqrt().max(1e-3);
+                let a = &mut self.anim[i];
+                a.hurt = now;
+                a.push = (dx / d, dy / d);
+            }
         }
         // Who acted this tick: the unit standing where the event started.
         for e in &w.events {
@@ -116,6 +192,22 @@ impl Effects {
                 let a = &mut self.anim[i];
                 if a.special != 0 && now - a.acted < 0.3 && !matches!(e.kind, EventKind::Dodge | EventKind::Blink | EventKind::Ward | EventKind::Skill(_)) {
                     continue; // a skill's own hits don't restart its animation
+                }
+                if matches!(e.kind, EventKind::Blink | EventKind::Skill(Skill::Shadowstep)) {
+                    a.jumped = true;
+                }
+                if matches!(e.kind, EventKind::Melee | EventKind::Arrow | EventKind::GuardHit | EventKind::Heal) {
+                    // Basic hits keep one swing going rather than restarting it.
+                    if now - a.last_hit > FIGHT_LINGER + 0.6 {
+                        // Start part-way in, so the first blow lands right away.
+                        a.fight_start = now - 0.28;
+                    }
+                    a.last_hit = now;
+                    a.aim = e.to;
+                    if (e.to.0 - e.from.0).abs() + (e.to.1 - e.from.1).abs() > 1e-3 {
+                        a.target_heading = heading_of(e.to.0 - e.from.0, e.to.1 - e.from.1);
+                    }
+                    continue;
                 }
                 a.acted = now;
                 (a.special, a.skill) = match e.kind {
@@ -132,13 +224,25 @@ impl Effects {
         for (a, u) in self.anim.iter_mut().zip(&w.units) {
             let (dx, dy) = (u.x - a.x, u.y - a.y);
             let d = (dx * dx + dy * dy).sqrt();
+            let dash = d > 1.0 && !a.jumped;
+            if dash {
+                // Dash from where it was drawn to where it now is.
+                a.slide_from = (a.x, a.y);
+                a.slide_at = now;
+                a.slide_dur = (d * 0.06).clamp(0.14, 0.3);
+            }
+            a.pdist = a.dist;
+            if !a.jumped {
+                a.dist += d;
+            }
+            a.gait = a.gait * 0.6 + if a.jumped || dash { 0.0 } else { d } * 0.4;
             if d > 0.01 {
                 if dx.abs() > 0.01 {
                     a.face = dx.signum();
                 }
                 a.phase += d * 9.0;
                 a.still = 0.0;
-                if now - a.acted > 0.4 {
+                if now - a.acted > 0.4 && now - a.last_hit > 0.4 && !a.jumped {
                     a.target_heading = heading_of(dx, dy);
                 }
             } else {
@@ -164,6 +268,11 @@ impl Effects {
         }
     }
 
+    /// How many times faster than normal the battle is running.
+    fn speedup(&self) -> f64 {
+        (1.0 / crate::battle_screen::WATCH_TPS as f64 / self.tick_gap).clamp(1.0, 4.0)
+    }
+
     /// How far (0 to 1) the picture is between the last two ticks.
     fn blend(&self) -> f32 {
         ((crate::record::now() - self.last_tick) / self.tick_gap).clamp(0.0, 1.0) as f32
@@ -175,10 +284,27 @@ impl Effects {
             return (u.x, u.y, 0.0);
         };
         let k = self.blend();
+        let now = crate::record::now();
         let (dx, dy) = (a.x - a.px, a.y - a.py);
         // Blinks and shadowsteps jump; don't slide across the map.
-        if dx * dx + dy * dy > 4.0 || (a.x - u.x).abs() + (a.y - u.y).abs() > 1e-3 {
+        if a.jumped || (a.x - u.x).abs() + (a.y - u.y).abs() > 1e-3 {
             return (u.x, u.y, a.heading);
+        }
+        let (mut x, mut y) = (a.px + dx * k, a.py + dy * k);
+        let since = (now - a.slide_at) as f32;
+        if since < a.slide_dur {
+            // Rolls and charges: a quick dash that slows at the end.
+            let f = since / a.slide_dur;
+            let e = 1.0 - (1.0 - f) * (1.0 - f);
+            x = a.slide_from.0 + (a.x - a.slide_from.0) * e;
+            y = a.slide_from.1 + (a.y - a.slide_from.1) * e;
+        }
+        let hit = (now - a.hurt) as f32;
+        if hit < 0.16 && u.alive {
+            // Knocked back a little by the blow, then recovers.
+            let r = 0.16 * (1.0 - hit / 0.16);
+            x += a.push.0 * r;
+            y += a.push.1 * r;
         }
         let mut dh = a.heading - a.pheading;
         while dh > std::f32::consts::PI {
@@ -187,7 +313,7 @@ impl Effects {
         while dh < -std::f32::consts::PI {
             dh += std::f32::consts::TAU;
         }
-        (a.px + dx * k, a.py + dy * k, a.pheading + dh * k)
+        (x, y, a.pheading + dh * k)
     }
 
     pub fn age(&mut self, dt: f32) {
@@ -299,7 +425,7 @@ impl View {
 
     pub fn camera(&self) -> Camera3D {
         Camera3D {
-            position: vec3(0.0, 1.5, 0.0) + vec3(0.0, 55.0, 38.5) * ZOOM.with(|z| z.get()),
+            position: vec3(0.0, 1.5, 0.0) + vec3(0.0, 50.0, 43.0) * ZOOM.with(|z| z.get()),
             target: vec3(0.0, 0.0, 1.5),
             up: Vec3::Y,
             fovy: 0.45,
@@ -630,9 +756,22 @@ const CHAR_SCALE: f32 = 1.0;
 
 #[derive(Clone, Copy)]
 struct CharPose {
-    clip_kind: u8, // 0 idle, 1 walk, 2 attack, 3 death, 4 dodge, 5 block, 6 skill, 7 stunned
+    clip_kind: u8, // 0 idle, 1 walk, 2 attack, 3 death, 4 dodge, 5 block, 6 skill, 7 stunned, 8 run
     t: f32,
     skill: Option<Skill>,
+}
+
+impl CharPose {
+    const fn new(clip_kind: u8, t: f32) -> CharPose {
+        CharPose { clip_kind, t, skill: None }
+    }
+}
+
+/// How a character in a battle looks this frame, besides its clip.
+#[derive(Clone, Copy, Default)]
+struct Extra {
+    /// 0 to 1: the red flash of a hit just taken.
+    hurt: f32,
 }
 
 fn tint_of(fig: &Figure) -> Color {
@@ -643,17 +782,45 @@ fn tint_of(fig: &Figure) -> Color {
     Color::new(0.7 + 0.3 * c.r, 0.7 + 0.3 * c.g, 0.7 + 0.3 * c.b, 1.0)
 }
 
-/// Draw one character. Returns false if its model is not loaded.
-fn draw_character(lib: &Library, fig: &Figure, npc_guard: bool, pos: Vec3, heading: f32, pose: CharPose, scale: f32) -> bool {
+/// What this character wears, holds and plays.
+fn gear(fig: &Figure, npc_guard: bool) -> (Loadout, Vec<&'static str>) {
     let mut lo = if npc_guard { NPC_GUARD } else { loadout(fig.main, fig.raider) };
-    let Some(m) = lib.models.get(lo.model) else { return false };
-    let mut show: Vec<&str> = lo.show.to_vec();
+    let mut show: Vec<&'static str> = lo.show.to_vec();
     if let Some(w) = fig.weapon.filter(|_| !npc_guard && !fig.raider) {
         show.retain(|n| !WEAPON_MESHES.contains(n));
         (lo.props, lo.idle, lo.attack) = weapon_gear(w);
     }
+    (lo, show)
+}
+
+/// Seconds one attack swing of this character takes on screen.
+fn swing_len(lib: &Library, fig: &Figure, npc_guard: bool) -> f32 {
+    let (lo, _) = gear(fig, npc_guard);
+    lib.models.get(lo.model).and_then(|m| m.clip_len(lo.attack)).unwrap_or(1.0).max(0.3) / ATTACK_RATE
+}
+
+/// Draw one character. Returns false if its model is not loaded.
+fn draw_character(lib: &Library, fig: &Figure, npc_guard: bool, pos: Vec3, heading: f32, pose: CharPose, scale: f32) -> bool {
+    draw_character_ex(lib, fig, npc_guard, pos, heading, pose, scale, Extra::default(), None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_character_ex(
+    lib: &Library,
+    fig: &Figure,
+    npc_guard: bool,
+    pos: Vec3,
+    heading: f32,
+    pose: CharPose,
+    scale: f32,
+    extra: Extra,
+    blend: Option<&mut Blend>,
+) -> bool {
+    let (lo, show) = gear(fig, npc_guard);
+    let Some(m) = lib.models.get(lo.model) else { return false };
     let clip = match pose.clip_kind {
         1 => "Walking_A",
+        8 => "Running_A",
         2 => lo.attack,
         3 => "Death_A",
         4 => "Dodge_Backward",
@@ -662,15 +829,36 @@ fn draw_character(lib: &Library, fig: &Figure, npc_guard: bool, pos: Vec3, headi
         7 => "Hit_A",
         _ => lo.idle,
     };
-    let looped = matches!(pose.clip_kind, 0 | 1 | 5);
+    let looped = matches!(pose.clip_kind, 0 | 1 | 2 | 5 | 8);
     let speed = match pose.clip_kind {
-        1 => 1.4,
+        2 => ATTACK_RATE,
         4 => 1.6,
         _ => 1.0,
     };
-    let g = m.pose(Some(clip), pose.t * speed, looped);
+    let now_clip = (clip, pose.t * speed, looped);
+    let g = match blend {
+        Some(b) => {
+            let now = crate::record::now();
+            if b.now.map(|c| c.0) != Some(clip) {
+                // A new animation: fade out of the old one's last frame.
+                b.from = b.now;
+                b.at = now;
+            }
+            b.now = Some(now_clip);
+            let w = ((now - b.at) / BLEND_TIME) as f32;
+            match b.from {
+                Some(f) if w < 1.0 => m.pose_blend((Some(f.0), f.1, f.2), (Some(clip), now_clip.1, looped), w * w * (3.0 - 2.0 * w)),
+                _ => m.pose(Some(clip), now_clip.1, looped),
+            }
+        }
+        None => m.pose(Some(clip), now_clip.1, looped),
+    };
     let world = Mat4::from_scale_rotation_translation(Vec3::splat(scale), Quat::from_rotation_y(heading), pos);
-    let tint = if npc_guard { WHITE } else { tint_of(fig) };
+    let mut tint = if npc_guard { WHITE } else { tint_of(fig) };
+    if extra.hurt > 0.0 {
+        let h = extra.hurt;
+        tint = Color::new(tint.r, tint.g * (1.0 - 0.55 * h), tint.b * (1.0 - 0.6 * h), tint.a);
+    }
     m.draw(world, &g, &|n| !is_accessory(m, n) || show.contains(&n), tint);
     for &(prop, bone) in lo.props {
         attach(lib, m, &g, world, prop, bone, Mat4::IDENTITY);
@@ -870,7 +1058,7 @@ pub fn draw_showcase3d(c: Vec2, r: f32, fig: &Figure) -> bool {
     let t = crate::record::now() as f32;
     // Show off the attack every few seconds.
     let cyc = t % 4.0;
-    let pose = if cyc > 2.8 { CharPose { clip_kind: 2, t: cyc - 2.8, skill: None } } else { CharPose { clip_kind: 0, t, skill: None } };
+    let pose = if cyc > 3.1 { CharPose::new(2, cyc - 3.1) } else { CharPose::new(0, t) };
     let ok = draw_character(&lib, fig, false, Vec3::ZERO, -0.25, pose, 1.0);
     end_3d();
     ok
@@ -925,6 +1113,8 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
 
     // ---- 3D pass
     let mut flat: Vec<usize> = Vec::new(); // units without a model: 2D fallback
+    // Melee fighters mid-swing: how far through it (0 to 1) and what they hit.
+    let mut swings: Vec<Option<(f32, (f32, f32))>> = vec![None; w.units.len()];
     begin_3d(v.r, v.camera(), false);
     for (i, u) in w.units.iter().enumerate() {
         let a = fx.anim.get(i).copied();
@@ -969,12 +1159,25 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             (looks[i].as_ref().map(|l| l.fig).unwrap_or_else(Figure::raider), false)
         };
         let a = a.unwrap_or_default();
+        let mut pos = pos;
+        let fighting = fx.anim.get(i).and_then(|_| {
+            // Keep swinging while hits keep coming, and finish a swing once
+            // started. On fast forward the swings speed up with the battle.
+            let len = swing_len(lib, &fig, npc) as f64 / fx.speedup();
+            let ft = now - a.fight_start;
+            let since = now - a.last_hit;
+            let swing_of_hit = ((ft - since) / len).floor();
+            (since < FIGHT_LINGER || (ft / len).floor() <= swing_of_hit).then_some((ft as f32, len as f32))
+        });
+        let stride = a.pdist + (a.dist - a.pdist) * fx.blend();
         let pose = if let Some(d) = a.died {
             let since = (now - d) as f32;
-            if since > 2.5 {
+            if since > 4.0 {
                 continue;
             }
-            CharPose { clip_kind: 3, t: since, skill: None }
+            // Fall, lie still, then sink away.
+            pos.y -= (since - 3.0).max(0.0) * 0.7;
+            CharPose::new(3, since)
         } else if !u.alive {
             continue;
         } else if u.stun > 0 {
@@ -985,10 +1188,13 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             CharPose { clip_kind: 6, t: (now - a.acted) as f32, skill: a.skill }
         } else if u.block_ticks > 0 {
             CharPose { clip_kind: 5, t: t + i as f32 * 0.37, skill: None }
-        } else if (now - a.acted) < 0.9 {
-            CharPose { clip_kind: 2, t: (now - a.acted) as f32, skill: None }
+        } else if let Some((ft, len)) = fighting {
+            swings[i] = Some(((ft / len).fract(), a.aim));
+            CharPose::new(2, ft * fx.speedup() as f32)
+        } else if a.still < 0.25 && a.gait > 0.15 {
+            CharPose::new(8, stride / RUN_STRIDE)
         } else if a.still < 0.25 {
-            CharPose { clip_kind: 1, t: t + i as f32 * 0.37, skill: None }
+            CharPose::new(1, stride / WALK_STRIDE)
         } else {
             CharPose { clip_kind: 0, t: t + i as f32 * 0.37, skill: None }
         };
@@ -1004,7 +1210,12 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         if u.cloak > 0 && looks[i].as_ref().map_or(true, |l| l.hostile) {
             continue; // an enemy in cloak is invisible (a shimmer is drawn later)
         }
-        if !draw_character(lib, &fig, npc, pos, heading, pose, CHAR_SCALE) {
+        let extra = Extra { hurt: (1.0 - (now - a.hurt) as f32 / 0.15).clamp(0.0, 1.0) * u.alive as u8 as f32 };
+        let mut blends = fx.blends.borrow_mut();
+        if blends.len() < w.units.len() {
+            blends.resize(w.units.len(), Blend::default());
+        }
+        if !draw_character_ex(lib, &fig, npc, pos, heading, pose, CHAR_SCALE, extra, Some(&mut blends[i])) {
             flat.push(i);
         }
     }
@@ -1127,6 +1338,48 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         }
     }
 
+    // ---- Swings: a slash across the target as the blow lands.
+    for (i, sw) in swings.iter().enumerate() {
+        let (Some((ph, aim)), u) = (sw, &w.units[i]) else { continue };
+        if u.range > 2.0 || u.heal > 0.0 {
+            continue;
+        }
+        const HIT: (f32, f32) = (0.36, 0.6);
+        if *ph < HIT.0 || *ph > HIT.1 {
+            continue;
+        }
+        let k = (ph - HIT.0) / (HIT.1 - HIT.0);
+        let (ux, uy, _) = sp[i];
+        let (dx, dy) = (aim.0 - ux, aim.1 - uy);
+        let d = (dx * dx + dy * dy).sqrt().max(1e-3);
+        let (nx, ny) = (dx / d, dy / d);
+        // Centre a little in front of the target, the arc across the blow.
+        let (cx, cy) = (aim.0 - nx * 0.25, aim.1 - ny * 0.25);
+        let fade = (1.0 - k) * 0.9;
+        let col = Color::new(1.0, 0.96, 0.82, fade);
+        let segs = 9;
+        let sweep = (k * 1.6).min(1.0);
+        let mut prev: Option<Vec2> = None;
+        for j in 0..=segs {
+            let f = j as f32 / segs as f32;
+            if f > sweep {
+                break;
+            }
+            let ang = (f - 0.5) * 2.2;
+            let (ca, sa) = (ang.cos(), ang.sin());
+            let (ox, oy) = (-nx * ca * 0.25 + -ny * sa * 0.7, -ny * ca * 0.25 + nx * sa * 0.7);
+            let q = v.p3(cx + ox, cy + oy, 0.75 + 0.45 * (1.0 - f));
+            if let Some(p0) = prev {
+                draw_line(p0.x, p0.y, q.x, q.y, 1.5 + 3.5 * (1.0 - (f - 0.5).abs() * 2.0), col);
+            }
+            prev = Some(q);
+        }
+        if (0.0..0.35).contains(&k) {
+            let c = v.p3(aim.0, aim.1, 0.8);
+            draw_circle(c.x, c.y, 3.0 + 14.0 * k, Color::new(1.0, 0.9, 0.6, 0.5 * (1.0 - k / 0.35)));
+        }
+    }
+
     // ---- Effects
     for (e, age) in &fx.items {
         let life = effect_life(e.kind);
@@ -1137,7 +1390,11 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         match e.kind {
             EventKind::Melee | EventKind::GuardHit => {
                 let col = if e.kind == EventKind::Melee { Color::new(1.0, 0.95, 0.7, a) } else { Color::new(1.0, 0.5, 0.4, a) };
-                draw_circle_lines(to.x, to.y, 5.0 + 12.0 * age, 2.0, col);
+                if *age > 0.2 {
+                    continue;
+                }
+                let col = Color::new(col.r, col.g, col.b, col.a * 0.6);
+                draw_circle_lines(to.x, to.y, 3.0 + 10.0 * age, 1.5, col);
                 for k in 0..4 {
                     let ang = k as f32 * 1.57 + 0.4;
                     let r0 = 4.0 + 18.0 * age;

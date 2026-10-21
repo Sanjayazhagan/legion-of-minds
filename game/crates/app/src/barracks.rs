@@ -59,6 +59,15 @@ impl Game {
             self.confirm_release = false;
             return Screen::Team(crate::teamtrain::TeamState::new(self));
         }
+        let online = if self.account.signed_in() { "Online" } else { "Sign in" };
+        if self.ui.button(Rect::new(1030.0, ui_y, 230.0, 44.0), online) {
+            self.confirm_release = false;
+            return if self.account.signed_in() {
+                Screen::Online(crate::online::OnlineState::new(self))
+            } else {
+                Screen::SignIn(crate::online::SignInState::from_game(&self.account))
+            };
+        }
 
         // Roster list
         let list = Rect::new(20.0, 124.0, 400.0, H - 144.0);

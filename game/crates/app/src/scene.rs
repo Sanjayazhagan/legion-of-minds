@@ -182,8 +182,31 @@ impl Model {
         self.nodes.iter().position(|n| n.name == name)
     }
 
+    /// Length of `clip` in seconds.
+    pub fn clip_len(&self, clip: &str) -> Option<f32> {
+        self.clips.get(clip).map(|c| c.duration)
+    }
+
     /// Global transform of every node for `clip` at time `t` (seconds).
     pub fn pose(&self, clip: Option<&str>, t: f32, looped: bool) -> Vec<Mat4> {
+        self.globals(&self.sample(clip, t, looped))
+    }
+
+    /// `from` faded into `to`: `w` 0 is all `from`, 1 all `to`. Switching
+    /// clips through this instead of cutting keeps characters from popping.
+    pub fn pose_blend(&self, from: (Option<&str>, f32, bool), to: (Option<&str>, f32, bool), w: f32) -> Vec<Mat4> {
+        if w >= 1.0 {
+            return self.pose(to.0, to.1, to.2);
+        }
+        let a = self.sample(from.0, from.1, from.2);
+        let b = self.sample(to.0, to.1, to.2);
+        let mixed: Vec<(Vec3, Quat, Vec3)> =
+            a.iter().zip(&b).map(|(x, y)| (x.0.lerp(y.0, w), x.1.slerp(y.1, w), x.2.lerp(y.2, w))).collect();
+        self.globals(&mixed)
+    }
+
+    /// Local translation, rotation and scale of every node.
+    fn sample(&self, clip: Option<&str>, t: f32, looped: bool) -> Vec<(Vec3, Quat, Vec3)> {
         let mut trs: Vec<(Vec3, Quat, Vec3)> = self.nodes.iter().map(|n| (n.t, n.r, n.s)).collect();
         if let Some(c) = clip.and_then(|c| self.clips.get(c)) {
             let t = if looped && c.duration > 0.0 { t.rem_euclid(c.duration) } else { t.clamp(0.0, c.duration) };
@@ -215,6 +238,10 @@ impl Model {
                 }
             }
         }
+        trs
+    }
+
+    fn globals(&self, trs: &[(Vec3, Quat, Vec3)]) -> Vec<Mat4> {
         let mut g = vec![Mat4::IDENTITY; self.nodes.len()];
         for &i in &self.order {
             let (t, r, s) = trs[i];
