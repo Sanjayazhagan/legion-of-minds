@@ -198,10 +198,11 @@ fn restore_ui_camera() {
 /// Pixel viewport (GL origin bottom-left) for a rect in UI coordinates.
 fn viewport_px(r: Rect) -> (i32, i32, i32, i32) {
     let (vx, vy, s) = SCREEN.with(|c| c.get());
-    let sh = screen_height();
+    let (sh, d) = (screen_height(), screen_dpi_scale());
     let x = vx + r.x * s;
     let y = sh - (vy + (r.y + r.h) * s);
-    (x.round() as i32, y.round() as i32, (r.w * s).round() as i32, (r.h * s).round() as i32)
+    // In real pixels (see Ui::begin).
+    ((x * d).round() as i32, (y * d).round() as i32, (r.w * s * d).round() as i32, (r.h * s * d).round() as i32)
 }
 
 /// Start drawing 3D into `r` with `cam` (its viewport and aspect are set here).

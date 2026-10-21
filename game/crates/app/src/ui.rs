@@ -43,7 +43,10 @@ impl Ui {
         // A negative height makes y grow downwards on screen (from_display_rect
         // alone renders upside down when drawing to the window).
         let mut cam = Camera2D::from_display_rect(Rect::new(0.0, H, W, -H));
-        cam.viewport = Some((vx as i32, vy as i32, vw as i32, vh as i32));
+        // Viewports are in real pixels, while screen size and the mouse are in
+        // scaled ones: they differ when Windows display scaling is above 100%.
+        let d = screen_dpi_scale();
+        cam.viewport = Some(((vx * d) as i32, (vy * d) as i32, (vw * d) as i32, (vh * d) as i32));
         set_camera(&cam);
         crate::render::set_screen(vx, vy, s, &cam);
         let (mx, my) = mouse_position();
