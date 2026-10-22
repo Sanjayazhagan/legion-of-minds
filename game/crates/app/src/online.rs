@@ -170,7 +170,14 @@ enum Phase {
     },
     /// Test login in flight.
     Dev(Task<(String, User)>),
+    /// The server can't be reached: telling the player, then going offline
+    /// by itself at `at` (seconds, `record::now`).
+    GoingOffline { at: f64 },
 }
+
+/// How long the "server is down" alert stays up before the game goes
+/// offline by itself.
+const OFFLINE_AFTER_SECS: f64 = 4.0;
 
 pub struct SignInState {
     phase: Phase,
@@ -209,6 +216,12 @@ impl SignInState {
             error: None,
             then_online,
         }
+    }
+}
+
+fn going_offline() -> Phase {
+    Phase::GoingOffline {
+        at: crate::record::now() + OFFLINE_AFTER_SECS,
     }
 }
 
@@ -269,6 +282,10 @@ impl Game {
                 s.providers_task = None;
             }
         }
+        if matches!(s.providers, Some(Err(_))) && matches!(s.phase, Phase::Choose) {
+            // Down, or not deployed yet: say so, then play offline.
+            s.phase = going_offline();
+        }
 
         match &s.phase {
             Phase::Checking(task) => {
@@ -284,10 +301,12 @@ impl Game {
                                 // The saved session ran out: sign in again.
                                 self.account.token = None;
                                 self.account.save(&self.store.dir);
+                                s.phase = Phase::Choose;
                             } else {
-                                s.error = Some(e);
+                                // Server down: keep the saved session for
+                                // next time and play offline.
+                                s.phase = going_offline();
                             }
-                            s.phase = Phase::Choose;
                         }
                     }
                 } else {
@@ -411,6 +430,53 @@ impl Game {
                 text_centered("Opening your browser...", W / 2.0, y + 40.0, 26.0, TEXT);
                 return Screen::SignIn(s);
             }
+            Phase::GoingOffline { at } => {
+                let left = at - crate::record::now();
+                if left <= 0.0 {
+                    return self.go_offline();
+                }
+                let (head, hint) = if is_this_computer(&self.account.server) {
+                    (
+                        "No game server is running on this computer.",
+                        "Start one (see backend/README.md) to play online.",
+                    )
+                } else {
+                    (
+                        "Can't reach the game server.",
+                        "It may be down, or your internet may be off.",
+                    )
+                };
+                text_centered(head, W / 2.0, y + 30.0, 24.0, BAD);
+                text_centered(hint, W / 2.0, y + 60.0, 18.0, MUTED);
+                text_centered(
+                    &format!("Switching to offline play in {}...", left.ceil() as i32),
+                    W / 2.0,
+                    y + 120.0,
+                    22.0,
+                    TEXT,
+                );
+                text_centered(
+                    "Your troops and base are saved on this computer.",
+                    W / 2.0,
+                    y + 150.0,
+                    16.0,
+                    MUTED,
+                );
+                y += 200.0;
+                if self.ui.button(Rect::new(x, y, bw, 44.0), "Try again") {
+                    let then_online = s.then_online;
+                    let mut s = SignInState::startup(&self.account);
+                    s.then_online = then_online;
+                    return Screen::SignIn(s);
+                }
+                if self.ui.button(
+                    Rect::new(x, box_r.y + box_r.h - 84.0, bw, 48.0),
+                    "Play offline now",
+                ) {
+                    return self.go_offline();
+                }
+                return Screen::SignIn(s);
+            }
             Phase::Choose => {}
         }
 
@@ -428,29 +494,8 @@ impl Game {
                 );
                 y += 60.0;
             }
-            Some(Err(_)) => {
-                let (head, hint) = if is_this_computer(&self.account.server) {
-                    (
-                        "No game server is running on this computer.",
-                        "Start one (see backend/README.md), or play offline.",
-                    )
-                } else {
-                    (
-                        "Can't reach the game server.",
-                        "Check your internet connection; the server may also be down.",
-                    )
-                };
-                text_centered(head, W / 2.0, y + 30.0, 22.0, BAD);
-                text_centered(hint, W / 2.0, y + 56.0, 16.0, MUTED);
-                y += 74.0;
-                if self.ui.button(Rect::new(x, y, bw, 44.0), "Retry") {
-                    let c = self.account.client();
-                    s.providers = None;
-                    s.error = None;
-                    s.providers_task = Some(Task::spawn(move || c.providers().map_err(err)));
-                }
-                y += 56.0;
-            }
+            // A failed check turns into GoingOffline above.
+            Some(Err(_)) => {}
             Some(Ok(p)) => {
                 y += 16.0;
                 if p.oauth.is_empty() && !p.dev {
@@ -553,6 +598,11 @@ impl Game {
             MUTED,
         );
         Screen::SignIn(s)
+    }
+
+    fn go_offline(&mut self) -> Screen {
+        self.toast("Playing offline: online raids come back once the server is up");
+        Screen::Barracks
     }
 
     fn after_sign_in(&mut self, s: &SignInState) -> Screen {
