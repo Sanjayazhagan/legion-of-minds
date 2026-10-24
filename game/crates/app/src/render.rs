@@ -32,6 +32,36 @@ pub struct Effects {
     /// Screen shake strength (world units), fading out.
     shake: f32,
     seed: u32,
+    /// Calls troops made to each other, newest last.
+    pub calls: Vec<HeardCall>,
+}
+
+/// A call one troop shouted to its team, for the bubbles and the call log.
+#[derive(Clone, Copy)]
+pub struct HeardCall {
+    /// Unit index of the caller.
+    pub from: usize,
+    pub kind: u8,
+    /// The enemy a "focus" call points at.
+    pub target: Option<usize>,
+    pub at: f64,
+}
+
+/// What a call says, as shown on screen.
+pub fn call_words(kind: u8) -> &'static str {
+    match kind {
+        0 => "Focus!",
+        1 => "Fall back!",
+        _ => "Help!",
+    }
+}
+
+pub fn call_color(kind: u8) -> Color {
+    match kind {
+        0 => Color::new(1.0, 0.45, 0.35, 1.0),
+        1 => Color::new(0.5, 0.75, 1.0, 1.0),
+        _ => Color::new(0.5, 1.0, 0.55, 1.0),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -140,7 +170,7 @@ fn heading_of(dx: f32, dy: f32) -> f32 {
 
 impl Effects {
     pub fn new() -> Self {
-        Effects { items: Vec::new(), anim: Vec::new(), last_tick: 0.0, tick_gap: 0.05, blends: Default::default(), parts: Vec::new(), shake: 0.0, seed: 0x2545_f491 }
+        Effects { items: Vec::new(), anim: Vec::new(), last_tick: 0.0, tick_gap: 0.05, blends: Default::default(), parts: Vec::new(), shake: 0.0, seed: 0x2545_f491, calls: Vec::new() }
     }
 
     pub fn clear(&mut self) {
@@ -149,6 +179,13 @@ impl Effects {
         self.blends.borrow_mut().clear();
         self.parts.clear();
         self.shake = 0.0;
+        self.calls.clear();
+    }
+
+    /// The call unit `i` made in the last moment, if any.
+    pub fn recent_call(&self, i: usize) -> Option<HeardCall> {
+        let now = crate::record::now();
+        self.calls.iter().rev().find(|c| c.from == i && now - c.at < 1.6).copied()
     }
 
     /// Call once per sim tick.
@@ -462,7 +499,16 @@ impl Effects {
                     self.burst(PKind::Dust, e.to, 0.1, 4, 1.5, 0.2, 0.7, 0.4, Color::new(0.75, 0.68, 0.55, 1.0));
                 }
                 EventKind::Cloak | EventKind::Ward => sfx::play(Sfx::Shimmer, fx, 0.6, 0.0),
-                EventKind::Call(_) => sfx::play(Sfx::Click, fx, 0.5, 0.0),
+                EventKind::Call(kind) => {
+                    sfx::play(Sfx::Click, fx, 0.5, 0.0);
+                    let find = |p: (f32, f32)| w.units.iter().position(|u| u.alive && (u.x - p.0).abs() < 1e-3 && (u.y - p.1).abs() < 1e-3);
+                    if let Some(from) = find(e.from) {
+                        let target = if kind == 0 && e.to != e.from { find(e.to) } else { None };
+                        self.calls.push(HeardCall { from, kind, target, at: crate::record::now() });
+                        let cut = self.calls.len().saturating_sub(8);
+                        self.calls.drain(..cut);
+                    }
+                }
                 EventKind::Blink => sfx::play(Sfx::Blink, fx, 0.8, 0.0),
                 EventKind::TrapSet => sfx::play(Sfx::Trap, tx, 0.4, 0.0),
                 EventKind::TrapHit => {
@@ -1712,21 +1758,35 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         let to = v.p3(e.to.0, e.to.1, 0.7);
         match e.kind {
             EventKind::Call(c) => {
-                // A speech bubble over the caller: ! focus, < fall back, + help.
-                let (sym, col) = match c {
-                    0 => ("!", Color::new(1.0, 0.45, 0.35, a)),
-                    1 => ("<", Color::new(0.5, 0.75, 1.0, a)),
-                    _ => ("+", Color::new(0.5, 1.0, 0.55, a)),
-                };
+                // A speech bubble over the caller with what it shouts; only
+                // its newest call, so repeated shouts don't pile up.
+                let near = |p: (f32, f32)| (p.0 - e.from.0).abs() + (p.1 - e.from.1).abs() < 1.5;
+                if fx.items.iter().any(|(o, oa)| matches!(o.kind, EventKind::Call(_)) && *oa < *age && near(o.from)) {
+                    continue;
+                }
+                let (words, col) = (call_words(c), call_color(c));
+                let col = Color::new(col.r, col.g, col.b, a);
                 let b = v.p3(e.from.0, e.from.1, 2.6);
                 let lift = 8.0 * k;
-                let paper = Color::new(1.0, 1.0, 1.0, 0.92 * a);
-                draw_triangle(vec2(b.x - 6.0, b.y - lift + 12.0), vec2(b.x + 4.0, b.y - lift + 12.0), vec2(b.x - 9.0, b.y - lift + 22.0), paper);
-                draw_circle(b.x, b.y - lift, 16.0, paper);
-                draw_circle_lines(b.x, b.y - lift, 16.0, 2.5, col);
-                draw_text(sym, b.x - 7.0, b.y - lift + 9.0, 32.0, col);
+                let tw = text_width(words, 20.0);
+                let r = Rect::new(b.x - tw / 2.0 - 8.0, b.y - lift - 30.0, tw + 16.0, 26.0);
+                let paper = Color::new(1.0, 1.0, 1.0, 0.94 * a);
+                draw_triangle(vec2(b.x - 6.0, r.y + r.h), vec2(b.x + 4.0, r.y + r.h), vec2(b.x - 8.0, r.y + r.h + 9.0), paper);
+                draw_rectangle(r.x, r.y, r.w, r.h, paper);
+                draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, col);
+                draw_rectangle(r.x, r.y, 5.0, r.h, col);
+                crate::ui::text(words, r.x + 9.0, r.y + 19.0, 20.0, Color::new(0.08, 0.08, 0.12, a));
                 if c == 0 && (e.to.0 - e.from.0).abs() + (e.to.1 - e.from.1).abs() > 1e-3 {
-                    // Mark the enemy the caller points at.
+                    // A line to the enemy the caller points at, and a ring on it.
+                    let t = v.p(e.to.0, e.to.1);
+                    let f = v.p(e.from.0, e.from.1);
+                    let n = 10;
+                    for s in 0..n {
+                        if s % 2 == 0 {
+                            let (p0, p1) = (f.lerp(t, s as f32 / n as f32), f.lerp(t, (s + 1) as f32 / n as f32));
+                            draw_line(p0.x, p0.y, p1.x, p1.y, 2.0, Color::new(col.r, col.g, col.b, 0.7 * a));
+                        }
+                    }
                     v.ring(e.to.0, e.to.1, 0.9 + 0.3 * k, 2.5, col);
                 }
             }

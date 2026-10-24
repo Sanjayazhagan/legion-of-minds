@@ -8,7 +8,7 @@ use crate::env::{EpisodeInfo, Opponents};
 use crate::nn::{Adam, Cache, Mlp};
 use crate::ppo::{masked_log_probs, ppo_update, sample, Batch, PpoConfig, Segment};
 use crate::rng::Rng;
-use crate::scenario::{add_raiders, build_team_defense, build_team_drill, MAX_TEAM, MIN_TEAM};
+use crate::scenario::{add_raiders, build_team_defense, build_team_drill, hardness_strength, MAX_HARDNESS, MAX_TEAM, MIN_TEAM};
 use crate::sim::{Control, Kind, Outcome, Team, World, N_ACTIONS, TOWER_HP};
 use rayon::prelude::*;
 
@@ -34,6 +34,8 @@ pub struct TeamEnv {
     pub team: Vec<ClassSpec>,
     pub world: World,
     pub rng: Rng,
+    /// How hard the next drills are (1 to MAX_HARDNESS).
+    pub hardness: u8,
     pool: Option<Opponents>,
     npcs: Vec<(usize, usize)>,
     cache: Cache,
@@ -51,6 +53,7 @@ impl TeamEnv {
             team,
             world: World::new(1),
             rng: Rng::new(seed),
+            hardness: 1,
             pool: pool.filter(|p| !p.is_empty()),
             npcs: Vec::new(),
             cache: Cache::default(),
@@ -80,7 +83,8 @@ impl TeamEnv {
         let vs_pool = self.pool.is_some() && self.rng.chance(self.self_play());
         if self.defending() {
             let (mut w, from) = build_team_defense(&self.team, &mut self.rng);
-            let raiders = (n - 1 + self.rng.below(2)).max(2);
+            // Harder raids bring one more raider per step, all tougher.
+            let raiders = (n - 1 + self.rng.below(2)).max(2) + (self.hardness.max(1) - 1) as usize;
             if vs_pool {
                 let pool = self.pool.clone().unwrap();
                 for _ in 0..raiders {
@@ -90,11 +94,11 @@ impl TeamEnv {
                     self.npcs.push((i, p));
                 }
             } else {
-                add_raiders(&mut w, raiders, from, 1.0, &mut self.rng);
+                add_raiders(&mut w, raiders, from, hardness_strength(self.hardness), &mut self.rng);
             }
             self.world = w;
         } else {
-            let mut w = build_team_drill(&self.team, &mut self.rng);
+            let mut w = build_team_drill(&self.team, self.hardness, &mut self.rng);
             if vs_pool {
                 // The player's own defenders take the guards' places.
                 let pool = self.pool.clone().unwrap();
@@ -296,6 +300,8 @@ pub struct TeamReport {
     /// Training steps each member took this round.
     pub steps: Vec<u64>,
     pub seconds: f32,
+    /// How hard the drills are now.
+    pub hardness: u8,
 }
 
 /// PPO for a team: one rollout of the shared drills, then each member's
@@ -303,9 +309,19 @@ pub struct TeamReport {
 pub struct TeamTrainer {
     pub cfg: PpoConfig,
     pub members: Vec<Member>,
+    /// The drills' hardness, 1 to MAX_HARDNESS, or 0 to adjust it to the
+    /// team: harder once it wins most drills, easier if it keeps losing.
+    pub hardness: u8,
+    /// The hardness drills are played at now.
+    pub level: u8,
     workers: Vec<TeamWorker>,
     rng: Rng,
+    /// Drills played and won since the level last changed (auto only).
+    tally: (u32, u32),
 }
+
+/// Auto hardness: judge after this many drills at a level.
+const AUTO_DRILLS: u32 = 60;
 
 impl TeamTrainer {
     pub fn new(team: Vec<(ClassSpec, Mlp, Mlp)>, seed: u64, cfg: PpoConfig, pool: Option<Opponents>) -> Self {
@@ -328,11 +344,21 @@ impl TeamTrainer {
                 Member { actor, critic, opt_a: Adam::new(na), opt_c: Adam::new(nc), steps: 0 }
             })
             .collect();
-        TeamTrainer { cfg, members, workers, rng }
+        TeamTrainer { cfg, members, hardness: 1, level: 1, workers, rng, tally: (0, 0) }
+    }
+
+    /// Set the drills' hardness: 1 to MAX_HARDNESS, or 0 for auto.
+    pub fn set_hardness(&mut self, h: u8) {
+        self.hardness = h.min(MAX_HARDNESS);
+        self.level = self.hardness.max(1);
+        self.tally = (0, 0);
     }
 
     pub fn iterate(&mut self) -> TeamReport {
         let t0 = std::time::Instant::now();
+        for w in &mut self.workers {
+            w.env.hardness = self.level;
+        }
         let t_n = self.cfg.n_steps;
         let members = &self.members;
         let nm = members.len();
@@ -418,7 +444,20 @@ impl TeamTrainer {
             m.steps += steps[k];
             ppo_update(&cfg, &mut m.actor, &mut m.critic, &mut m.opt_a, &mut m.opt_c, &mut self.rng, &batch);
         }
-        TeamReport { episodes, steps, seconds: t0.elapsed().as_secs_f32() }
+        if self.hardness == 0 {
+            self.tally.0 += episodes.len() as u32;
+            self.tally.1 += episodes.iter().filter(|e| e.won).count() as u32;
+            if self.tally.0 >= AUTO_DRILLS {
+                let rate = self.tally.1 as f32 / self.tally.0 as f32;
+                if rate >= 0.8 && self.level < MAX_HARDNESS {
+                    self.level += 1;
+                } else if rate < 0.35 && self.level > 1 {
+                    self.level -= 1;
+                }
+                self.tally = (0, 0);
+            }
+        }
+        TeamReport { episodes, steps, seconds: t0.elapsed().as_secs_f32(), hardness: self.level }
     }
 }
 

@@ -244,6 +244,8 @@ fn main() {
                 println!("{} ({}), brain {:?}", t.name, t.spec.name, t.actor.dims);
             }
             let mut tr = godcore::team::TeamTrainer::for_troops(&troops, seed, PpoConfig::default(), pool);
+            // --hardness 1..5, or auto
+            tr.set_hardness(arg(&args, "--hardness").map(|h| if h == "auto" { 0 } else { h.parse().unwrap() }).unwrap_or(1));
             let t0 = std::time::Instant::now();
             let mut recent: Vec<EpisodeInfo> = Vec::new();
             while tr.members.iter().map(|m| m.steps).min().unwrap_or(0) < steps {
@@ -251,7 +253,7 @@ fn main() {
                 recent.extend_from_slice(&rep.episodes);
                 let keep = recent.len().saturating_sub(300);
                 recent.drain(..keep);
-                println!("{:>8} steps each  {:5.1}s/it  {}", tr.members[0].steps, rep.seconds, summary(&recent));
+                println!("{:>8} steps each  {:5.1}s/it  hardness {}  {}", tr.members[0].steps, rep.seconds, rep.hardness, summary(&recent));
             }
             tr.finish(&mut troops, &recent);
             for (t, f) in troops.iter().zip(&files) {
@@ -262,9 +264,10 @@ fn main() {
             println!("team trained in {:.0}s", t0.elapsed().as_secs_f32());
         }
         Some("teameval") => {
-            // godctl teameval a.json,b.json [n]: the team plays fixed team drills with no randomness.
+            // godctl teameval a.json,b.json [n] [--hardness H]: the team plays fixed team drills with no randomness.
             let troops: Vec<Troop> = args[2].split(',').map(|f| Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap()).collect();
             let n: u64 = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(200);
+            let hardness: u8 = arg(&args, "--hardness").map(|h| h.parse().unwrap()).unwrap_or(1);
             let specs: Vec<_> = troops.iter().map(|t| t.spec.clone()).collect();
             let k = troops.len();
             let (mut wins, mut destr) = (0, 0.0);
@@ -281,6 +284,10 @@ fn main() {
             let mut healed_who = vec![vec![0u32; k + 1]; k];
             for s in 0..n {
                 let mut env = godcore::team::TeamEnv::new(specs.clone(), 70_000 + s, None);
+                if hardness > 1 {
+                    env.hardness = hardness;
+                    env.reset();
+                }
                 loop {
                     let acts: Vec<u8> = (0..k)
                         .map(|j| if env.active(j) { godcore::ppo::greedy_action(&troops[j].actor, &env.obs(j), &env.mask(j), &mut cache) } else { 0 })

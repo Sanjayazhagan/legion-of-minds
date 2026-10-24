@@ -201,6 +201,12 @@ Those drills are the kind the "together" troops trained in, so the attack teams 
 
 Together-trained teams won the easy bases faster with nobody lost, and seed 2 took Twin Gate, which no apart team managed. Seed 1 did worse at Twin Gate. Nobody can beat Citadel yet. Short version: team training makes troops play as a team, and it usually helps, but it is not a guaranteed win, and run-to-run luck still matters.
 
+### Drill hardness
+
+Team drills can be made harder on the Team training screen. Hardness 1 is the standard drill. Each step up adds 10% health and damage to the defence, plus one more guard. From hardness 4 the base also gets a fourth tower. In defence drills, each step adds one more raider, with the same 10% boost. **Auto** starts at 1. After every 60 drills it goes up one step if the team won at least 80% of them, and down one step if it won under 35%. That keeps the drills just hard enough for the team to keep learning.
+
+A team trained for 1.3M steps at hardness 1 won 97% of hardness-1 drills, 51% at 2, 3% at 3 and 0% at 4: easy drills had taught it nothing about hard fights.
+
 ## 11. Whom to heal, and talents that grow with level
 
 **Heals pick a target.** Earlier, the game chose the heal target for the troop: the most hurt ally in reach. Now a healer has two heal actions, "heal my nearest ally" and "heal my second nearest ally". It sees both allies' health, role and whether they are under attack, so it has to learn whom to save first. A heal is always one ally at a time.
@@ -306,6 +312,17 @@ All teams took 3 stars on Outpost and Fort, and none could beat the Citadel. Tea
 At this amount of training, troops learn to call, but they haven't yet learned to gain anything from it. The extra inputs are one more thing to learn, the same way senses needed more training at first (section 12).
 
 After another 1M steps of team training (seed 5 teams), the two were level. Team drills: 96.5% won with calls, 97.5% without. Both teams lost Twin Gate with about the same damage done (30% and 32% destroyed). Calling teams still called 16 to 20 times a drill. Their raids on Outpost were quicker (191 ticks against 218). Calls cost nothing to have, but on these drills they haven't shown a clear win yet. Their best use is likely harder fights and bigger teams, where no single troop can see everything.
+
+### On hard drills, calls pay off
+
+Next, both of those teams trained another 500k steps on **Auto** hardness (section 10). The team with calls climbed to hardness 4. The team without calls stayed mostly at 3.
+
+| | Hardness 3 drills | Hardness 4 drills | Twin Gate | Citadel |
+|---|---|---|---|---|
+| No calls | 91% won | 62.5% won | 2 stars (72%) | 9% destroyed |
+| Calls | 99.5% won | 85.5% won | 3 stars, all troops alive | 41% destroyed |
+
+Easy drills never needed teamwork, so calls didn't help there. Once drills got hard, the calling team clearly pulled ahead. Training took the same time for both (about 1,500 s).
 
 The first version made a call use up the turn. Teams called 45 times a drill and did worse. That is why calls are now free.
 

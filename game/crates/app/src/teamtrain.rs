@@ -11,7 +11,7 @@ use godcore::env::{EpisodeInfo, Opponents};
 use godcore::nn::{Cache, Mlp};
 use godcore::ppo::{greedy_action, PpoConfig};
 use godcore::rng::Rng;
-use godcore::scenario::{add_raiders, build_team_defense, build_team_drill, MAX_TEAM, MIN_TEAM};
+use godcore::scenario::{add_raiders, build_team_defense, build_team_drill, hardness_strength, MAX_HARDNESS, MAX_TEAM, MIN_TEAM};
 use godcore::sim::{Outcome, World};
 use godcore::team::{team_problem, TeamTrainer, TEAM_SPIRIT};
 use godcore::troop::{Skills, Troop};
@@ -27,6 +27,8 @@ struct Shared {
     trainer: Option<TeamTrainer>,
     recent: Vec<EpisodeInfo>,
     rate: f32,
+    /// The drills' hardness right now.
+    level: u8,
     done: bool,
 }
 
@@ -52,12 +54,14 @@ pub struct TeamState {
     preview: Option<Preview>,
     seed: u64,
     finished: Option<String>,
+    /// Drill hardness 1-5, or 0 for auto.
+    hardness: u8,
 }
 
 impl TeamState {
     pub fn new(g: &Game) -> Self {
         let side = g.selected.map_or(Role::Attack, |i| g.troops[i].spec.role);
-        TeamState { side, members: Vec::new(), budget: 100_000, job: None, preview: None, seed: 1, finished: None }
+        TeamState { side, members: Vec::new(), budget: 100_000, job: None, preview: None, seed: 1, finished: None, hardness: 0 }
     }
 
     /// Demo for screenshots: the first troops of the most common side.
@@ -72,7 +76,7 @@ impl TeamState {
     }
 }
 
-fn spawn(troops: &[Troop], budget: u64, pool: Option<Opponents>) -> Job {
+fn spawn(troops: &[Troop], budget: u64, pool: Option<Opponents>, hardness: u8) -> Job {
     let shared = Arc::new(Mutex::new(Shared::default()));
     let stop = Arc::new(AtomicBool::new(false));
     let (sh, st) = (shared.clone(), stop.clone());
@@ -80,6 +84,8 @@ fn spawn(troops: &[Troop], budget: u64, pool: Option<Opponents>) -> Job {
     let troops = troops.to_vec();
     std::thread::spawn(move || {
         let mut tr = TeamTrainer::for_troops(&troops, seed, PpoConfig::default(), pool);
+        tr.set_hardness(hardness);
+        sh.lock().unwrap().level = tr.level;
         let t0 = std::time::Instant::now();
         let mut recent: Vec<EpisodeInfo> = Vec::new();
         while tr.members.iter().map(|m| m.steps).min().unwrap_or(0) < budget && !st.load(Ordering::Relaxed) {
@@ -92,6 +98,7 @@ fn spawn(troops: &[Troop], budget: u64, pool: Option<Opponents>) -> Job {
             s.actors = tr.members.iter().map(|m| m.actor.clone()).collect();
             s.recent = recent.clone();
             s.rate = s.steps.iter().sum::<u64>() as f32 / t0.elapsed().as_secs_f32();
+            s.level = rep.hardness;
         }
         let mut s = sh.lock().unwrap();
         s.trainer = Some(tr);
@@ -154,13 +161,14 @@ impl Game {
             if s.preview.is_none() {
                 s.seed = s.seed.wrapping_add(1);
                 let mut rng = Rng::new(s.seed ^ 0x7ea);
+                let level = s.job.as_ref().map_or(s.hardness.max(1), |j| j.shared.lock().unwrap().level.max(1));
                 let world = if s.side == Role::Defend {
                     let (mut w, from) = build_team_defense(&specs, &mut rng);
-                    let n = (specs.len() - 1 + rng.below(2)).max(2);
-                    add_raiders(&mut w, n, from, 1.0, &mut rng);
+                    let n = (specs.len() - 1 + rng.below(2)).max(2) + (level - 1) as usize;
+                    add_raiders(&mut w, n, from, hardness_strength(level), &mut rng);
                     w
                 } else {
-                    build_team_drill(&specs, &mut rng)
+                    build_team_drill(&specs, level, &mut rng)
                 };
                 let actors = latest.clone().unwrap_or_else(|| s.members.iter().map(|&i| self.troops[i].actor.clone()).collect());
                 s.preview = Some(Preview { world, actors, cache: Cache::default(), acc: 0.0, end_hold: 0.0 });
@@ -297,6 +305,8 @@ impl Game {
                 "Collecting the first batch of team drills...".to_string()
             };
             text(&line, rx, y + 48.0, 16.0, MUTED);
+            let auto = if s.hardness == 0 { " (auto: harder as the team wins)" } else { "" };
+            text(&format!("Drill hardness {} of {MAX_HARDNESS}{auto}", sh.level.max(1)), rx, y + 72.0, 16.0, MUTED);
             let done = sh.done;
             drop(sh);
             let stop = Rect::new(rx, H - 80.0, rw, 50.0);
@@ -364,10 +374,31 @@ impl Game {
                     }
                     bx += 112.0;
                 }
+                text("Drill hardness", rx, y + 88.0, 18.0, TEXT);
+                let bw = (rw - 5.0 * 6.0) / 6.0;
+                for h in 0..=MAX_HARDNESS {
+                    let label = if h == 0 { "Auto".to_string() } else { h.to_string() };
+                    let r = Rect::new(rx + h as f32 * (bw + 6.0), y + 98.0, bw, 34.0);
+                    if self.ui.button_ex(r, &label, true, s.hardness == h) && s.hardness != h {
+                        s.hardness = h;
+                        s.preview = None;
+                    }
+                }
+                let hint = match s.hardness {
+                    0 => "Auto starts at 1 and raises it each time the team wins 4 drills in 5.".to_string(),
+                    1 => "1 is the standard drill.".to_string(),
+                    h => format!("{} more guards{}, all {}% tougher.", h - 1, if h >= 4 { " and a fourth tower" } else { "" }, (h - 1) * 10),
+                };
+                let hint = if s.side == Role::Defend && s.hardness > 1 {
+                    format!("{} more raiders, all {}% tougher.", s.hardness - 1, (s.hardness - 1) * 10)
+                } else {
+                    hint
+                };
+                text(&hint, rx, y + 152.0, 15.0, MUTED);
                 if self.ui.button(Rect::new(rx, H - 80.0, rw, 50.0), &format!("Train together (+{} each)", fmt_steps(s.budget))) {
                     let team: Vec<Troop> = s.members.iter().map(|&i| self.troops[i].clone()).collect();
                     let pool = self.team_opponents(s.side);
-                    s.job = Some(spawn(&team, s.budget, pool));
+                    s.job = Some(spawn(&team, s.budget, pool, s.hardness));
                     s.finished = None;
                     s.preview = None;
                 }
