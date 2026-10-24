@@ -4,20 +4,21 @@ Every troop has its own small brain that learns by trial and error on your compu
 
 ## 1. What a troop sees
 
-Battles run in ticks (30 a second when you watch). Every tick, each trained troop gets a list of 90 numbers describing its surroundings:
+Battles run in ticks (20 per battle second, shown at 6 a second when you watch). Every tick, each trained troop gets a list of 109 numbers describing its surroundings (the last 9, added in sim version 7, are calls from teammates: section 13). Since sim version 6 it only knows what its senses tell it (section 12), so "nearest" below means nearest of the ones it has seen:
 
 - **Itself:** where it is on the map, its health, whether its weapon is ready, how much time is left, and whether it can hit a unit, hit a building or heal right now.
 - **The 2 nearest buildings:** where they are, how damaged they are, and whether each one is a tower. Attackers see the buildings they are raiding; defenders see the ones they protect.
 - **The 3 nearest enemies:** where they are, how hurt they are, and whether they are about to strike.
 - **The 2 nearest allies, plus the most injured ally nearby.** Healers use this. For each of the 2 nearest allies it also sees their role (tank, striker, ranged or healer), whether something is attacking them, and whether they are fighting or healing right now (section 10). It also sees which of the two it could heal right now and how far its talents reach (section 11).
 - **The overall picture:** the share of enemy buildings and enemy troops still standing.
+- **Its senses (section 12):** which way it is looking, how fresh its knowledge of each of those buildings and enemies is, and the direction and loudness of the nearest fight it can hear.
 - **Its moves and weapon:** which class moves it has and whether each is ready, whether its weapon skill is ready, whether its guard is up, cloaked or shielded by a ward, how many enemies are close enough for a spin or slam, whether the nearest enemies are stunned or blocking, and which weapon it holds.
 
 Positions are relative ("a guard 3 steps to my left"), so the same brain works on any base layout.
 
 ## 2. What a troop can do
 
-It has 21 actions, borrowed from action RPGs and MOBAs. The last seven are class moves, and a troop can only use the ones its classes bring (section 9):
+It has 24 actions, borrowed from action RPGs and MOBAs. Seven are class moves, and a troop can only use the ones its classes bring (section 9):
 
 | Action | What it does |
 |---|---|
@@ -32,6 +33,7 @@ It has 21 actions, borrowed from action RPGs and MOBAs. The last seven are class
 | **Blink** | Teleport away from the nearest threat |
 | **Snare** | Drop a hidden trap that hurts and stuns the first enemy to step on it |
 | **Ward** | Shield every ally close by: they take less damage for 1.5 s |
+| Call: focus / fall back / help | Shout to nearby teammates while carrying on; only with a teammate in range (section 13) |
 
 Actions that make no sense right now are blocked, such as attacking out of range, dodging with no enemy near, or using a skill that would hit nothing. The brain only ever chooses between moves that are possible.
 
@@ -229,6 +231,83 @@ Paladin + Archer + Healer, 4 seeds at level 1 and 4 at level 5, 300 team drills 
 What the troops learned to prioritise: healers send about three quarters of their heals to the Paladin, the tank in front. They learn this even in solo training, and team training keeps it. The "most hurt" ally is not always the right pick: the Archer often has less health left but is out of danger behind the Paladin.
 
 Under the new rules, team training helped on 7 of 8 runs and drew on the 8th. Teams trained together won 88 to 99% of team drills, against 34 to 92% for the same troops trained apart. The Healer survived far more often and healed more on every run. Level 1 and level 5 teams ended up about the same, because this team's basic heals are single target anyway. Reach matters most for Mages, Warlocks and Holy Wand users. Their strength at each level has not been re-measured yet.
+
+## 12. Senses: troops that act like people
+
+Sanjay asked for troops with senses that imitate humans (2026-10-21). Before this, a trained troop always knew exactly where its nearest enemies and buildings were, even behind it or behind a wall. Now (sim version 6) trained troops know only what they notice:
+
+| Sense or limit | Rule |
+|---|---|
+| Sight | A cone 120 degrees wide and 14 steps long in the direction the troop faces. |
+| Blocked view | A standing building between the troop and something hides it. |
+| Touch | Anything within 2.5 steps is noticed, even from behind. |
+| Hearing | The direction and loudness of the nearest fight within 12 steps, even out of sight. |
+| Memory | An enemy that goes out of sight is remembered where it was last seen for 3 seconds, fading. Buildings, once seen, are remembered for the whole battle. |
+| Reaction time | Something newly seen can't be attacked for 4 ticks (0.2 s). |
+| Turning | Troops turn at about a half turn per 6 ticks. They turn towards where they walk, and a troop has to face its target within 45 degrees to strike; otherwise that tick is spent turning. Standing still, a troop turns towards the nearest fight it hears. |
+| Aim | Ranged shots can miss: 4% up close, up to 24% at full range, plus 12% if the target is moving. Buildings are missed 2% of the time. A miss still uses up the attack. |
+
+Towers, guards and scripted troops are unchanged: they still know where everyone is. Randomness for misses comes from a fixed dice roll on the tick and the two units, so a battle still replays exactly and the server can check it.
+
+The battle screen draws each trained troop's sight cone as a faint wedge on the ground.
+
+### Measured
+
+Same four classes, same seed, 64-neuron brains, 200 drills per check.
+
+| Troop | Training | Old rules: solo / squad wins | New rules: solo / squad wins |
+|---|---|---|---|
+| Fighter | 150k steps | 92% / 47% | 0% / 17% |
+| Archer | 150k steps | 46% / 25% | 7% / 27% |
+| Healer | 150k steps | 0% / 54% | 0% / 53% |
+| Mage | 150k steps | 6% / 22% | 1% / 22% |
+| Fighter | 600k steps | 89% / 74% | 79% / 82% |
+| Archer | 600k steps | 90% / 32% | 57% / 22% |
+
+Troops need more training to learn to look around, keep enemies in view and turn before striking. With 4 times the training the Fighter almost caught up and did better in squad drills. The Archer is still behind because of missed shots. The scripted fighter, which knows where everything is, barely changed (55% → 55% solo), so the drop comes from what a trained troop has to learn, not from the fights being harder.
+
+Full squad (600k Fighter and Archer, 150k Healer and Mage) against the built-in bases: 3 stars on Outpost, Fort and Twin Gate under both rules, but each raid took longer (Outpost 139 → 202 ticks, Twin Gate 324 → 404). Neither rule set beat the Citadel. Training runs about as fast as before (1,680 steps a second here, against 1,580).
+
+Old saves still load: the brain grows to the 100 new numbers, but it learned under the old rules, so retrain before relying on it.
+
+## 13. Calls: troops that talk to each other
+
+Since sim version 7 a trained troop can shout one of three calls to its teammates:
+
+| Call | Bubble | Points at |
+|---|---|---|
+| Focus | red ! | the nearest enemy the caller can see (a ring marks it) |
+| Fall back | blue < | the caller |
+| Help | green + | the caller |
+
+The calls have no meaning built in. A troop only learns what "focus" means because, during team training, teammates that react to it well win more. Two teams can end up using the same call for different things.
+
+- **Who hears it:** teammates with senses within 12 steps of the caller. Walls don't block calls. A troop doesn't hear its own calls.
+- **When:** a call is taken in after the same 0.2 s reaction delay as sight, and fades after 1.5 s.
+- **What the listener gets:** 9 more inputs (109 in total): for each call, which way it points and how fresh it is.
+- **Cost:** none. A shout doesn't use up the turn; the troop keeps doing what it did the tick before. A troop can call at most every 0.5 s.
+- **Solo troops:** a troop alone has nobody to call, so calls are switched off for it. Solo training gives exactly the same troop as before; we checked byte for byte.
+
+Enemies can hear calls like any other noise, so shouting can give a troop away.
+
+### Measured
+
+Fighter, Archer and Healer, each trained solo for 150k steps, then trained as a team for 300k steps. 200 team drills, plus one raid on each built-in base.
+
+| | Team drills won | Calls per drill (Fighter / Archer / Healer) | Twin Gate |
+|---|---|---|---|
+| No calls, seed 5 | 100% | none | 2 stars |
+| No calls, seed 6 | 100% | none | 2 stars |
+| Calls, seed 5 | 90% | 18 / 22 / 9 | 0 stars |
+| Calls, seed 6 | 100% | 18 / 22 / 15 | 0 stars |
+
+All teams took 3 stars on Outpost and Fort, and none could beat the Citadel. Team training took the same time with and without calls (about 745 s each).
+
+At this amount of training, troops learn to call, but they haven't yet learned to gain anything from it. The extra inputs are one more thing to learn, the same way senses needed more training at first (section 12).
+
+After another 1M steps of team training (seed 5 teams), the two were level. Team drills: 96.5% won with calls, 97.5% without. Both teams lost Twin Gate with about the same damage done (30% and 32% destroyed). Calling teams still called 16 to 20 times a drill. Their raids on Outpost were quicker (191 ticks against 218). Calls cost nothing to have, but on these drills they haven't shown a clear win yet. Their best use is likely harder fights and bigger teams, where no single troop can see everything.
+
+The first version made a call use up the turn. Teams called 45 times a drill and did worse. That is why calls are now free.
 
 ## In one line
 

@@ -1,8 +1,13 @@
 [package]
-name = "become-a-god"
+name = "legion-of-minds"
 version.workspace = true
 edition.workspace = true
-description = "Become a God: train tiny RL troops on your own machine and send them into battle"
+description = "Legion of Minds: train tiny RL troops on your own machine and send them into battle"
+
+[features]
+# Test mode with cheats (unlimited gold and more). Only in builds made with
+# `--features cheats`; normal builds have no cheat code at all.
+cheats = []
 
 [dependencies]
 gltf = { version = "1", default-features = false, features = ["names", "utils"] }
@@ -13,5 +18,6 @@ dirs = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rayon = "1"
+tinyaudio = "2"
 # Online play: the server's own client library (backend/crates/client).
 bag-client = { path = "../../../backend/crates/client" }

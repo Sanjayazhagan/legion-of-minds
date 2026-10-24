@@ -2,7 +2,7 @@
 name = "godcore"
 version.workspace = true
 edition.workspace = true
-description = "Deterministic battle simulation and on-device PPO training for Become a God"
+description = "Deterministic battle simulation and on-device PPO training for Legion of Minds"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

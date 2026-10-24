@@ -241,15 +241,26 @@ fn browser_login(
 }
 
 impl Game {
+    /// Forget the session here and end it on the server (in the background).
+    pub fn sign_out(&mut self) {
+        let mut c = self.account.client();
+        std::thread::spawn(move || {
+            let _ = c.logout();
+        });
+        self.account.token = None;
+        self.account.user = None;
+        self.account.save(&self.store.home);
+    }
+
     fn signed_in(&mut self, token: String, user: User) {
         self.account.token = Some(token);
         self.account.user = Some(user);
-        self.account.save(&self.store.dir);
+        self.account.save(&self.store.home);
     }
 
     pub fn sign_in(&mut self, mut s: SignInState) -> Screen {
         draw_rectangle(0.0, 0.0, W, H, BG);
-        text_centered("BECOME A GOD", W / 2.0, 170.0, 64.0, ACCENT);
+        text_centered("LEGION OF MINDS", W / 2.0, 170.0, 64.0, ACCENT);
         text_centered(
             "Train tiny minds. Raid other players' bases.",
             W / 2.0,
@@ -283,7 +294,7 @@ impl Game {
                             if unauthorized(&e) {
                                 // The saved session ran out: sign in again.
                                 self.account.token = None;
-                                self.account.save(&self.store.dir);
+                                self.account.save(&self.store.home);
                             } else {
                                 s.error = Some(e);
                             }
@@ -724,7 +735,7 @@ impl Game {
                     if unauthorized(&e) {
                         self.account.token = None;
                         self.account.user = None;
-                        self.account.save(&self.store.dir);
+                        self.account.save(&self.store.home);
                         self.toast(SIGNED_OUT);
                         return Screen::SignIn(SignInState::from_game(&self.account));
                     }
@@ -828,14 +839,7 @@ impl Game {
             idle,
             false,
         ) {
-            let c = self.account.client();
-            std::thread::spawn(move || {
-                let mut c = c;
-                let _ = c.logout();
-            });
-            self.account.token = None;
-            self.account.user = None;
-            self.account.save(&self.store.dir);
+            self.sign_out();
             return Screen::SignIn(SignInState::from_game(&self.account));
         }
 

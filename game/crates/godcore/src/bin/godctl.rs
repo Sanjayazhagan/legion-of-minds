@@ -270,6 +270,7 @@ fn main() {
             let (mut wins, mut destr) = (0, 0.0);
             let mut alive = vec![0u32; k];
             let (mut dmg, mut heal, mut blocked) = (vec![0.0f32; k], vec![0.0f32; k], vec![0.0f32; k]);
+            let mut calls = vec![0u32; k];
             let mut cache = godcore::nn::Cache::default();
             // Heals where both nearest allies could be healed: how often the
             // more hurt one was picked, and, when only one of them was under
@@ -313,7 +314,7 @@ fn main() {
                             }
                             // Threat flags of the two allies in the troop's own view.
                             let o = env.obs(j);
-                            let base = godcore::sim::OBS_DIM - 16;
+                            let base = godcore::sim::OBS_TEAM;
                             let (t0, t1) = (o[base + 4] > 0.5, o[base + 11] > 0.5);
                             if t0 != t1 {
                                 threat_choices[j] += 1;
@@ -333,6 +334,7 @@ fn main() {
                             dmg[j] += st.unit_dmg + st.building_dmg;
                             heal[j] += st.heal;
                             blocked[j] += st.blocked;
+                            calls[j] += st.calls;
                         }
                         break;
                     }
@@ -354,12 +356,13 @@ fn main() {
             println!("team wins {:.1}%  destruction {:.0}%", wins as f32 / nf * 100.0, destr / nf * 100.0);
             for j in 0..k {
                 println!(
-                    "  {:<28} alive at end {:>5.1}%  damage {:>6.1}  healed {:>5.1}  blocked {:>5.1}{}",
+                    "  {:<28} alive at end {:>5.1}%  damage {:>6.1}  healed {:>5.1}  blocked {:>5.1}  calls {:>4.1}{}",
                     troops[j].spec.name,
                     alive[j] as f32 / nf * 100.0,
                     dmg[j] / nf,
                     heal[j] / nf,
                     blocked[j] / nf,
+                    calls[j] as f32 / nf,
                     if choices[j] > 0 {
                         format!(
                             "  picked the more hurt ally {:.0}% of {}, the one under attack {:.0}% of {}",

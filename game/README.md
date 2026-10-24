@@ -1,4 +1,4 @@
-# Become a God
+# Legion of Minds
 
 A desktop strategy game where every troop is a tiny reinforcement-learning agent that **you train on your own computer**. You recruit a troop, give it a training budget, watch it learn in live drills, then send squads against AI-built bases. Defence is RL too: you train defenders, build towers and cannons around your Town Hall, and they hold your base against raid waves or against your own trained army. Everything is Rust and nothing needs Python; a graphics card speeds up training big brains but is never required.
 
@@ -11,7 +11,7 @@ For a plain-language explanation of how the troops learn, see [docs/HOW_THE_RL_W
 You need a Rust toolchain (https://rustup.rs). Then:
 
 ```
-cargo run --release -p become-a-god
+cargo run --release -p legion-of-minds
 ```
 
 - **Windows, macOS:** nothing else needed.
@@ -22,12 +22,12 @@ cargo run --release -p become-a-god
 - The game draws with OpenGL, so the picture is always made by the graphics chip, built-in or a separate graphics card.
 - Battles always run on the CPU, on purpose: they must replay bit-for-bit on the server.
 - Training big brains (128 neurons per layer and up) uses the graphics card when there is one: the slow learning step runs there as compute shaders (wgpu: DirectX 12, Vulkan or Metal), while the practice games stay on the CPU. Small brains, and computers without a usable GPU, train on the CPU as before. The barracks shows which one is used (bottom right). `BAG_CPU_TRAINING=1` forces CPU training. The GPU step gives the same results as the CPU one up to rounding (test in `crates/gpu/tests`); `cargo run --release -p godgpu --bin gpubench -- 256 98304` times both on your machine.
-- On Windows laptops with two GPUs, the game asks the NVIDIA and AMD drivers for the fast one. If the driver still picks the built-in chip, choose "High performance" for `become-a-god.exe` in Windows Settings > System > Display > Graphics.
+- On Windows laptops with two GPUs, the game asks the NVIDIA and AMD drivers for the fast one. If the driver still picks the built-in chip, choose "High performance" for `legion-of-minds.exe` in Windows Settings > System > Display > Graphics.
 - The barracks screen shows which chip is drawing the game ("Graphics: ..." at the bottom left), and the game prints the same line when it starts.
 - Units glide between sim ticks, so movement is smooth at any frame rate even though battles run 20 ticks a second.
-- A PC with no working graphics driver at all (some virtual machines and remote desktops) only offers old OpenGL 1.1, which the game can't use. Placing Mesa's software `opengl32.dll` (from https://github.com/pal1000/mesa-dist-win, the "llvmpipe" one) next to `become-a-god.exe` makes it draw on the CPU instead. It runs, but slowly (about 20 frames a second in our tests).
+- A PC with no working graphics driver at all (some virtual machines and remote desktops) only offers old OpenGL 1.1, which the game can't use. Placing Mesa's software `opengl32.dll` (from https://github.com/pal1000/mesa-dist-win, the "llvmpipe" one) next to `legion-of-minds.exe` makes it draw on the CPU instead. It runs, but slowly (about 20 frames a second in our tests).
 
-Save data lives in your user data folder (`~/.local/share/become-a-god`, `~/Library/Application Support/become-a-god`, `%APPDATA%\become-a-god`). Set `BAG_SAVE_DIR` to put it elsewhere.
+Save data lives in your user data folder (`~/.local/share/legion-of-minds`, `~/Library/Application Support/legion-of-minds`, `%APPDATA%\legion-of-minds`). Saves from when the game was called Become a God (a `become-a-god` folder) are moved there the first time the game starts. Set `BAG_SAVE_DIR` to put it elsewhere.
 
 ## How to play
 

@@ -183,6 +183,7 @@ pub fn end_frame() -> bool {
             let mut child = rec.ffmpeg.take().unwrap();
             drop(child.stdin.take());
             let _ = child.wait();
+            crate::sfx::finish_recording(&rec.out, rec.frame as f64 / FPS);
             return true;
         }
         false

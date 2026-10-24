@@ -107,7 +107,24 @@ impl Ui {
             size,
             col,
         );
-        hover && self.clicked
+        let hit = hover && self.clicked;
+        if hit {
+            crate::sfx::play_ui(crate::sfx::Sfx::Click);
+        }
+        hit
+    }
+
+    /// A 0-to-1 slider; returns the new value while it is being dragged.
+    pub fn slider(&self, r: Rect, v: f32) -> f32 {
+        let grab = Rect::new(r.x - 8.0, r.y - 10.0, r.w + 16.0, r.h + 20.0);
+        let mut v = v.clamp(0.0, 1.0);
+        if self.hover(grab) && (is_mouse_button_down(MouseButton::Left) || self.clicked) {
+            v = ((self.mouse.x - r.x) / r.w).clamp(0.0, 1.0);
+        }
+        draw_rectangle(r.x, r.y + r.h / 2.0 - 3.0, r.w, 6.0, PANEL_HI);
+        draw_rectangle(r.x, r.y + r.h / 2.0 - 3.0, r.w * v, 6.0, ACCENT);
+        draw_circle(r.x + r.w * v, r.y + r.h / 2.0, 10.0, if self.hover(grab) { TEXT } else { ACCENT });
+        v
     }
 
     #[allow(dead_code)]

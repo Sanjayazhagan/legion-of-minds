@@ -62,6 +62,10 @@ impl Game {
         let online = if self.account.signed_in() { "Online" } else { "Sign in" };
         if self.ui.button(Rect::new(1030.0, ui_y, 230.0, 44.0), online) {
             self.confirm_release = false;
+            if self.store.is_test() {
+                self.toast("Online play is off in test mode. Turn it off in Settings.");
+                return Screen::Barracks;
+            }
             return if self.account.signed_in() {
                 Screen::Online(crate::online::OnlineState::new(self))
             } else {
@@ -342,33 +346,14 @@ impl Game {
         }
         let cost = level_up_cost(level);
         let th_cap = max_troop_level(self.profile.base.town_hall);
-        let can_level = level < MAX_LEVEL && level < th_cap && self.profile.gold >= cost;
-        let lv_label = if level >= MAX_LEVEL {
-            "Max level".to_string()
-        } else if level >= th_cap {
-            "Needs Town Hall".to_string()
-        } else {
-            format!("Level up ({cost}g)")
-        };
+        let (lv_label, can_level) = self.level_up_label(i);
         if self.ui.button_ex(
             Rect::new(x + 180.0, y, 200.0, 44.0),
             &lv_label,
             can_level,
             false,
         ) {
-            self.profile.gold -= cost;
-            let before = self.troops[i].hidden();
-            let reach = self.troops[i].spec.talents;
-            self.troops[i].level_up();
-            self.save_all();
-            let cap = fmt_steps(self.troops[i].cap());
-            let n = self.troops[i].hidden();
-            let mut grew = if n > before { format!(", brain grew to {n} neurons per layer") } else { String::new() };
-            let r = self.troops[i].spec.talents;
-            if r > reach {
-                grew += &format!(", area talents now reach {r} units");
-            }
-            self.toast(format!("{} reached level {}: trains up to {cap} steps{grew}", self.troops[i].name, level + 1));
+            self.level_up_troop(i);
         }
         if self
             .ui
@@ -418,6 +403,56 @@ impl Game {
             );
         }
         Screen::Barracks
+    }
+}
+
+impl Game {
+    /// The level-up button's label for troop `i`, and whether it can be pressed.
+    pub fn level_up_label(&self, i: usize) -> (String, bool) {
+        let level = self.troops[i].level;
+        let cost = level_up_cost(level);
+        let th_cap = max_troop_level(self.profile.base.town_hall);
+        if level >= MAX_LEVEL {
+            ("Max level".to_string(), false)
+        } else if level >= th_cap {
+            ("Needs Town Hall".to_string(), false)
+        } else {
+            (format!("Level up ({cost}g)"), self.profile.gold >= cost)
+        }
+    }
+
+    /// Why troop `i` can't level up right now, in words, if it can't.
+    pub fn level_up_blocker(&self, i: usize) -> Option<String> {
+        let t = &self.troops[i];
+        let cost = level_up_cost(t.level);
+        let th = self.profile.base.town_hall;
+        if t.level >= MAX_LEVEL {
+            Some(format!("{} is at the top level.", t.name))
+        } else if t.level >= max_troop_level(th) {
+            Some(format!("Level {} troops need Town Hall {}. Upgrade it in Home.", t.level + 1, t.level))
+        } else if self.profile.gold < cost {
+            Some(format!("Levelling {} costs {cost} gold; you have {}.", t.name, self.profile.gold))
+        } else {
+            None
+        }
+    }
+
+    /// Pay for and apply a level-up of troop `i`, and say what changed.
+    pub fn level_up_troop(&mut self, i: usize) {
+        let level = self.troops[i].level;
+        self.profile.gold -= level_up_cost(level);
+        let before = self.troops[i].hidden();
+        let reach = self.troops[i].spec.talents;
+        self.troops[i].level_up();
+        self.save_all();
+        let cap = fmt_steps(self.troops[i].cap());
+        let n = self.troops[i].hidden();
+        let mut grew = if n > before { format!(", brain grew to {n} neurons per layer") } else { String::new() };
+        let r = self.troops[i].spec.talents;
+        if r > reach {
+            grew += &format!(", area talents now reach {r} units");
+        }
+        self.toast(format!("{} reached level {}: trains up to {cap} steps{grew}", self.troops[i].name, level + 1));
     }
 }
 
