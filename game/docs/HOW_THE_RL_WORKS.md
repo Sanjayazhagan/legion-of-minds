@@ -313,6 +313,17 @@ At this amount of training, troops learn to call, but they haven't yet learned t
 
 After another 1M steps of team training (seed 5 teams), the two were level. Team drills: 96.5% won with calls, 97.5% without. Both teams lost Twin Gate with about the same damage done (30% and 32% destroyed). Calling teams still called 16 to 20 times a drill. Their raids on Outpost were quicker (191 ticks against 218). Calls cost nothing to have, but on these drills they haven't shown a clear win yet. Their best use is likely harder fights and bigger teams, where no single troop can see everything.
 
+### On hard drills, calls pay off
+
+Next, both of those teams trained another 500k steps on **Auto** hardness (section 10). The team with calls climbed to hardness 4. The team without calls stayed mostly at 3.
+
+| | Hardness 3 drills | Hardness 4 drills | Twin Gate | Citadel |
+|---|---|---|---|---|
+| No calls | 91% won | 62.5% won | 2 stars (72%) | 9% destroyed |
+| Calls | 99.5% won | 85.5% won | 3 stars, all troops alive | 41% destroyed |
+
+Easy drills never needed teamwork, so calls didn't help there. Once drills got hard, the calling team clearly pulled ahead. Training took the same time for both (about 1,500 s).
+
 The first version made a call use up the turn. Teams called 45 times a drill and did worse. That is why calls are now free.
 
 ## In one line
