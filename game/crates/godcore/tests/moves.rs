@@ -267,7 +267,7 @@ fn teammates_see_each_others_roles() {
     assert_eq!(w.units[healer].role(), Role::Healer);
     let o = w.observe(healer);
     // The healer's nearest ally is the tank, and the guard is on it.
-    let base = OBS_DIM - 16;
+    let base = godcore::sim::OBS_TEAM;
     assert_eq!(&o[base..base + 4], &[1.0, 0.0, 0.0, 0.0]);
     assert_eq!(o[base + 4], 1.0, "the tank is under threat");
 }

@@ -4,6 +4,7 @@
 
 use crate::art::{self, Figure, Pose};
 use crate::scene::{library, Library, Model};
+use crate::sfx::{self, Sfx};
 use crate::ui::*;
 use godcore::scenario::BuildKind;
 use godcore::scenario::DEPLOY_RADIUS;
@@ -26,6 +27,45 @@ pub struct Effects {
     tick_gap: f64,
     /// Per unit: the clip drawn last frame, to fade into the next one.
     blends: std::cell::RefCell<Vec<Blend>>,
+    /// Sparks, stone chips, dust and smoke.
+    parts: Vec<Particle>,
+    /// Screen shake strength (world units), fading out.
+    shake: f32,
+    seed: u32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PKind {
+    /// Bright streak from a blade or a block.
+    Spark,
+    /// A falling, bouncing piece of stone or wood.
+    Chip,
+    /// A puff that spreads and fades on the ground.
+    Dust,
+    /// Rises from damaged buildings.
+    Smoke,
+    /// Glowing bits from fire and magic.
+    Ember,
+}
+
+#[derive(Clone, Copy)]
+struct Particle {
+    kind: PKind,
+    x: f32,
+    y: f32,
+    h: f32,
+    vx: f32,
+    vy: f32,
+    vh: f32,
+    age: f32,
+    life: f32,
+    size: f32,
+    col: Color,
+}
+
+/// Left-right position of a sound from where it happens on the map.
+fn pan(x: f32) -> f32 {
+    (x - C) / C * 0.7
 }
 
 /// The clip a character showed last frame and the one it is fading out of.
@@ -34,6 +74,8 @@ struct Blend {
     now: Option<(&'static str, f32, bool)>,
     from: Option<(&'static str, f32, bool)>,
     at: f64,
+    /// Which swing of the current fight is showing (one whoosh per swing).
+    swing: i64,
 }
 
 /// Seconds a character takes to fade from one animation into the next.
@@ -98,13 +140,15 @@ fn heading_of(dx: f32, dy: f32) -> f32 {
 
 impl Effects {
     pub fn new() -> Self {
-        Effects { items: Vec::new(), anim: Vec::new(), last_tick: 0.0, tick_gap: 0.05, blends: Default::default() }
+        Effects { items: Vec::new(), anim: Vec::new(), last_tick: 0.0, tick_gap: 0.05, blends: Default::default(), parts: Vec::new(), shake: 0.0, seed: 0x2545_f491 }
     }
 
     pub fn clear(&mut self) {
         self.items.clear();
         self.anim.clear();
         self.blends.borrow_mut().clear();
+        self.parts.clear();
+        self.shake = 0.0;
     }
 
     /// Call once per sim tick.
@@ -171,7 +215,7 @@ impl Effects {
             if !matches!(e.kind, EventKind::Melee | EventKind::GuardHit | EventKind::Arrow | EventKind::TowerShot | EventKind::Blast) {
                 continue;
             }
-            if let Some(i) = w.units.iter().position(|u| !u.kind.is_building() && (u.x - e.to.0).abs() < 1e-3 && (u.y - e.to.1).abs() < 1e-3) {
+            if let Some(i) = w.units.iter().position(|u| u.alive && (u.x - e.to.0).abs() < 1e-3 && (u.y - e.to.1).abs() < 1e-3) {
                 let (dx, dy) = (e.to.0 - e.from.0, e.to.1 - e.from.1);
                 let d = (dx * dx + dy * dy).sqrt().max(1e-3);
                 let a = &mut self.anim[i];
@@ -221,7 +265,12 @@ impl Effects {
                 }
             }
         }
-        for (a, u) in self.anim.iter_mut().zip(&w.units) {
+        self.sounds_and_bits(w);
+        let mut fallen: Vec<usize> = Vec::new();
+        for (i, (a, u)) in self.anim.iter_mut().zip(&w.units).enumerate() {
+            if !u.alive && a.died.is_none() {
+                fallen.push(i);
+            }
             let (dx, dy) = (u.x - a.x, u.y - a.y);
             let d = (dx * dx + dy * dy).sqrt();
             let dash = d > 1.0 && !a.jumped;
@@ -248,6 +297,10 @@ impl Effects {
             } else {
                 a.still += 0.1;
             }
+            if u.alive && w.has_senses(i) {
+                // Trained troops look where the sim says they look.
+                a.target_heading = heading_of(u.facing.0, u.facing.1);
+            }
             // Turn smoothly, the short way round.
             let mut dh = a.target_heading - a.heading;
             while dh > std::f32::consts::PI {
@@ -265,6 +318,159 @@ impl Effects {
             a.py = a.y;
             a.x = u.x;
             a.y = u.y;
+        }
+        for i in fallen {
+            let u = &w.units[i];
+            if u.kind.is_building() {
+                // The building comes down: rumble, rubble, a cloud of dust.
+                sfx::play(Sfx::Collapse, pan(u.x), 1.0, 0.0);
+                self.shake = self.shake.max(0.55);
+                let r = u.radius.max(0.8);
+                for _ in 0..34 {
+                    let (vx, vy, vh) = (self.rnd(-3.5, 3.5), self.rnd(-3.5, 3.5), self.rnd(2.0, 7.0));
+                    let h = self.rnd(0.3, 2.4);
+                    let g = self.rnd(0.3, 0.55);
+                    let size = self.rnd(0.14, 0.34);
+                    self.add(PKind::Chip, u.x + vx * 0.1 * r, u.y + vy * 0.1 * r, h, (vx, vy, vh), 2.2, size, Color::new(g, g * 0.95, g * 0.9, 1.0));
+                }
+                for _ in 0..18 {
+                    let (vx, vy) = (self.rnd(-1.6, 1.6), self.rnd(-1.6, 1.6));
+                    let h = self.rnd(0.2, 1.8);
+                    let size = self.rnd(0.6, 1.2) * r;
+                    self.add(PKind::Dust, u.x, u.y, h, (vx, vy, 0.25), 2.0, size, Color::new(0.62, 0.58, 0.5, 1.0));
+                }
+            } else {
+                sfx::play(Sfx::Fall, pan(u.x), 0.9, 0.25);
+                for _ in 0..5 {
+                    let (vx, vy) = (self.rnd(-0.8, 0.8), self.rnd(-0.8, 0.8));
+                    self.add(PKind::Dust, u.x, u.y, 0.1, (vx, vy, 0.1), 0.9, 0.35, Color::new(0.7, 0.65, 0.55, 1.0));
+                }
+            }
+        }
+        // Smoke from badly damaged buildings, dust from running feet.
+        for (i, u) in w.units.iter().enumerate() {
+            if !u.alive {
+                continue;
+            }
+            if u.kind.is_building() && u.hp < u.max_hp * 0.5 && self.rnd(0.0, 1.0) < 0.3 {
+                let h = 1.2 + u.radius * 0.8;
+                let (vx, vy) = (self.rnd(-0.15, 0.15), self.rnd(-0.15, 0.15));
+                let dark = if u.hp < u.max_hp * 0.25 { 0.22 } else { 0.42 };
+                self.add(PKind::Smoke, u.x + vx, u.y + vy, h, (vx + 0.25, vy, 0.9), 2.4, 0.35, Color::new(dark, dark, dark * 1.05, 1.0));
+            }
+            let a = self.anim[i];
+            if u.kind == Kind::Troop && a.gait > 0.2 && (a.dist / 1.1).floor() != (a.pdist / 1.1).floor() {
+                self.add(PKind::Dust, u.x, u.y, 0.05, (0.0, 0.0, 0.05), 0.6, 0.22, Color::new(0.75, 0.7, 0.58, 1.0));
+            }
+        }
+    }
+
+    fn rnd(&mut self, lo: f32, hi: f32) -> f32 {
+        self.seed ^= self.seed << 13;
+        self.seed ^= self.seed >> 17;
+        self.seed ^= self.seed << 5;
+        lo + (hi - lo) * ((self.seed >> 8) as f32 / (1u32 << 24) as f32)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add(&mut self, kind: PKind, x: f32, y: f32, h: f32, v: (f32, f32, f32), life: f32, size: f32, col: Color) {
+        if self.parts.len() < 1500 {
+            self.parts.push(Particle { kind, x, y, h, vx: v.0, vy: v.1, vh: v.2, age: 0.0, life, size, col });
+        }
+    }
+
+    /// `n` pieces flying out from a point.
+    #[allow(clippy::too_many_arguments)]
+    fn burst(&mut self, kind: PKind, at: (f32, f32), h: f32, n: usize, speed: f32, up: f32, life: f32, size: f32, col: Color) {
+        for _ in 0..n {
+            let ang = self.rnd(0.0, std::f32::consts::TAU);
+            let sp = self.rnd(0.4, 1.0) * speed;
+            let vh = self.rnd(0.3, 1.0) * up;
+            let l = life * self.rnd(0.7, 1.2);
+            self.add(kind, at.0, at.1, h, (ang.cos() * sp, ang.sin() * sp, vh), l, size, col);
+        }
+    }
+
+    /// The sound and the flying bits for everything that happened this tick.
+    fn sounds_and_bits(&mut self, w: &World) {
+        let at = |p: (f32, f32)| w.units.iter().find(|u| (u.x - p.0).abs() < 1e-3 && (u.y - p.1).abs() < 1e-3);
+        const SPARK: Color = Color::new(1.0, 0.9, 0.55, 1.0);
+        const STONE: Color = Color::new(0.5, 0.48, 0.45, 1.0);
+        for e in &w.events {
+            let (fx, tx) = (pan(e.from.0), pan(e.to.0));
+            match e.kind {
+                EventKind::Melee | EventKind::GuardHit => {
+                    if at(e.to).is_some_and(|u| u.kind.is_building()) {
+                        sfx::play(Sfx::StoneHit, tx, 0.8, 0.0);
+                        self.burst(PKind::Chip, e.to, 1.0, 4, 2.0, 3.0, 0.9, 0.08, STONE);
+                        self.burst(PKind::Dust, e.to, 0.6, 1, 0.4, 0.2, 0.7, 0.35, Color::new(0.65, 0.6, 0.52, 1.0));
+                    } else {
+                        let blunt = self.rnd(0.0, 1.0) < 0.3;
+                        sfx::play(if blunt { Sfx::BluntHit } else { Sfx::BladeHit }, tx, 0.75, 0.0);
+                        self.burst(PKind::Spark, e.to, 0.9, 5, 4.5, 2.5, 0.22, 0.05, SPARK);
+                    }
+                }
+                EventKind::Arrow => {
+                    let magic = at(e.from).is_some_and(|u| u.splash > 0.0);
+                    sfx::play(if magic { Sfx::MagicBolt } else { Sfx::BowRelease }, fx, 0.6, 0.0);
+                    sfx::play(Sfx::ArrowImpact, tx, 0.55, 0.18);
+                    if magic {
+                        self.burst(PKind::Ember, e.to, 0.8, 6, 2.0, 2.0, 0.5, 0.06, Color::new(0.7, 0.55, 1.0, 1.0));
+                    }
+                }
+                EventKind::TowerShot => {
+                    if at(e.from).is_some_and(|u| u.style == 1) {
+                        sfx::play(Sfx::Cannon, fx, 0.9, 0.0);
+                        sfx::play(Sfx::Explosion, tx, 0.5, 0.25);
+                        self.shake = self.shake.max(0.12);
+                        self.burst(PKind::Dust, e.to, 0.3, 3, 1.0, 0.3, 0.9, 0.45, Color::new(0.55, 0.5, 0.45, 1.0));
+                        self.burst(PKind::Chip, e.to, 0.3, 5, 2.5, 3.5, 0.8, 0.07, Color::new(0.4, 0.33, 0.25, 1.0));
+                    } else {
+                        sfx::play(Sfx::BowRelease, fx, 0.5, 0.0);
+                        sfx::play(Sfx::ArrowImpact, tx, 0.45, 0.2);
+                    }
+                }
+                EventKind::Heal => {
+                    sfx::play(Sfx::Heal, tx, 0.55, 0.0);
+                    self.burst(PKind::Ember, e.to, 0.4, 5, 0.5, 1.6, 0.8, 0.06, Color::new(0.55, 1.0, 0.55, 1.0));
+                }
+                EventKind::Blast => {
+                    sfx::play(Sfx::Explosion, tx, 0.85, 0.0);
+                    self.shake = self.shake.max(0.25);
+                    self.burst(PKind::Ember, e.to, 0.6, 16, 4.0, 4.0, 0.7, 0.07, Color::new(1.0, 0.6, 0.25, 1.0));
+                    self.burst(PKind::Dust, e.to, 0.4, 4, 1.2, 0.4, 0.9, 0.6, Color::new(0.4, 0.35, 0.4, 1.0));
+                }
+                EventKind::Dodge => {
+                    sfx::play(Sfx::Dodge, fx, 0.7, 0.0);
+                }
+                EventKind::Blocked => {
+                    sfx::play(Sfx::Block, tx, 0.8, 0.0);
+                    self.burst(PKind::Spark, e.to, 1.0, 8, 5.0, 3.0, 0.25, 0.05, Color::new(0.75, 0.9, 1.0, 1.0));
+                }
+                EventKind::Stun => sfx::play(Sfx::Stun, tx, 0.6, 0.0),
+                EventKind::Skill(sk) => {
+                    let s = match sk {
+                        Skill::HealingNova => Sfx::Shimmer,
+                        Skill::Shadowstep => Sfx::Blink,
+                        _ => Sfx::Charge,
+                    };
+                    sfx::play(s, fx, 0.9, 0.0);
+                    self.shake = self.shake.max(0.1);
+                }
+                EventKind::Charge => {
+                    sfx::play(Sfx::Charge, tx, 0.9, 0.0);
+                    self.burst(PKind::Dust, e.to, 0.1, 4, 1.5, 0.2, 0.7, 0.4, Color::new(0.75, 0.68, 0.55, 1.0));
+                }
+                EventKind::Cloak | EventKind::Ward => sfx::play(Sfx::Shimmer, fx, 0.6, 0.0),
+                EventKind::Call(_) => sfx::play(Sfx::Click, fx, 0.5, 0.0),
+                EventKind::Blink => sfx::play(Sfx::Blink, fx, 0.8, 0.0),
+                EventKind::TrapSet => sfx::play(Sfx::Trap, tx, 0.4, 0.0),
+                EventKind::TrapHit => {
+                    sfx::play(Sfx::Trap, tx, 0.9, 0.0);
+                    self.burst(PKind::Spark, e.to, 0.2, 8, 3.0, 2.0, 0.3, 0.05, SPARK);
+                }
+                EventKind::Death => {}
+            }
         }
     }
 
@@ -320,6 +526,31 @@ impl Effects {
         for it in &mut self.items {
             it.1 += dt;
         }
+        self.shake *= (-dt * 7.0).exp();
+        for p in &mut self.parts {
+            p.age += dt;
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.h += p.vh * dt;
+            match p.kind {
+                PKind::Spark | PKind::Chip | PKind::Ember => {
+                    p.vh -= if p.kind == PKind::Ember { 4.0 } else { 14.0 } * dt;
+                    if p.h < 0.0 {
+                        // Bounce and skid to a stop.
+                        p.h = 0.0;
+                        p.vh = -p.vh * 0.3;
+                        p.vx *= 0.5;
+                        p.vy *= 0.5;
+                    }
+                }
+                PKind::Dust | PKind::Smoke => {
+                    let k = (-dt * 2.0).exp();
+                    p.vx *= k;
+                    p.vy *= k;
+                }
+            }
+        }
+        self.parts.retain(|p| p.age < p.life);
         self.items.retain(|it| it.1 < effect_life(it.0.kind));
     }
 }
@@ -333,6 +564,8 @@ thread_local! {
     static UI_CAM: std::cell::RefCell<Option<Camera2D>> = const { std::cell::RefCell::new(None) };
     /// Map camera distance; the mouse wheel zooms.
     static ZOOM: Cell<f32> = const { Cell::new(0.8) };
+    /// Camera jolt for this frame (impacts, collapses).
+    static SHAKE: Cell<Vec3> = const { Cell::new(Vec3::ZERO) };
 }
 
 /// Mouse wheel over the map zooms the camera in and out.
@@ -425,8 +658,8 @@ impl View {
 
     pub fn camera(&self) -> Camera3D {
         Camera3D {
-            position: vec3(0.0, 1.5, 0.0) + vec3(0.0, 50.0, 43.0) * ZOOM.with(|z| z.get()),
-            target: vec3(0.0, 0.0, 1.5),
+            position: vec3(0.0, 1.5, 0.0) + vec3(0.0, 50.0, 43.0) * ZOOM.with(|z| z.get()) + SHAKE.with(|c| c.get()),
+            target: vec3(0.0, 0.0, 1.5) + SHAKE.with(|c| c.get()),
             up: Vec3::Y,
             fovy: 0.45,
             aspect: Some(self.r.w / self.r.h),
@@ -563,6 +796,9 @@ pub fn draw_ground(v: View, show_deploy: bool, show_ranges: bool, w: &World) {
             }
         }
     }
+    if show_ranges && crate::settings::sight_on() {
+        draw_sight(w);
+    }
     end_3d();
     if show_deploy {
         v.disc(C, C, DEPLOY_RADIUS, Color::new(0.6, 0.1, 0.1, 0.22));
@@ -575,7 +811,51 @@ pub fn draw_ground(v: View, show_deploy: bool, show_ranges: bool, w: &World) {
             }
         }
     }
+
     draw_rectangle_lines(v.r.x, v.r.y, v.r.w, v.r.h, 2.0, LINE);
+}
+
+/// A faint cone on the ground in front of each trained troop: what it can
+/// see. Drawn in 3D so it stays inside the battle view.
+fn draw_sight(w: &World) {
+    let fill: [u8; 4] = [255, 255, 215, 22];
+    let edge = Color::new(1.0, 1.0, 0.85, 0.3);
+    let half = godcore::sim::SIGHT_COS.acos();
+    let r = godcore::sim::SIGHT_RANGE;
+    for (i, u) in w.units.iter().enumerate() {
+        if !u.alive || !w.has_senses(i) {
+            continue;
+        }
+        let base = u.facing.1.atan2(u.facing.0);
+        let n = 16;
+        let at = |k: usize| {
+            let a = base - half + 2.0 * half * k as f32 / n as f32;
+            let (dx, dy) = (a.cos(), a.sin());
+            // Stop at the edge of the map.
+            let mut t = r;
+            for (d, p) in [(dx, u.x), (dy, u.y)] {
+                if d > 1e-4 {
+                    t = t.min((godcore::sim::ARENA - p) / d);
+                } else if d < -1e-4 {
+                    t = t.min(-p / d);
+                }
+            }
+            w3(u.x + t * dx, u.y + t * dy, 0.02)
+        };
+        let c = w3(u.x, u.y, 0.02);
+        let vert = |p: Vec3| Vertex { position: p, uv: Vec2::ZERO, color: fill, normal: Vec4::ZERO };
+        let mut vs = vec![vert(c)];
+        let mut ix: Vec<u16> = Vec::new();
+        for k in 0..=n {
+            vs.push(vert(at(k)));
+            if k > 0 {
+                ix.extend_from_slice(&[0, k as u16, k as u16 + 1]);
+            }
+        }
+        draw_mesh(&Mesh { vertices: vs, indices: ix, texture: None });
+        draw_line_3d(c, at(0), edge);
+        draw_line_3d(c, at(n), edge);
+    }
 }
 
 // ------------------------------------------------------------- Characters
@@ -721,6 +1001,7 @@ fn effect_life(k: EventKind) -> f32 {
     match k {
         EventKind::Skill(_) => 0.8,
         EventKind::Dodge => 0.5,
+        EventKind::Call(_) => 1.4,
         _ => 0.45,
     }
 }
@@ -1082,7 +1363,11 @@ pub fn draw_standing(v: View, x: f32, y: f32, fig: &Figure, name: Option<&str>) 
 
 pub fn draw_world(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit) -> Look) {
     let t0 = std::time::Instant::now();
+    let t = crate::record::now() as f32;
+    let k = if crate::settings::shake_on() { fx.shake } else { 0.0 };
+    SHAKE.with(|c| c.set(vec3((t * 53.0).sin() + (t * 31.0).sin() * 0.5, 0.0, (t * 47.0 + 1.0).sin()) * k * 0.6));
     draw_world_inner(v, w, fx, look);
+    SHAKE.with(|c| c.set(Vec3::ZERO));
     if std::env::var_os("BAG_PROFILE").is_some() {
         eprintln!("draw_world {:.2} ms, {} units", t0.elapsed().as_secs_f64() * 1000.0, w.units.len());
     }
@@ -1141,7 +1426,10 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             let hit = a.map_or(0.0, |_| 0.0);
             let _ = hit;
             let rot = if u.kind == Kind::Core { 0.5 } else { (i as f32 * 1.7) % 6.28 };
-            m.draw_static(Mat4::from_scale_rotation_translation(Vec3::splat(sc), Quat::from_rotation_y(rot), pos), WHITE);
+            // A hit makes the building flinch: squashed down, then back.
+            let f = a.map_or(0.0, |a| (1.0 - (now - a.hurt) as f32 / 0.18).clamp(0.0, 1.0));
+            let scale = vec3(sc * (1.0 + 0.04 * f), sc * (1.0 - 0.08 * f), sc * (1.0 + 0.04 * f));
+            m.draw_static(Mat4::from_scale_rotation_translation(scale, Quat::from_rotation_y(rot), pos), WHITE);
             if u.style == 1 {
                 cannon_barrel(pos + vec3(0.0, 1.5 * sc + 0.15, 0.0), aim_of(w, i), swing_of(u), 0.85);
             }
@@ -1169,6 +1457,7 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             let swing_of_hit = ((ft - since) / len).floor();
             (since < FIGHT_LINGER || (ft / len).floor() <= swing_of_hit).then_some((ft as f32, len as f32))
         });
+        let swing_no = fighting.map(|(ft, len)| (ft / len).floor() as i64);
         let stride = a.pdist + (a.dist - a.pdist) * fx.blend();
         let pose = if let Some(d) = a.died {
             let since = (now - d) as f32;
@@ -1214,6 +1503,15 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         let mut blends = fx.blends.borrow_mut();
         if blends.len() < w.units.len() {
             blends.resize(w.units.len(), Blend::default());
+        }
+        if let Some(n) = swing_no {
+            if blends[i].swing != n && u.range <= 2.0 && u.alive {
+                // One whoosh per swing of a melee weapon.
+                sfx::play(Sfx::Swing, pan(sx), 0.7, 0.0);
+            }
+            blends[i].swing = n;
+        } else {
+            blends[i].swing = -1;
         }
         if !draw_character_ex(lib, &fig, npc, pos, heading, pose, CHAR_SCALE, extra, Some(&mut blends[i])) {
             flat.push(i);
@@ -1338,6 +1636,31 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         }
     }
 
+    // ---- Flying bits
+    for p in &fx.parts {
+        let k = p.age / p.life;
+        let fade = 1.0 - k;
+        let q = v.p3(p.x, p.y, p.h);
+        let px = (p.size * s).max(1.5);
+        match p.kind {
+            PKind::Spark => {
+                let back = v.p3(p.x - p.vx * 0.035, p.y - p.vy * 0.035, p.h - p.vh * 0.035);
+                draw_line(back.x, back.y, q.x, q.y, 2.0, Color::new(p.col.r, p.col.g, p.col.b, fade));
+            }
+            PKind::Chip => {
+                draw_rectangle(q.x - px / 2.0, q.y - px / 2.0, px, px, Color::new(p.col.r, p.col.g, p.col.b, fade.min(1.0) * 0.95));
+            }
+            PKind::Ember => {
+                draw_circle(q.x, q.y, px * 0.8, Color::new(p.col.r, p.col.g, p.col.b, fade));
+            }
+            PKind::Dust | PKind::Smoke => {
+                let r = px * (0.6 + 1.6 * k.sqrt());
+                let a = if p.kind == PKind::Smoke { 0.42 } else { 0.5 } * fade * (k * 8.0).min(1.0);
+                draw_circle(q.x, q.y, r, Color::new(p.col.r, p.col.g, p.col.b, a));
+            }
+        }
+    }
+
     // ---- Swings: a slash across the target as the blow lands.
     for (i, sw) in swings.iter().enumerate() {
         let (Some((ph, aim)), u) = (sw, &w.units[i]) else { continue };
@@ -1388,6 +1711,25 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         let f = v.p3(e.from.0, e.from.1, 0.7);
         let to = v.p3(e.to.0, e.to.1, 0.7);
         match e.kind {
+            EventKind::Call(c) => {
+                // A speech bubble over the caller: ! focus, < fall back, + help.
+                let (sym, col) = match c {
+                    0 => ("!", Color::new(1.0, 0.45, 0.35, a)),
+                    1 => ("<", Color::new(0.5, 0.75, 1.0, a)),
+                    _ => ("+", Color::new(0.5, 1.0, 0.55, a)),
+                };
+                let b = v.p3(e.from.0, e.from.1, 2.6);
+                let lift = 8.0 * k;
+                let paper = Color::new(1.0, 1.0, 1.0, 0.92 * a);
+                draw_triangle(vec2(b.x - 6.0, b.y - lift + 12.0), vec2(b.x + 4.0, b.y - lift + 12.0), vec2(b.x - 9.0, b.y - lift + 22.0), paper);
+                draw_circle(b.x, b.y - lift, 16.0, paper);
+                draw_circle_lines(b.x, b.y - lift, 16.0, 2.5, col);
+                draw_text(sym, b.x - 7.0, b.y - lift + 9.0, 32.0, col);
+                if c == 0 && (e.to.0 - e.from.0).abs() + (e.to.1 - e.from.1).abs() > 1e-3 {
+                    // Mark the enemy the caller points at.
+                    v.ring(e.to.0, e.to.1, 0.9 + 0.3 * k, 2.5, col);
+                }
+            }
             EventKind::Melee | EventKind::GuardHit => {
                 let col = if e.kind == EventKind::Melee { Color::new(1.0, 0.95, 0.7, a) } else { Color::new(1.0, 0.5, 0.4, a) };
                 if *age > 0.2 {

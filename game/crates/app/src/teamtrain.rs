@@ -262,7 +262,8 @@ impl Game {
             crate::art::draw_portrait(vec2(r.x + 18.0, r.y + r.h / 2.0), 14.0, &t.spec);
             text(&t.name, r.x + 40.0, r.y + 16.0, 18.0, TEXT);
             let role = format!("{:?}", godcore::sim::Role::of_spec(&t.spec));
-            text(&format!("Lv {} {}  ·  {}  ·  {} left", t.level, t.spec.name, role, fmt_steps(t.steps_left())), r.x + 40.0, r.y + 31.0, 14.0, MUTED);
+            let left = if t.steps_left() == 0 { "at level cap".to_string() } else { format!("{} left", fmt_steps(t.steps_left())) };
+            text(&format!("Lv {} {}  ·  {}  ·  {left}", t.level, t.spec.name, role), r.x + 40.0, r.y + 31.0, 14.0, if t.steps_left() == 0 { ACCENT } else { MUTED });
             if !busy && self.ui.hover(r) && self.ui.clicked {
                 if on {
                     s.members.retain(|&m| m != i);
@@ -313,7 +314,44 @@ impl Game {
             if let Some(p) = team_problem(&specs) {
                 text(p, rx, y + 10.0, 17.0, MUTED);
             } else if left == 0 {
-                text("A team member is at its level cap. Level it up first.", rx, y + 10.0, 17.0, ACCENT);
+                // Name who is capped and fix it right here: level up, or leave out.
+                let capped: Vec<usize> = s.members.iter().copied().filter(|&i| self.troops[i].steps_left() == 0).collect();
+                let names: Vec<String> = capped.iter().map(|&i| self.troops[i].name.clone()).collect();
+                let msg = if capped.len() == 1 {
+                    let t = &self.troops[capped[0]];
+                    format!("{} has used all its training for level {}. Level it up to train more.", t.name, t.level)
+                } else {
+                    format!("{} have used all their training for their level. Level them up to train more.", names.join(" and "))
+                };
+                crate::recruit::wrap(&msg, rx, y + 10.0, rw, 17.0, ACCENT);
+                y += 50.0;
+                let mut levelled = false;
+                for &i in &capped {
+                    let (label, can) = self.level_up_label(i);
+                    let label = if capped.len() > 1 { format!("{}: {label}", self.troops[i].name) } else { label };
+                    if self.ui.button_ex(Rect::new(rx, y, rw, 40.0), &label, can, false) && !levelled {
+                        self.level_up_troop(i);
+                        levelled = true;
+                    }
+                    if let Some(why) = self.level_up_blocker(i) {
+                        text(&why, rx, y + 58.0, 15.0, MUTED);
+                        y += 22.0;
+                    }
+                    y += 54.0;
+                }
+                let rest = s.members.len() - capped.len();
+                if rest >= MIN_TEAM {
+                    let label = format!("Train without {}", names.join(" and "));
+                    if self.ui.button(Rect::new(rx, y, rw, 40.0), &label) {
+                        s.members.retain(|i| !capped.contains(i));
+                        s.preview = None;
+                    }
+                } else {
+                    text(&format!("Or add a troop that can still train, then leave {} out.", names.join(" and ")), rx, y + 10.0, 15.0, MUTED);
+                }
+                if levelled {
+                    s.preview = None;
+                }
             } else {
                 text("Steps for each troop", rx, y + 10.0, 18.0, TEXT);
                 s.budget = s.budget.min(left);

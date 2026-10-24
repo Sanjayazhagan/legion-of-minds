@@ -422,6 +422,9 @@ impl Game {
             }
             if s.battle.outcome() != Outcome::Running {
                 s.result = Some(self.settle(&s));
+                let stars = s.battle.world.stars();
+                let won = if defending { stars == 0 } else { stars > 0 };
+                crate::sfx::play_ui(if won { crate::sfx::Sfx::Victory } else { crate::sfx::Sfx::Defeat });
                 // Determinism check: replay the same battle headless.
                 let mut again = (s.remake)();
                 again.run();
