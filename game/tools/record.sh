@@ -5,4 +5,4 @@
 set -e
 tour=$1; out=$2; save=${3:-}
 [ -n "$save" ] && export BAG_SAVE_DIR=$save
-BAG_TOUR=$tour BAG_RECORD=$out cargo run --release -p become-a-god
+BAG_TOUR=$tour BAG_RECORD=$out cargo run --release -p legion-of-minds

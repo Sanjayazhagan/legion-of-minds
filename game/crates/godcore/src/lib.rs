@@ -1,4 +1,4 @@
-//! Become a God: core game logic with no graphics.
+//! Legion of Minds: core game logic with no graphics.
 //!
 //! - `sim`: the deterministic battle simulation
 //! - `classes`: troop classes and hybrids

@@ -1,4 +1,4 @@
-//! Become a God: desktop app. Recruit troops, train their tiny brains on your
+//! Legion of Minds: desktop app. Recruit troops, train their tiny brains on your
 //! own CPU, then send them against AI-built bases.
 
 mod armoury;
@@ -12,6 +12,8 @@ mod online;
 mod recruit;
 mod render;
 mod scene;
+mod settings;
+mod sfx;
 mod teamtrain;
 mod save;
 mod tournament;
@@ -53,8 +55,15 @@ pub struct Game {
     pub toast: Option<(String, f32)>,
     pub roster_scroll: f32,
     pub confirm_release: bool,
+    pub settings: settings::Settings,
+    /// Settings is showing over the current screen.
+    pub settings_open: bool,
     /// The online session (signed out until the sign-in screen finishes).
     pub account: online::Account,
+    /// Set by Settings to open the sign-in screen once the overlay closes.
+    pub open_sign_in: bool,
+    /// Set when the save changes under the screens (test mode switched).
+    pub go_barracks: bool,
 }
 
 impl Game {
@@ -82,10 +91,19 @@ impl Game {
     pub fn header(&mut self, title: &str, back: bool) -> bool {
         draw_rectangle(0.0, 0.0, W, 52.0, Color::new(0.1, 0.11, 0.155, 1.0));
         draw_line(0.0, 52.0, W, 52.0, 1.0, LINE);
-        text("BECOME A GOD", 20.0, 34.0, 28.0, ACCENT);
-        text(title, 230.0, 34.0, 24.0, TEXT);
-        let g = format!("Gold {}", self.profile.gold);
+        text("LEGION OF MINDS", 20.0, 34.0, 28.0, ACCENT);
+        text(title, 250.0, 34.0, 24.0, TEXT);
+        let g = if self.store.is_test() { "Gold unlimited".to_string() } else { format!("Gold {}", self.profile.gold) };
         text(&g, W - 20.0 - text_width(&g, 24.0), 34.0, 24.0, ACCENT);
+        if self.store.is_test() {
+            let r = Rect::new(W - 560.0, 13.0, 108.0, 26.0);
+            draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.55, 0.2, 0.12, 1.0));
+            text_centered("TEST MODE", r.x + r.w / 2.0, r.y + 19.0, 16.0, TEXT);
+        }
+        if !self.settings_open && settings::gear_button(self, Rect::new(W - 440.0, 10.0, 130.0, 32.0)) {
+            self.settings_open = true;
+            return false;
+        }
         back && self
             .ui
             .button(Rect::new(W - 300.0, 10.0, 120.0, 32.0), "< Back")
@@ -175,7 +193,7 @@ fn read_gpu_name() {
 fn window_conf() -> macroquad::conf::Conf {
     macroquad::conf::Conf {
         miniquad_conf: Conf {
-            window_title: "Become a God".to_owned(),
+            window_title: "Legion of Minds".to_owned(),
             window_width: 1280,
             window_height: 800,
             high_dpi: true,
@@ -207,12 +225,18 @@ async fn main() {
         let _ = TRAIN_ON.set(dev);
     });
 
+    if let Some(dir) = std::env::var_os("BAG_SFX_EXPORT") {
+        // Writes every sound effect as a WAV file and quits.
+        sfx::export_all(std::path::Path::new(&dir));
+        return;
+    }
     scene::load_library();
     record::start();
+    sfx::init();
     let store = Store::open();
     let profile = store.load_profile();
     let troops = store.load_troops();
-    let account = online::Account::load(&store.dir);
+    let account = online::Account::load(&store.home);
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -228,8 +252,21 @@ async fn main() {
         toast: None,
         roster_scroll: 0.0,
         confirm_release: false,
+        settings: settings::Settings::default(),
+        settings_open: false,
         account,
+        open_sign_in: false,
+        go_barracks: false,
     };
+    game.settings = settings::Settings::load(&game.store.home);
+    game.settings.apply();
+    #[cfg(feature = "cheats")]
+    if game.settings.test_mode {
+        game.set_test_mode(true);
+    }
+    if std::env::var("BAG_SCREEN").as_deref() == Ok("settings") {
+        game.settings_open = true;
+    }
     // The game opens on the sign-in screen, except for recordings and
     // screenshot tests, which go straight to their screen.
     let scripted = ["BAG_SCREEN", "BAG_RECORD", "BAG_SCREENSHOT"]
@@ -262,23 +299,47 @@ async fn main() {
             next_frame().await;
             continue;
         }
-        screen = match screen {
-            Screen::Barracks => game.barracks(),
-            Screen::Recruit(s) => game.recruit(s),
-            Screen::Train(s) => game.train(s),
-            Screen::BattleSetup(s) => game.battle_setup(s),
-            Screen::Deploy(s) => game.deploy(s),
-            Screen::Battle(s) => game.battle(s),
-            Screen::Tournament(s) => game.tournament(s),
-            Screen::Replay(s) => game.replay(s),
-            Screen::Home(s) => game.home(s),
-            Screen::Armoury(s) => game.armoury(s),
-            Screen::Team(s) => game.team_training(s),
-            Screen::SignIn(s) => game.sign_in(s),
-            Screen::Online(s) => game.online(s),
-            Screen::OnlineWatch(s) => game.online_watch(s),
-        };
+        if game.store.is_test() {
+            game.profile.gold = save::TEST_GOLD;
+        }
+        if game.settings_open {
+            game.settings_screen();
+        } else {
+            if std::mem::take(&mut game.go_barracks) {
+                screen = Screen::Barracks;
+            }
+            // Cheated troops never meet other players.
+            if game.store.is_test() && matches!(screen, Screen::Online(_) | Screen::OnlineWatch(_)) {
+                game.toast("Online play is off in test mode. Turn it off in Settings.");
+                screen = Screen::Barracks;
+            }
+            if std::mem::take(&mut game.open_sign_in) {
+                screen = Screen::SignIn(online::SignInState::from_game(&game.account));
+            }
+            screen = match screen {
+                Screen::Barracks => game.barracks(),
+                Screen::Recruit(s) => game.recruit(s),
+                Screen::Train(s) => game.train(s),
+                Screen::BattleSetup(s) => game.battle_setup(s),
+                Screen::Deploy(s) => game.deploy(s),
+                Screen::Battle(s) => game.battle(s),
+                Screen::Tournament(s) => game.tournament(s),
+                Screen::Replay(s) => game.replay(s),
+                Screen::Home(s) => game.home(s),
+                Screen::Armoury(s) => game.armoury(s),
+                Screen::Team(s) => game.team_training(s),
+                Screen::SignIn(s) => game.sign_in(s),
+                Screen::Online(s) => game.online(s),
+                Screen::OnlineWatch(s) => game.online_watch(s),
+            };
+        }
         game.draw_toast();
+        if is_key_pressed(KeyCode::M) {
+            let m = sfx::toggle_mute();
+            game.settings.muted = m;
+            game.settings.save(&game.store.home);
+            game.toast = Some((if m { "Sound off (M)" } else { "Sound on (M)" }.into(), 2.0));
+        }
         frame += 1;
         if frame == 2 {
             read_gpu_name();

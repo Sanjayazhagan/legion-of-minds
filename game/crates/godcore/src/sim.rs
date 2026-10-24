@@ -14,9 +14,15 @@ use serde::{Deserialize, Serialize};
 pub const ARENA: f32 = 32.0;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
-pub const SIM_VERSION: u32 = 5;
-pub const OBS_DIM: usize = 90;
-pub const N_ACTIONS: usize = 21;
+pub const SIM_VERSION: u32 = 7;
+pub const OBS_DIM: usize = 109;
+/// Where the teamwork part of the view starts (the two allies' roles,
+/// threats and actions, sim version 4).
+pub const OBS_TEAM: usize = 74;
+/// Where the senses part starts (sim version 6), and the calls part (7).
+pub const OBS_SENSES: usize = 90;
+pub const OBS_CALLS: usize = 100;
+pub const N_ACTIONS: usize = 24;
 /// The first observation features and actions, as they were before dodge,
 /// block and skills (brains from older saves are grown from these).
 pub const OBS_DIM_V1: usize = 47;
@@ -40,6 +46,13 @@ pub const ACT_BLINK: u8 = 17;
 pub const ACT_SNARE: u8 = 18;
 pub const ACT_WARD: u8 = 19;
 pub const ACT_HEAL_2: u8 = 20;
+/// Calls to teammates (sim version 7). What each one comes to mean is up to
+/// the team: troops learn it in training. "Focus" points at the enemy the
+/// caller is looking at; "fall back" and "help" point at the caller.
+pub const ACT_CALL_FOCUS: u8 = 21;
+pub const ACT_CALL_BACK: u8 = 22;
+pub const ACT_CALL_HELP: u8 = 23;
+pub const N_CALLS: usize = 3;
 
 const DODGE_DIST: f32 = 2.4;
 const DODGE_INVULN: u32 = 6;
@@ -58,6 +71,36 @@ const SNARE_LIFE: u32 = 450;
 const SNARE_RADIUS: f32 = 0.9;
 const MAX_SNARES: usize = 2;
 const WARD_RADIUS: f32 = 3.0;
+
+// Senses (sim version 6). Trained troops no longer know everything: they see
+// in a cone ahead of them, walls block the view, they hear fights they can't
+// see, and they remember where an enemy was for a moment after losing sight.
+// Like people, they also need a moment to react to something new, have to
+// turn to face what they hit, and ranged shots sometimes miss.
+/// How far a troop can see.
+pub const SIGHT_RANGE: f32 = 14.0;
+/// Cosine of half the sight cone (120 degrees wide).
+pub const SIGHT_COS: f32 = 0.5;
+/// Closer than this a troop always notices you, even from behind.
+pub const TOUCH: f32 = 2.5;
+/// How far the sound of a fight carries.
+pub const HEAR_RANGE: f32 = 12.0;
+/// Ticks an unseen enemy is remembered (3 sim seconds).
+pub const MEMORY: u32 = 60;
+/// Ticks between first seeing something and being able to act on it.
+pub const REACT: u32 = 4;
+/// Turning speed: 0.5 radians a tick (a half turn takes about 6 ticks).
+const TURN_COS: f32 = 0.877_582_56;
+const TURN_SIN: f32 = 0.479_425_54;
+/// A troop must face its target this squarely to strike (within 45 degrees).
+const FACE_COS: f32 = 0.707_106_77;
+const NEVER: u32 = u32::MAX;
+/// How far a call carries (sim version 7). Walls don't stop it.
+pub const CALL_RANGE: f32 = 12.0;
+/// Ticks a call stays in a listener's mind (1.5 sim seconds).
+pub const CALL_LIFE: u32 = 30;
+/// Ticks a troop waits before it can call again (0.5 s).
+pub const CALL_GAP: u32 = 10;
 const WARD_TICKS: u32 = 45;
 const WARD_CD: u32 = 160;
 
@@ -144,6 +187,10 @@ pub struct UnitStats {
     pub evaded: u32,
     /// Damage soaked up by blocking.
     pub blocked: f32,
+    /// Ranged shots that missed.
+    pub missed: u32,
+    /// Calls made to teammates.
+    pub calls: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -197,6 +244,8 @@ pub struct Unit {
     pub stun: u32,
     /// Dodging units can't be hit.
     pub invuln: u32,
+    /// Which way the unit looks (unit length). Trained troops only see ahead.
+    pub facing: (f32, f32),
 }
 
 impl Unit {
@@ -237,6 +286,9 @@ pub enum EventKind {
     TrapHit,
     /// A ward went up around `from`.
     Ward,
+    /// A call to teammates (0 focus, 1 fall back, 2 help): `from` the
+    /// caller, `to` the spot it points at.
+    Call(u8),
 }
 
 /// A hidden snare on the ground.
@@ -304,6 +356,53 @@ pub struct World {
     pub events: Vec<Event>,
     pub traps: Vec<Trap>,
     total_building_hp: f32,
+    /// What each trained troop remembers of each unit, `n * n` entries.
+    mem: Vec<Mem>,
+    /// Where fights could be heard last tick.
+    noise: Vec<(f32, f32)>,
+    /// Recent calls to teammates.
+    calls: Vec<Call>,
+}
+
+/// A call one troop made to its team.
+#[derive(Clone, Copy, Debug)]
+struct Call {
+    team: Team,
+    from: usize,
+    kind: u8,
+    /// Where the caller stood.
+    cx: f32,
+    cy: f32,
+    /// The spot it points at.
+    x: f32,
+    y: f32,
+    tick: u32,
+}
+
+/// A troop's memory of one unit: where it was and how hurt, when it was
+/// last seen, and when this sighting started (for the reaction delay).
+#[derive(Clone, Copy, Debug)]
+struct Mem {
+    x: f32,
+    y: f32,
+    hp: f32,
+    seen: u32,
+    /// The tick from which the troop can act on it (reaction time).
+    ready: u32,
+}
+
+const FORGOTTEN: Mem = Mem { x: 0.0, y: 0.0, hp: 0.0, seen: NEVER, ready: 0 };
+
+/// What a troop knows about a unit: where (as remembered), how hurt, and how
+/// fresh the knowledge is (1 = in sight now).
+#[derive(Clone, Copy, Debug)]
+struct Known {
+    j: usize,
+    x: f32,
+    y: f32,
+    hp: f32,
+    fresh: f32,
+    d: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -326,6 +425,9 @@ impl World {
             events: Vec::new(),
             traps: Vec::new(),
             total_building_hp: 0.0,
+            mem: Vec::new(),
+            noise: Vec::new(),
+            calls: Vec::new(),
         }
     }
 
@@ -376,6 +478,7 @@ impl World {
             block_taken: 1.0,
             stun: 0,
             invuln: 0,
+            facing: (0.0, 1.0),
         }
     }
 
@@ -435,6 +538,13 @@ impl World {
         // A mixed-in block keeps less of the weapon's protection.
         u.block_taken = 1.0 - (1.0 - ws.block_taken) * u.moves[Move::Block as usize];
         u.tag = tag;
+        // Raiders look towards the middle of the map, defenders out from it.
+        let c = ARENA * 0.5;
+        let (dx, dy) = if team == Team::Attack { (c - x, c - y) } else { (x - c, y - c) };
+        let d = (dx * dx + dy * dy).sqrt();
+        if d > 1e-4 {
+            u.facing = (dx / d, dy / d);
+        }
         self.push(u)
     }
 
@@ -573,7 +683,7 @@ impl World {
     fn unit_target(&self, i: usize) -> Option<usize> {
         let me = &self.units[i];
         let team = me.team;
-        self.nearest(i, |u| u.team != team && !u.kind.is_building())
+        self.nearest_noticed(i, |u| u.team != team && !u.kind.is_building())
             .filter(|&(_, d)| d <= me.range)
             .map(|b| b.0)
     }
@@ -581,7 +691,7 @@ impl World {
     fn building_target(&self, i: usize) -> Option<usize> {
         let me = &self.units[i];
         let team = me.team;
-        self.nearest(i, |u| u.team != team && u.kind.is_building())
+        self.nearest_noticed(i, |u| u.team != team && u.kind.is_building())
             .filter(|&(_, d)| d <= me.range)
             .map(|b| b.0)
     }
@@ -620,8 +730,14 @@ impl World {
             m[ACT_BLINK as usize] = ready(Move::Blink) && threat;
             m[ACT_SNARE as usize] = ready(Move::Snare)
                 && self.traps.iter().filter(|t| t.owner == i).count() < MAX_SNARES
-                && self.nearest(i, |u| u.team != me.team && !u.kind.is_building()).is_some_and(|(_, d)| d <= 8.0);
+                && self.nearest_noticed(i, |u| u.team != me.team && !u.kind.is_building()).is_some_and(|(_, d)| d <= 8.0);
             m[ACT_WARD as usize] = ready(Move::Ward) && self.ward_useful(i);
+            let tick = self.tick;
+            if self.anyone_to_call(i) && !self.calls.iter().any(|c| c.from == i && tick - c.tick < CALL_GAP) {
+                for a in [ACT_CALL_FOCUS, ACT_CALL_BACK, ACT_CALL_HELP] {
+                    m[a as usize] = true;
+                }
+            }
         }
         m
     }
@@ -648,7 +764,7 @@ impl World {
     fn charge_target(&self, i: usize) -> Option<usize> {
         let me = &self.units[i];
         let team = me.team;
-        self.nearest(i, |u| u.team != team && !u.kind.is_building())
+        self.nearest_noticed(i, |u| u.team != team && !u.kind.is_building())
             .filter(|&(_, d)| d > me.range && d <= CHARGE_REACH)
             .map(|b| b.0)
     }
@@ -679,7 +795,7 @@ impl World {
 
     fn shadowstep_target(&self, i: usize) -> Option<usize> {
         let team = self.units[i].team;
-        self.nearest(i, |u| u.team != team && !u.kind.is_building())
+        self.nearest_noticed(i, |u| u.team != team && !u.kind.is_building())
             .filter(|&(_, d)| d <= 6.0)
             .map(|b| b.0)
     }
@@ -699,6 +815,239 @@ impl World {
                 u.alive && u.team == team && u.kind == Kind::Troop && u.max_hp - u.hp >= 5.0 && me.dist(u) <= 3.5
             }),
         }
+    }
+
+    // ------------------------------------------------------------ senses
+
+    /// Trained troops have senses; towers, guards and scripted troops still
+    /// know where everyone is.
+    pub fn has_senses(&self, i: usize) -> bool {
+        let u = &self.units[i];
+        u.kind == Kind::Troop && u.control == Control::External
+    }
+
+    /// Whether troop `i` can see unit `j` right now: close enough to touch,
+    /// or in its sight cone with no building in the way.
+    pub fn sees(&self, i: usize, j: usize) -> bool {
+        let (me, u) = (&self.units[i], &self.units[j]);
+        if !u.alive || (u.cloak > 0 && u.team != me.team) {
+            return false;
+        }
+        let (dx, dy) = (u.x - me.x, u.y - me.y);
+        let c = (dx * dx + dy * dy).sqrt();
+        let edge = if u.kind.is_building() { u.radius } else { 0.0 };
+        if c - edge <= TOUCH {
+            return true;
+        }
+        if c - edge > SIGHT_RANGE || me.facing.0 * dx + me.facing.1 * dy < SIGHT_COS * c - edge {
+            return false;
+        }
+        for (k, b) in self.units.iter().enumerate() {
+            if k == j || !b.alive || !b.kind.is_building() {
+                continue;
+            }
+            let (bx, by) = (b.x - me.x, b.y - me.y);
+            let t = (bx * dx + by * dy) / (c * c);
+            if t <= 0.0 || t >= 1.0 {
+                continue;
+            }
+            let (px, py) = (bx - t * dx, by - t * dy);
+            if px * px + py * py < 0.81 * b.radius * b.radius {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// After every tick: what each trained troop sees goes into its memory.
+    fn update_senses(&mut self) {
+        let n = self.units.len();
+        let first_look = self.mem.len() != n * n;
+        if first_look {
+            self.mem = vec![FORGOTTEN; n * n];
+        }
+        let tick = self.tick;
+        for i in 0..n {
+            if !self.units[i].alive || !self.has_senses(i) {
+                continue;
+            }
+            for j in 0..n {
+                if j == i || self.units[j].team == self.units[i].team || !self.sees(i, j) {
+                    continue;
+                }
+                let u = &self.units[j];
+                let (x, y, hp, building) = (u.x, u.y, u.hp / u.max_hp, u.kind.is_building());
+                let m = &mut self.mem[i * n + j];
+                // Something new (or long forgotten) takes a moment to react to;
+                // what is in view when the battle starts is already noticed.
+                if m.seen == NEVER || (!building && tick > m.seen + MEMORY) {
+                    m.ready = if first_look { 0 } else { tick + REACT };
+                }
+                *m = Mem { x, y, hp, seen: tick, ready: m.ready };
+            }
+        }
+    }
+
+    /// What troop `i` knows of unit `j`. Units without senses, and allies,
+    /// are known exactly; enemies only as remembered.
+    fn knows(&self, i: usize, j: usize) -> Option<Known> {
+        let (me, u) = (&self.units[i], &self.units[j]);
+        if !u.alive || (u.cloak > 0 && u.team != me.team) {
+            return None;
+        }
+        let n = self.units.len();
+        let (x, y, hp, fresh) = if !self.has_senses(i) || u.team == me.team {
+            (u.x, u.y, u.hp / u.max_hp, 1.0)
+        } else if self.mem.len() != n * n {
+            if !self.sees(i, j) {
+                return None;
+            }
+            (u.x, u.y, u.hp / u.max_hp, 1.0)
+        } else {
+            let m = self.mem[i * n + j];
+            if m.seen == NEVER || self.tick < m.ready {
+                return None;
+            }
+            let age = self.tick.saturating_sub(m.seen + 1);
+            let fresh = if age == 0 {
+                1.0
+            } else if u.kind.is_building() {
+                0.5
+            } else if age >= MEMORY {
+                return None;
+            } else {
+                1.0 - age as f32 / MEMORY as f32
+            };
+            (m.x, m.y, m.hp, fresh)
+        };
+        let (dx, dy) = (x - me.x, y - me.y);
+        Some(Known { j, x, y, hp, fresh, d: (dx * dx + dy * dy).sqrt() })
+    }
+
+    /// The `k` nearest units matching `pred` that troop `i` knows about,
+    /// by where it thinks they are.
+    fn known_k(&self, i: usize, k: usize, pred: impl Fn(&Unit) -> bool) -> Vec<Known> {
+        let mut v: Vec<Known> = (0..self.units.len())
+            .filter(|&j| j != i && pred(&self.units[j]))
+            .filter_map(|j| self.knows(i, j))
+            .collect();
+        v.sort_by(|a, b| a.d.partial_cmp(&b.d).unwrap().then(a.j.cmp(&b.j)));
+        v.truncate(k);
+        v
+    }
+
+    /// Whether troop `i` has `j` in sight and has had time to react to it:
+    /// only then can it aim at it.
+    fn noticed(&self, i: usize, j: usize) -> bool {
+        if !self.has_senses(i) || self.units[j].team == self.units[i].team {
+            return true;
+        }
+        let n = self.units.len();
+        if self.mem.len() != n * n {
+            return self.sees(i, j);
+        }
+        let m = self.mem[i * n + j];
+        m.seen != NEVER && m.seen + 1 >= self.tick && self.tick >= m.ready
+    }
+
+    /// Like `nearest`, but only what troop `i` has noticed.
+    fn nearest_noticed(&self, i: usize, pred: impl Fn(&Unit) -> bool) -> Option<(usize, f32)> {
+        let me = &self.units[i];
+        let mut best: Option<(usize, f32)> = None;
+        for (j, u) in self.units.iter().enumerate() {
+            if j == i || !u.alive || !pred(u) || (u.cloak > 0 && u.team != me.team) || !self.noticed(i, j) {
+                continue;
+            }
+            let d = me.dist(u) - if u.kind.is_building() { u.radius } else { 0.0 };
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((j, d));
+            }
+        }
+        best
+    }
+
+    /// The nearest fight troop `i` can hear (not one it is standing in):
+    /// where, and how far.
+    fn heard(&self, i: usize) -> Option<((f32, f32), f32)> {
+        let me = &self.units[i];
+        let mut best: Option<((f32, f32), f32)> = None;
+        for &(x, y) in &self.noise {
+            let (dx, dy) = (x - me.x, y - me.y);
+            let d = (dx * dx + dy * dy).sqrt();
+            if d > TOUCH && d <= HEAR_RANGE && best.map_or(true, |(_, bd)| d < bd) {
+                best = Some(((dx, dy), d));
+            }
+        }
+        best
+    }
+
+    /// Turn unit `i` towards (dx, dy), at most one tick's worth. Returns
+    /// whether it was already facing that way squarely enough to strike.
+    fn turn_toward(&mut self, i: usize, dx: f32, dy: f32) -> bool {
+        let d = (dx * dx + dy * dy).sqrt();
+        if d < 1e-4 {
+            return true;
+        }
+        let (tx, ty) = (dx / d, dy / d);
+        let (fx, fy) = self.units[i].facing;
+        let dot = fx * tx + fy * ty;
+        self.units[i].facing = if dot >= TURN_COS {
+            (tx, ty)
+        } else {
+            let s = if fx * ty - fy * tx >= 0.0 { TURN_SIN } else { -TURN_SIN };
+            let (nx, ny) = (fx * TURN_COS - fy * s, fx * s + fy * TURN_COS);
+            let l = (nx * nx + ny * ny).sqrt();
+            (nx / l, ny / l)
+        };
+        dot >= FACE_COS || !self.has_senses(i)
+    }
+
+    /// Turn to face `j`; true if facing it well enough to strike.
+    fn face(&mut self, i: usize, j: usize) -> bool {
+        let (dx, dy) = (self.units[j].x - self.units[i].x, self.units[j].y - self.units[i].y);
+        self.turn_toward(i, dx, dy)
+    }
+
+    /// A fixed dice roll in [0, 1) for this tick and these two units.
+    fn roll(&self, i: usize, j: usize) -> f32 {
+        let mut h = self.tick.wrapping_mul(0x9E37_79B1) ^ (i as u32).wrapping_mul(0x85EB_CA77) ^ (j as u32).wrapping_mul(0xC2B2_AE3D);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2C1B_3C6D);
+        h ^= h >> 12;
+        (h >> 8) as f32 / 16_777_216.0
+    }
+
+    /// Calls only make sense with a trained teammate in earshot, so troops
+    /// on their own never see them as an option.
+    fn anyone_to_call(&self, i: usize) -> bool {
+        if !self.has_senses(i) {
+            return false;
+        }
+        let me = &self.units[i];
+        (0..self.units.len()).any(|k| {
+            k != i && self.units[k].alive && self.units[k].team == me.team && self.has_senses(k) && me.dist(&self.units[k]) <= CALL_RANGE
+        })
+    }
+
+    /// The freshest call of each kind troop `i` has heard and had time to
+    /// take in: where it points, and how fresh it is.
+    fn heard_calls(&self, i: usize) -> [Option<(f32, f32, f32)>; N_CALLS] {
+        let me = &self.units[i];
+        let mut out = [None; N_CALLS];
+        let mut best = [0u32; N_CALLS];
+        for c in &self.calls {
+            let age = self.tick.saturating_sub(c.tick);
+            let (dx, dy) = (c.cx - me.x, c.cy - me.y);
+            if c.team != me.team || c.from == i || age < REACT || age >= CALL_LIFE || dx * dx + dy * dy > CALL_RANGE * CALL_RANGE {
+                continue;
+            }
+            let k = c.kind as usize;
+            if out[k].is_none() || c.tick > best[k] {
+                best[k] = c.tick;
+                out[k] = Some((c.x, c.y, 1.0 - age as f32 / CALL_LIFE as f32));
+            }
+        }
+        out
     }
 
     /// The fixed-size view a troop's policy sees.
@@ -731,17 +1080,16 @@ impl World {
         put(&mut o, mask[ACT_HEAL as usize] as u8 as f32);
         // Two nearest buildings (5 each)
         // Attackers see enemy buildings; defenders see the buildings they protect.
-        let bs = self.nearest_k(i, 2, |u| {
+        // Trained troops see these as they last saw them (sim version 6).
+        let bs = self.known_k(i, 2, |u| {
             u.kind.is_building() && ((team == Team::Attack) != (u.team == team))
         });
         for s in 0..2 {
-            if let Some(&(j, _)) = bs.get(s) {
-                let u = &self.units[j];
-                let (rx, ry) = rel(u);
-                put(&mut o, rx);
-                put(&mut o, ry);
-                put(&mut o, u.hp / u.max_hp);
-                put(&mut o, (u.kind == Kind::Tower) as u8 as f32);
+            if let Some(b) = bs.get(s) {
+                put(&mut o, (b.x - me.x) / OBS_SCALE);
+                put(&mut o, (b.y - me.y) / OBS_SCALE);
+                put(&mut o, b.hp);
+                put(&mut o, (self.units[b.j].kind == Kind::Tower) as u8 as f32);
                 put(&mut o, 1.0);
             } else {
                 for _ in 0..5 {
@@ -750,14 +1098,13 @@ impl World {
             }
         }
         // Three nearest enemy units (5 each)
-        let es = self.nearest_k(i, 3, |u| u.team != team && !u.kind.is_building());
+        let es = self.known_k(i, 3, |u| u.team != team && !u.kind.is_building());
         for s in 0..3 {
-            if let Some(&(j, _)) = es.get(s) {
-                let u = &self.units[j];
-                let (rx, ry) = rel(u);
-                put(&mut o, rx);
-                put(&mut o, ry);
-                put(&mut o, u.hp / u.max_hp);
+            if let Some(e) = es.get(s) {
+                let u = &self.units[e.j];
+                put(&mut o, (e.x - me.x) / OBS_SCALE);
+                put(&mut o, (e.y - me.y) / OBS_SCALE);
+                put(&mut o, e.hp);
                 put(
                     &mut o,
                     if u.cd_max > 0 {
@@ -853,8 +1200,8 @@ impl World {
         put(&mut o, self.enemies_near(team, me.x, me.y, 2.2, false).len() as f32 / 4.0);
         // The three nearest enemies again: stunned, guard up (2 each)
         for s in 0..3 {
-            if let Some(&(j, _)) = es.get(s) {
-                let u = &self.units[j];
+            if let Some(e) = es.get(s).filter(|e| e.fresh >= 1.0) {
+                let u = &self.units[e.j];
                 put(&mut o, (u.stun > 0) as u8 as f32);
                 put(&mut o, (u.block_ticks > 0) as u8 as f32);
             } else {
@@ -896,6 +1243,42 @@ impl World {
         // (sim version 5).
         put(&mut o, mask[ACT_HEAL_2 as usize] as u8 as f32);
         put(&mut o, me.talents as f32 / crate::classes::TALENT_MAX as f32);
+        // Senses (sim version 6): which way it looks, how fresh what it
+        // knows of the buildings and enemies above is, and the nearest fight
+        // it can hear.
+        put(&mut o, me.facing.0);
+        put(&mut o, me.facing.1);
+        for s in 0..2 {
+            put(&mut o, bs.get(s).map_or(0.0, |b| b.fresh));
+        }
+        for s in 0..3 {
+            put(&mut o, es.get(s).map_or(0.0, |e| e.fresh));
+        }
+        if let Some(((dx, dy), d)) = self.heard(i) {
+            put(&mut o, dx / HEAR_RANGE);
+            put(&mut o, dy / HEAR_RANGE);
+            put(&mut o, 1.0 - d / HEAR_RANGE);
+        } else {
+            for _ in 0..3 {
+                put(&mut o, 0.0);
+            }
+        }
+        // Calls from teammates (sim version 7): for focus, fall back and
+        // help, where the freshest one points and how fresh it is.
+        for c in self.heard_calls(i) {
+            match c {
+                Some((x, y, fresh)) => {
+                    put(&mut o, (x - me.x) / CALL_RANGE);
+                    put(&mut o, (y - me.y) / CALL_RANGE);
+                    put(&mut o, fresh);
+                }
+                None => {
+                    for _ in 0..3 {
+                        put(&mut o, 0.0);
+                    }
+                }
+            }
+        }
         debug_assert_eq!(k, OBS_DIM);
         o
     }
@@ -930,8 +1313,13 @@ impl World {
 
     /// Advance one tick. `actions[i]` is used for units with `Control::External`.
     pub fn step(&mut self, actions: &[u8]) {
+        if self.mem.len() != self.units.len() * self.units.len() {
+            self.update_senses();
+        }
         self.tick += 1;
         self.events.clear();
+        let tick = self.tick;
+        self.calls.retain(|c| tick - c.tick < CALL_LIFE);
         let n = self.units.len();
 
         // Attacking troops, in index order.
@@ -984,6 +1372,15 @@ impl World {
                 }
             }
         }
+
+        // What could be heard this tick, then what everyone saw.
+        self.noise.clear();
+        for e in &self.events {
+            if !matches!(e.kind, EventKind::Heal | EventKind::Cloak | EventKind::Ward | EventKind::TrapSet) {
+                self.noise.push(e.to);
+            }
+        }
+        self.update_senses();
     }
 
     fn pos(&self, i: usize) -> (f32, f32) {
@@ -1043,14 +1440,22 @@ impl World {
                 return;
             }
         }
+        let (mut a, mut m) = (a, self.mask(i));
+        if (ACT_CALL_FOCUS..=ACT_CALL_HELP).contains(&a) && m[a as usize] {
+            // A shout doesn't cost the turn: the troop keeps doing what it
+            // did last tick (never itself a call).
+            self.call(i, a - ACT_CALL_FOCUS);
+            a = self.units[i].last_action;
+            m = self.mask(i);
+        }
         self.units[i].last_action = a;
-        let m = self.mask(i);
         match a {
             1..=8 => {
                 let (dx, dy) = DIRS[(a - 1) as usize];
                 let u = &self.units[i];
                 let sp = if u.block_ticks > 0 { u.speed * 0.5 } else { u.speed };
                 self.move_unit(i, dx * sp, dy * sp);
+                self.turn_toward(i, dx, dy);
             }
             ACT_DODGE if m[ACT_DODGE as usize] => {
                 let j = self.threat(i).unwrap();
@@ -1122,13 +1527,24 @@ impl World {
                 self.events.push(Event { kind: EventKind::Ward, from: at, to: at });
             }
             ACT_SKILL if m[ACT_SKILL as usize] => self.use_skill(i),
+            // A troop has to face what it hits: turned away, this tick only turns it.
             ACT_HIT_UNIT if m[ACT_HIT_UNIT as usize] => {
                 let j = self.unit_target(i).unwrap();
-                self.strike(i, j);
+                if self.face(i, j) {
+                    self.strike(i, j);
+                }
             }
             ACT_HIT_BUILDING if m[ACT_HIT_BUILDING as usize] => {
                 let j = self.building_target(i).unwrap();
-                self.strike(i, j);
+                if self.face(i, j) {
+                    self.strike(i, j);
+                }
+            }
+            // Standing still, a troop looks towards the noise of a fight.
+            ACT_IDLE => {
+                if let Some(((dx, dy), _)) = self.heard(i) {
+                    self.turn_toward(i, dx, dy);
+                }
             }
             ACT_HEAL | ACT_HEAL_2 if m[a as usize] => {
                 let j = self.heal_target(i, (a == ACT_HEAL_2) as usize).unwrap();
@@ -1149,15 +1565,47 @@ impl World {
         }
     }
 
+    /// Shout to the team. Calling gives away a cloaked troop.
+    fn call(&mut self, i: usize, kind: u8) {
+        let (team, cx, cy) = (self.units[i].team, self.units[i].x, self.units[i].y);
+        let (x, y) = if kind == 0 {
+            self.nearest_noticed(i, |u| u.team != team).map_or((cx, cy), |(j, _)| self.pos(j))
+        } else {
+            (cx, cy)
+        };
+        self.calls.push(Call { team, from: i, kind, cx, cy, x, y, tick: self.tick });
+        self.units[i].cloak = 0;
+        self.units[i].stats.calls += 1;
+        self.events.push(Event { kind: EventKind::Call(kind), from: (cx, cy), to: (x, y) });
+    }
+
     fn strike(&mut self, i: usize, j: usize) {
         self.units[i].cd = self.units[i].cd_max;
         self.units[i].cloak = 0;
-        let kind = if self.units[i].range > 2.5 {
-            EventKind::Arrow
-        } else {
-            EventKind::Melee
-        };
+        let ranged = self.units[i].range > 2.5;
+        let kind = if ranged { EventKind::Arrow } else { EventKind::Melee };
         let (from, to) = (self.pos(i), self.pos(j));
+        // Trained troops are not perfect shots: far and moving targets get
+        // missed more often. Buildings are hard to miss.
+        if ranged && self.has_senses(i) {
+            let (me, t) = (&self.units[i], &self.units[j]);
+            let p = if t.kind.is_building() {
+                0.02
+            } else {
+                let r = (me.dist(t) / me.range).min(1.0);
+                0.04 + 0.2 * r * r + if matches!(t.last_action, 1..=8) { 0.12 } else { 0.0 }
+            };
+            let roll = self.roll(i, j);
+            if roll < p {
+                let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+                let d = (dx * dx + dy * dy).sqrt().max(1e-4);
+                let side = if roll < p * 0.5 { 1.0 } else { -1.0 };
+                let wide = (to.0 - dy / d * side * 1.2 + dx / d * 0.8, to.1 + dx / d * side * 1.2 + dy / d * 0.8);
+                self.events.push(Event { kind, from, to: wide });
+                self.units[i].stats.missed += 1;
+                return;
+            }
+        }
         self.events.push(Event { kind, from, to });
         let dmg = self.units[i].dmg;
         self.damage(i, j, dmg);
@@ -1187,6 +1635,7 @@ impl World {
         let d = (dx * dx + dy * dy).sqrt();
         let step = (d - 0.8).min(CHARGE_DIST).max(0.0);
         self.move_unit(i, dx / d * step, dy / d * step);
+        self.units[i].facing = (dx / d, dy / d);
         self.units[i].move_cd[Move::Charge as usize] = move_cd(CHARGE_CD, p);
         self.units[i].cloak = 0;
         let to = self.pos(i);
