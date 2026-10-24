@@ -510,7 +510,19 @@ pub const MAX_TEAM: usize = 5;
 
 /// A team raid: the team's troops are units 0..n, in order. A team smaller
 /// than 3 is topped up with scripted fighters; a bigger one faces more guards.
-pub fn build_team_drill(team: &[ClassSpec], rng: &mut Rng) -> World {
+/// Team drill hardness: 1 is the standard drill, 5 the hardest.
+pub const MAX_HARDNESS: u8 = 5;
+
+/// How much tougher the defence (or the raiders) are at a hardness: each
+/// step adds 10% health and damage.
+pub fn hardness_strength(hardness: u8) -> f32 {
+    1.0 + 0.1 * (hardness.clamp(1, MAX_HARDNESS) - 1) as f32
+}
+
+/// A team attack drill. Harder drills add a guard per step and a fourth
+/// tower from hardness 4, and make the defence tougher.
+pub fn build_team_drill(team: &[ClassSpec], hardness: u8, rng: &mut Rng) -> World {
+    let h = hardness.clamp(1, MAX_HARDNESS);
     let mut w = World::new(DRILL_TICKS);
     let tx = C + rng.range(-2.0, 2.0);
     let ty = C + rng.range(-2.0, 2.0);
@@ -528,16 +540,37 @@ pub fn build_team_drill(team: &[ClassSpec], rng: &mut Rng) -> World {
     let (ux, uy) = rng.unit_vec();
     w.add_core(tx, ty);
     const S: f32 = 0.866_025_4;
-    for (c, s) in [(1.0f32, 0.0f32), (-0.5, S), (-0.5, -S)] {
+    let towers = 3 + (h >= 4) as usize;
+    let spots: Vec<(f32, f32)> = if towers == 3 {
+        vec![(1.0, 0.0), (-0.5, S), (-0.5, -S)]
+    } else {
+        (0..towers)
+            .map(|k| {
+                let a = k as f32 * std::f32::consts::TAU / towers as f32;
+                (a.cos(), a.sin())
+            })
+            .collect()
+    };
+    let strength = hardness_strength(h);
+    let first = w.units.len();
+    for (c, s) in spots {
         let (rx, ry) = (ux * c - uy * s, ux * s + uy * c);
         w.add_tower(
             (tx + rx * SQUAD_TOWER_R).clamp(1.0, ARENA - 1.0),
             (ty + ry * SQUAD_TOWER_R).clamp(1.0, ARENA - 1.0),
         );
     }
-    for _ in 0..SQUAD_GUARDS + 2 * team.len().saturating_sub(3) {
+    for _ in 0..SQUAD_GUARDS + 2 * team.len().saturating_sub(3) + (h - 1) as usize {
         let (gx, gy) = around(rng, tx, ty, 2.5);
         w.add_guard(gx, gy);
+    }
+    if h > 1 {
+        for u in &mut w.units[first..] {
+            u.max_hp *= strength;
+            u.hp = u.max_hp;
+            u.dmg *= strength;
+        }
+        w.recount_buildings();
     }
     w
 }

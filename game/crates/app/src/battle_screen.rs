@@ -501,10 +501,11 @@ impl Game {
             );
         }
         let mut y = 216.0;
-        for u in w
+        for (i, u) in w
             .units
             .iter()
-            .filter(|u| u.kind == Kind::Troop && u.tag < troops.len())
+            .enumerate()
+            .filter(|(_, u)| u.kind == Kind::Troop && u.tag < troops.len())
         {
             if y > H - 130.0 {
                 break;
@@ -524,17 +525,18 @@ impl Game {
                 20.0,
                 if u.alive { TEXT } else { MUTED },
             );
-            let act = if !u.alive {
-                "down"
-            } else {
-                action_name(u.last_action)
+            let said = self.fx.recent_call(i).filter(|_| u.alive);
+            let act = match said {
+                Some(c) => format!("says \"{}\"", crate::render::call_words(c.kind)),
+                None if !u.alive => "down".to_string(),
+                None => action_name(u.last_action).to_string(),
             };
             text(
-                act,
-                r.x + r.w - text_width(act, 16.0) - 10.0,
+                &act,
+                r.x + r.w - text_width(&act, 16.0) - 10.0,
                 r.y + 22.0,
                 16.0,
-                MUTED,
+                said.map_or(MUTED, |c| crate::render::call_color(c.kind)),
             );
             bar(
                 Rect::new(r.x + 44.0, r.y + 32.0, r.w - 56.0, 8.0),
@@ -542,6 +544,31 @@ impl Game {
                 GOOD,
             );
             y += 56.0;
+        }
+        // What the team has been telling each other, newest first.
+        if !self.fx.calls.is_empty() && y < H - 200.0 {
+            y += 6.0;
+            text("Team talk", rx, y + 14.0, 18.0, TEXT);
+            y += 24.0;
+            let who = |k: usize| {
+                let u = &w.units[k];
+                match u.kind {
+                    Kind::Troop if u.team == Team::Attack && u.tag < troops.len() && !defending => troops[u.tag].name.clone(),
+                    Kind::Troop if u.team == Team::Defend && u.tag < troops.len() && defending => troops[u.tag].name.clone(),
+                    Kind::Troop => if defending { "a raider" } else { "an enemy troop" }.to_string(),
+                    Kind::Guard => "the guard".to_string(),
+                    Kind::Tower => "the tower".to_string(),
+                    Kind::Core => "the Town Hall".to_string(),
+                }
+            };
+            for c in self.fx.calls.iter().rev().take(((H - 110.0 - y) / 22.0).max(0.0) as usize) {
+                let line = match c.target {
+                    Some(t) => format!("{}: {} ({})", who(c.from), crate::render::call_words(c.kind), who(t)),
+                    None => format!("{}: {}", who(c.from), crate::render::call_words(c.kind)),
+                };
+                text(&line, rx + 6.0, y + 14.0, 16.0, crate::render::call_color(c.kind));
+                y += 22.0;
+            }
         }
         if s.result.is_none() {
             let by = H - 80.0;
