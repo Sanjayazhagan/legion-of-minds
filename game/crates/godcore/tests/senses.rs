@@ -181,3 +181,30 @@ fn calls_reach_nearby_teammates_after_a_moment() {
     }
     assert_eq!(w.observe(b)[OBS_CALLS + 2], 0.0, "faded");
 }
+
+#[test]
+fn new_calls_point_where_they_should() {
+    let mut w = World::new(900);
+    let a = w.add_troop(&BaseClass::Fighter.spec(), 10.0, 10.0, Control::External, 0);
+    let _b = w.add_troop(&BaseClass::Archer.spec(), 11.0, 12.0, Control::External, 1);
+    let tower = w.add_tower(16.0, 10.0);
+    w.add_core(28.0, 28.0);
+    w.units[a].facing = (1.0, 0.0);
+    w.step(&[ACT_IDLE; 4]);
+    let shout = |w: &mut World, act: u8| {
+        let mut acts = vec![ACT_IDLE; 4];
+        acts[a] = act;
+        w.step(&acts);
+        let e = w.events.iter().find(|e| matches!(e.kind, EventKind::Call(_))).expect("called").clone();
+        for _ in 0..CALL_GAP {
+            w.step(&[ACT_IDLE; 4]);
+        }
+        e
+    };
+    let e = shout(&mut w, ACT_CALL_TOWER);
+    assert_eq!(e.to, (w.units[tower].x, w.units[tower].y), "points at the tower");
+    let e = shout(&mut w, ACT_CALL_GO);
+    assert!(e.to.0 > e.from.0 + 5.0, "points ahead of the caller");
+    let e = shout(&mut w, ACT_CALL_WAIT);
+    assert_eq!(e.to, e.from, "points at the caller");
+}

@@ -78,5 +78,5 @@ fn golden_fingerprint() {
     );
 }
 
-/// Sim version 7 (calls to teammates: 109 inputs, 24 actions).
-const GOLDEN: u64 = 0x1a85_e6aa_4226_6b70;
+/// Sim version 8 (seven calls to teammates: 121 inputs, 28 actions).
+const GOLDEN: u64 = 0x3206_af1e_9372_0321;

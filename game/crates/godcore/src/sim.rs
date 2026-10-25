@@ -14,15 +14,15 @@ use serde::{Deserialize, Serialize};
 pub const ARENA: f32 = 32.0;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
-pub const SIM_VERSION: u32 = 7;
-pub const OBS_DIM: usize = 109;
+pub const SIM_VERSION: u32 = 8;
+pub const OBS_DIM: usize = 121;
 /// Where the teamwork part of the view starts (the two allies' roles,
 /// threats and actions, sim version 4).
 pub const OBS_TEAM: usize = 74;
 /// Where the senses part starts (sim version 6), and the calls part (7).
 pub const OBS_SENSES: usize = 90;
 pub const OBS_CALLS: usize = 100;
-pub const N_ACTIONS: usize = 24;
+pub const N_ACTIONS: usize = 28;
 /// The first observation features and actions, as they were before dodge,
 /// block and skills (brains from older saves are grown from these).
 pub const OBS_DIM_V1: usize = 47;
@@ -52,7 +52,17 @@ pub const ACT_HEAL_2: u8 = 20;
 pub const ACT_CALL_FOCUS: u8 = 21;
 pub const ACT_CALL_BACK: u8 = 22;
 pub const ACT_CALL_HELP: u8 = 23;
-pub const N_CALLS: usize = 3;
+/// More calls (sim version 8): "hit the tower" points at the nearest
+/// building the caller sees, "wait" at the caller, "go that way" a few steps
+/// ahead of where the caller faces, and "watch out" at the enemy closest to
+/// the caller's nearest teammate.
+pub const ACT_CALL_TOWER: u8 = 24;
+pub const ACT_CALL_WAIT: u8 = 25;
+pub const ACT_CALL_GO: u8 = 26;
+pub const ACT_CALL_WATCH: u8 = 27;
+pub const N_CALLS: usize = 7;
+/// What each call says, as shown on screen.
+pub const CALL_WORDS: [&str; N_CALLS] = ["Focus!", "Fall back!", "Help!", "Hit the tower!", "Wait!", "Go that way!", "Watch out!"];
 
 const DODGE_DIST: f32 = 2.4;
 const DODGE_INVULN: u32 = 6;
@@ -734,7 +744,7 @@ impl World {
             m[ACT_WARD as usize] = ready(Move::Ward) && self.ward_useful(i);
             let tick = self.tick;
             if self.anyone_to_call(i) && !self.calls.iter().any(|c| c.from == i && tick - c.tick < CALL_GAP) {
-                for a in [ACT_CALL_FOCUS, ACT_CALL_BACK, ACT_CALL_HELP] {
+                for a in ACT_CALL_FOCUS..ACT_CALL_FOCUS + N_CALLS as u8 {
                     m[a as usize] = true;
                 }
             }
@@ -1263,8 +1273,8 @@ impl World {
                 put(&mut o, 0.0);
             }
         }
-        // Calls from teammates (sim version 7): for focus, fall back and
-        // help, where the freshest one points and how fresh it is.
+        // Calls from teammates (sim versions 7 and 8): for each kind, where
+        // the freshest one points and how fresh it is.
         for c in self.heard_calls(i) {
             match c {
                 Some((x, y, fresh)) => {
@@ -1441,7 +1451,7 @@ impl World {
             }
         }
         let (mut a, mut m) = (a, self.mask(i));
-        if (ACT_CALL_FOCUS..=ACT_CALL_HELP).contains(&a) && m[a as usize] {
+        if (ACT_CALL_FOCUS..=ACT_CALL_WATCH).contains(&a) && m[a as usize] {
             // A shout doesn't cost the turn: the troop keeps doing what it
             // did last tick (never itself a call).
             self.call(i, a - ACT_CALL_FOCUS);
@@ -1568,10 +1578,25 @@ impl World {
     /// Shout to the team. Calling gives away a cloaked troop.
     fn call(&mut self, i: usize, kind: u8) {
         let (team, cx, cy) = (self.units[i].team, self.units[i].x, self.units[i].y);
-        let (x, y) = if kind == 0 {
-            self.nearest_noticed(i, |u| u.team != team).map_or((cx, cy), |(j, _)| self.pos(j))
-        } else {
-            (cx, cy)
+        let enemy = |u: &Unit| u.team != team;
+        let (x, y) = match kind {
+            0 => self.nearest_noticed(i, enemy).map_or((cx, cy), |(j, _)| self.pos(j)),
+            3 => self.nearest_noticed(i, |u| u.team != team && u.kind.is_building()).map_or((cx, cy), |(j, _)| self.pos(j)),
+            5 => {
+                let (fx, fy) = self.units[i].facing;
+                ((cx + fx * 6.0).clamp(0.5, ARENA - 0.5), (cy + fy * 6.0).clamp(0.5, ARENA - 0.5))
+            }
+            6 => {
+                // The danger closest to the nearest teammate.
+                let mate = self.nearest_noticed(i, |u| u.team == team && u.kind == Kind::Troop);
+                let foe = mate.and_then(|(m, _)| {
+                    (0..self.units.len())
+                        .filter(|&j| self.units[j].alive && !self.units[j].kind.is_building() && self.units[j].cloak == 0 && enemy(&self.units[j]) && self.noticed(i, j))
+                        .min_by(|&a, &b| self.units[m].dist(&self.units[a]).total_cmp(&self.units[m].dist(&self.units[b])).then(a.cmp(&b)))
+                });
+                foe.map_or((cx, cy), |j| self.pos(j))
+            }
+            _ => (cx, cy),
         };
         self.calls.push(Call { team, from: i, kind, cx, cy, x, y, tick: self.tick });
         self.units[i].cloak = 0;

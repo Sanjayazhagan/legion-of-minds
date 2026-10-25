@@ -278,19 +278,23 @@ Old saves still load: the brain grows to the 100 new numbers, but it learned und
 
 ## 13. Calls: troops that talk to each other
 
-Since sim version 7 a trained troop can shout one of three calls to its teammates:
+Since sim version 7 a trained troop can shout calls to its teammates: three at first, seven since sim version 8:
 
 | Call | Bubble | Points at |
 |---|---|---|
 | Focus | red ! | the nearest enemy the caller can see (a ring marks it) |
 | Fall back | blue < | the caller |
 | Help | green + | the caller |
+| Hit the tower (v8) | orange | the nearest building the caller can see |
+| Wait (v8) | grey | the caller |
+| Go that way (v8) | cyan | 6 steps ahead of where the caller faces |
+| Watch out (v8) | yellow | the enemy closest to the caller's nearest teammate |
 
 The calls have no meaning built in. A troop only learns what "focus" means because, during team training, teammates that react to it well win more. Two teams can end up using the same call for different things.
 
 - **Who hears it:** teammates with senses within 12 steps of the caller. Walls don't block calls. A troop doesn't hear its own calls.
 - **When:** a call is taken in after the same 0.2 s reaction delay as sight, and fades after 1.5 s.
-- **What the listener gets:** 9 more inputs (109 in total): for each call, which way it points and how fresh it is.
+- **What the listener gets:** 3 inputs per call (21 in total, 121 inputs overall): which way it points and how fresh it is.
 - **Cost:** none. A shout doesn't use up the turn; the troop keeps doing what it did the tick before. A troop can call at most every 0.5 s.
 - **Solo troops:** a troop alone has nobody to call, so calls are switched off for it. Solo training gives exactly the same troop as before; we checked byte for byte.
 
@@ -323,6 +327,26 @@ Next, both of those teams trained another 500k steps on **Auto** hardness (secti
 | Calls | 99.5% won | 85.5% won | 3 stars, all troops alive | 41% destroyed |
 
 Easy drills never needed teamwork, so calls didn't help there. Once drills got hard, the calling team clearly pulled ahead. Training took the same time for both (about 1,500 s).
+
+### Did they understand?
+
+`godctl teamtalk` and the Team training screen check this after training. Each time a teammate takes in a call, they watch the next second: did it go the way the call pointed, or the other way? 50% is what you'd get from troops that ignore the call.
+
+The team from the table above had trained only with the first three calls. It scored 60% for Focus, 57% for Fall back and 43% for Help: barely more than chance. Then it trained 1.5M more steps on Auto with all seven calls, climbing to hardness 5:
+
+| Call | Teammates went that way |
+|---|---|
+| Hit the tower | 75% (2,777 heard) |
+| Go that way | 74% |
+| Watch out | 61% |
+| Focus | 59% |
+| Help | 52% |
+| Wait | 50% |
+| Fall back | 35%: listeners moved *away* from the caller |
+
+Hardness 5 drills won: 69% before, 84.5% after.
+
+"Wait" and "Fall back" point at the caller, so walking towards the caller isn't what they mean: a troop that waits stands still, and one that falls back moves away from danger. So 50% and 35% don't mean those calls were misunderstood. The clear winners are the calls that point somewhere: "Hit the tower" and "Go that way".
 
 The first version made a call use up the turn. Teams called 45 times a drill and did worse. That is why calls are now free.
 
