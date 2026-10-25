@@ -29,6 +29,8 @@ struct Shared {
     rate: f32,
     /// The drills' hardness right now.
     level: u8,
+    /// How teammates reacted to each call, checked once training ends.
+    reactions: Option<[godcore::team::Reaction; godcore::sim::N_CALLS]>,
     done: bool,
 }
 
@@ -54,6 +56,8 @@ pub struct TeamState {
     preview: Option<Preview>,
     seed: u64,
     finished: Option<String>,
+    /// How the team reacted to its calls after the last session.
+    reactions: Option<[godcore::team::Reaction; godcore::sim::N_CALLS]>,
     /// Drill hardness 1-5, or 0 for auto.
     hardness: u8,
 }
@@ -61,7 +65,7 @@ pub struct TeamState {
 impl TeamState {
     pub fn new(g: &Game) -> Self {
         let side = g.selected.map_or(Role::Attack, |i| g.troops[i].spec.role);
-        TeamState { side, members: Vec::new(), budget: 100_000, job: None, preview: None, seed: 1, finished: None, hardness: 0 }
+        TeamState { side, members: Vec::new(), budget: 100_000, job: None, preview: None, seed: 1, finished: None, reactions: None, hardness: 0 }
     }
 
     /// Demo for screenshots: the first troops of the most common side.
@@ -100,7 +104,12 @@ fn spawn(troops: &[Troop], budget: u64, pool: Option<Opponents>, hardness: u8) -
             s.rate = s.steps.iter().sum::<u64>() as f32 / t0.elapsed().as_secs_f32();
             s.level = rep.hardness;
         }
+        // Check whether the team understands its calls, on drills as hard as
+        // the last ones it trained on.
+        let team: Vec<_> = troops.iter().zip(&tr.members).map(|(t, m)| (t.spec.clone(), m.actor.clone())).collect();
+        let reactions = godcore::team::call_reactions(&team, tr.level, 40);
         let mut s = sh.lock().unwrap();
+        s.reactions = Some(reactions);
         s.trainer = Some(tr);
         s.recent = recent;
         s.done = true;
@@ -125,6 +134,7 @@ impl Game {
         let mut sh = job.shared.lock().unwrap();
         let Some(tr) = sh.trainer.take() else { return };
         let recent = std::mem::take(&mut sh.recent);
+        s.reactions = sh.reactions.take();
         drop(sh);
         let mut team: Vec<Troop> = s.members.iter().map(|&i| self.troops[i].clone()).collect();
         let steps: Vec<u64> = tr.members.iter().map(|m| m.steps).collect();
@@ -365,14 +375,17 @@ impl Game {
             } else {
                 text("Steps for each troop", rx, y + 10.0, 18.0, TEXT);
                 s.budget = s.budget.min(left);
-                let mut opts: Vec<u64> = [50_000u64, 100_000, 200_000].iter().map(|o| (*o).min(left)).collect();
+                // Long sessions give a team time to agree on what its calls mean.
+                let mut opts: Vec<u64> = [100_000u64, 200_000, 500_000, left].iter().map(|o| (*o).min(left)).collect();
                 opts.dedup();
+                let bw = (rw - 6.0 * (opts.len() as f32 - 1.0)) / opts.len() as f32;
                 let mut bx = rx;
                 for o in opts {
-                    if self.ui.button_ex(Rect::new(bx, y + 20.0, 106.0, 34.0), &format!("+{}", fmt_steps(o)), true, s.budget == o) {
+                    let label = if o == left && left > 500_000 { format!("All {}", fmt_steps(o)) } else { format!("+{}", fmt_steps(o)) };
+                    if self.ui.button_ex(Rect::new(bx, y + 20.0, bw, 34.0), &label, true, s.budget == o) {
                         s.budget = o;
                     }
-                    bx += 112.0;
+                    bx += bw + 6.0;
                 }
                 text("Drill hardness", rx, y + 88.0, 18.0, TEXT);
                 let bw = (rw - 5.0 * 6.0) / 6.0;
@@ -395,6 +408,31 @@ impl Game {
                     hint
                 };
                 text(&hint, rx, y + 152.0, 15.0, MUTED);
+                if let Some(rs) = &s.reactions {
+                    let used: Vec<(usize, &godcore::team::Reaction)> = rs.iter().enumerate().filter(|(_, r)| r.followed().is_some()).collect();
+                    let mut ty = y + 186.0;
+                    if ty + 24.0 + 20.0 * used.len() as f32 <= H - 90.0 {
+                        text("Did they understand their calls?", rx, ty, 18.0, TEXT);
+                        ty += 20.0;
+                        if used.is_empty() {
+                            text("They hardly called. Train longer or on harder drills.", rx, ty + 4.0, 15.0, MUTED);
+                        }
+                        for (k, r) in used {
+                            let f = r.followed().unwrap();
+                            let (col, verdict) = if f >= 0.65 {
+                                (GOOD, "understood")
+                            } else if f >= 0.55 {
+                                (ACCENT, "partly")
+                            } else {
+                                (MUTED, "not yet")
+                            };
+                            let line = format!("{:<15} teammates went that way {:.0}% ({} heard): {verdict}", crate::render::call_words(k as u8), f * 100.0, r.heard);
+                            text(&line, rx, ty + 4.0, 15.0, col);
+                            ty += 20.0;
+                        }
+                        text("50% is what troops that ignore a call would score.", rx, ty + 6.0, 14.0, MUTED);
+                    }
+                }
                 if self.ui.button(Rect::new(rx, H - 80.0, rw, 50.0), &format!("Train together (+{} each)", fmt_steps(s.budget))) {
                     let team: Vec<Troop> = s.members.iter().map(|&i| self.troops[i].clone()).collect();
                     let pool = self.team_opponents(s.side);

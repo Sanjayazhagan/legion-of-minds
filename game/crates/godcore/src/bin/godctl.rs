@@ -263,6 +263,17 @@ fn main() {
             }
             println!("team trained in {:.0}s", t0.elapsed().as_secs_f32());
         }
+        Some("teamtalk") => {
+            // godctl teamtalk a.json,b.json [n] [--hardness H]: whether teammates go where each call points.
+            let troops: Vec<Troop> = args[2].split(',').map(|f| Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap()).collect();
+            let n: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
+            let hardness: u8 = arg(&args, "--hardness").map(|h| h.parse().unwrap()).unwrap_or(1);
+            let team: Vec<_> = troops.iter().map(|t| (t.spec.clone(), t.actor.clone())).collect();
+            for (k, r) in godcore::team::call_reactions(&team, hardness, n).iter().enumerate() {
+                let f = r.followed().map_or("-".to_string(), |f| format!("{:.0}%", f * 100.0));
+                println!("{:<16} heard {:>5}  toward {:>5}  away {:>5}  followed {f}", godcore::sim::CALL_WORDS[k], r.heard, r.toward, r.away);
+            }
+        }
         Some("teameval") => {
             // godctl teameval a.json,b.json [n] [--hardness H]: the team plays fixed team drills with no randomness.
             let troops: Vec<Troop> = args[2].split(',').map(|f| Troop::load_json(&std::fs::read_to_string(f).unwrap()).unwrap()).collect();

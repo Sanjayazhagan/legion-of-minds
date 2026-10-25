@@ -49,18 +49,18 @@ pub struct HeardCall {
 
 /// What a call says, as shown on screen.
 pub fn call_words(kind: u8) -> &'static str {
-    match kind {
-        0 => "Focus!",
-        1 => "Fall back!",
-        _ => "Help!",
-    }
+    godcore::sim::CALL_WORDS.get(kind as usize).copied().unwrap_or("?")
 }
 
 pub fn call_color(kind: u8) -> Color {
     match kind {
         0 => Color::new(1.0, 0.45, 0.35, 1.0),
         1 => Color::new(0.5, 0.75, 1.0, 1.0),
-        _ => Color::new(0.5, 1.0, 0.55, 1.0),
+        2 => Color::new(0.5, 1.0, 0.55, 1.0),
+        3 => Color::new(1.0, 0.7, 0.3, 1.0),
+        4 => Color::new(0.8, 0.8, 0.85, 1.0),
+        5 => Color::new(0.45, 0.95, 0.95, 1.0),
+        _ => Color::new(1.0, 0.85, 0.3, 1.0),
     }
 }
 
@@ -503,7 +503,7 @@ impl Effects {
                     sfx::play(Sfx::Click, fx, 0.5, 0.0);
                     let find = |p: (f32, f32)| w.units.iter().position(|u| u.alive && (u.x - p.0).abs() < 1e-3 && (u.y - p.1).abs() < 1e-3);
                     if let Some(from) = find(e.from) {
-                        let target = if kind == 0 && e.to != e.from { find(e.to) } else { None };
+                        let target = if matches!(kind, 0 | 3 | 6) && e.to != e.from { find(e.to) } else { None };
                         self.calls.push(HeardCall { from, kind, target, at: crate::record::now() });
                         let cut = self.calls.len().saturating_sub(8);
                         self.calls.drain(..cut);
@@ -1776,8 +1776,8 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
                 draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, col);
                 draw_rectangle(r.x, r.y, 5.0, r.h, col);
                 crate::ui::text(words, r.x + 9.0, r.y + 19.0, 20.0, Color::new(0.08, 0.08, 0.12, a));
-                if c == 0 && (e.to.0 - e.from.0).abs() + (e.to.1 - e.from.1).abs() > 1e-3 {
-                    // A line to the enemy the caller points at, and a ring on it.
+                if matches!(c, 0 | 3 | 5 | 6) && (e.to.0 - e.from.0).abs() + (e.to.1 - e.from.1).abs() > 1e-3 {
+                    // A line to what the caller points at, and a ring on it.
                     let t = v.p(e.to.0, e.to.1);
                     let f = v.p(e.from.0, e.from.1);
                     let n = 10;

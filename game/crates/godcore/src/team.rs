@@ -488,3 +488,93 @@ impl TeamTrainer {
             .collect()
     }
 }
+
+/// How a team reacted to one kind of call.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Reaction {
+    /// Times a teammate took the call in.
+    pub heard: u32,
+    /// ...and then went towards what it pointed at, or away from it.
+    pub toward: u32,
+    pub away: u32,
+}
+
+impl Reaction {
+    /// Of the listeners that moved, the share that went the way the call
+    /// pointed. About 50% means the call meant nothing to them.
+    pub fn followed(&self) -> Option<f32> {
+        let moved = self.toward + self.away;
+        (moved >= 5).then(|| self.toward as f32 / moved as f32)
+    }
+}
+
+/// How a team reacts to its own calls: for each kind of call, how often a
+/// teammate that heard one went towards what it pointed at, or away, in the
+/// second after taking it in. Played on `drills` fixed team drills at
+/// `hardness`, with each troop's best action.
+pub fn call_reactions(team: &[(ClassSpec, Mlp)], hardness: u8, drills: u64) -> [Reaction; crate::sim::N_CALLS] {
+    use crate::sim::{EventKind, CALL_RANGE, REACT};
+    const FOLLOW: u32 = 20;
+    let specs: Vec<ClassSpec> = team.iter().map(|t| t.0.clone()).collect();
+    let k = team.len();
+    let mut out = [Reaction::default(); crate::sim::N_CALLS];
+    let mut cache = Cache::default();
+    for s in 0..drills {
+        let mut env = TeamEnv::new(specs.clone(), 90_000 + s, None);
+        if hardness > 1 {
+            env.hardness = hardness;
+            env.reset();
+        }
+        // Calls made: (kind, caller, where it stood, where it points, tick).
+        let mut made: Vec<(u8, usize, (f32, f32), (f32, f32), u32)> = Vec::new();
+        // Listeners: (kind, listener, where it was, unit direction to the
+        // point, due tick).
+        let mut heard: Vec<(u8, usize, (f32, f32), (f32, f32), u32)> = Vec::new();
+        loop {
+            let acts: Vec<u8> = (0..k)
+                .map(|j| if env.active(j) { crate::ppo::greedy_action(&team[j].1, &env.obs(j), &env.mask(j), &mut cache) } else { 0 })
+                .collect();
+            let out_step = env.act(&acts);
+            if out_step.episode.is_some() {
+                break;
+            }
+            let w = &env.world;
+            for e in &w.events {
+                if let EventKind::Call(kind) = e.kind {
+                    if let Some(from) = (0..k).find(|&j| (w.units[j].x - e.from.0).abs() < 1e-3 && (w.units[j].y - e.from.1).abs() < 1e-3) {
+                        made.push((kind, from, e.from, e.to, w.tick));
+                    }
+                }
+            }
+            let dist = |j: usize, p: (f32, f32)| ((w.units[j].x - p.0).powi(2) + (w.units[j].y - p.1).powi(2)).sqrt();
+            for &(kind, from, at, to, t) in &made {
+                if w.tick != t + REACT {
+                    continue;
+                }
+                for j in (0..k).filter(|&j| j != from && w.units[j].alive) {
+                    let d = dist(j, at);
+                    let d0 = dist(j, to);
+                    if d <= CALL_RANGE && d0 > 1.5 {
+                        let (ux, uy) = ((to.0 - w.units[j].x) / d0, (to.1 - w.units[j].y) / d0);
+                        heard.push((kind, j, (w.units[j].x, w.units[j].y), (ux, uy), w.tick + FOLLOW));
+                    }
+                }
+            }
+            made.retain(|m| m.4 + REACT >= w.tick);
+            heard.retain(|&(kind, j, at, (ux, uy), due)| {
+                if w.tick < due {
+                    return true;
+                }
+                if w.units[j].alive {
+                    let along = (w.units[j].x - at.0) * ux + (w.units[j].y - at.1) * uy;
+                    let r = &mut out[kind as usize];
+                    r.heard += 1;
+                    r.toward += (along > 0.5) as u32;
+                    r.away += (along < -0.5) as u32;
+                }
+                false
+            });
+        }
+    }
+    out
+}
