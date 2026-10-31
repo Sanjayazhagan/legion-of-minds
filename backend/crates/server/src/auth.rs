@@ -285,7 +285,7 @@ pub struct CallbackQuery {
 fn page(status: StatusCode, title: &str, body: &str) -> Response {
     let html = format!(
         "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>\
-         <title>Become a God</title>\
+         <title>Legion of Minds</title>\
          <body style='font-family:system-ui;background:#14161c;color:#eee;display:grid;\
          place-items:center;height:90vh;text-align:center'>\
          <div><h1>{title}</h1><p>{body}</p></div>"
