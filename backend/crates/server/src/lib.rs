@@ -1,4 +1,4 @@
-//! Become a God online backend.
+//! Legion of Minds online backend.
 //!
 //! - `auth`: test login, Google and Discord OAuth, bearer sessions
 //! - `players`: profiles, leaderboard, publishing a base snapshot
@@ -38,7 +38,7 @@ impl AppState {
             cfg: Arc::new(cfg),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
-                .user_agent("become-a-god-server")
+                .user_agent("legion-of-minds-server")
                 .build()
                 .expect("http client"),
         }

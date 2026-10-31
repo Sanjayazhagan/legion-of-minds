@@ -1,4 +1,4 @@
-//! Client for the Become a God server, for the desktop game.
+//! Client for the Legion of Minds server, for the desktop game.
 //!
 //! Blocking calls, so run them off the render thread. A typical session:
 //!

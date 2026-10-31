@@ -2,7 +2,7 @@
 name = "bag-client"
 version.workspace = true
 edition.workspace = true
-description = "Client library for the Become a God server, for the desktop game, plus the bagctl CLI"
+description = "Client library for the Legion of Minds server, for the desktop game, plus the bagctl CLI"
 
 [dependencies]
 bag-protocol = { path = "../protocol" }

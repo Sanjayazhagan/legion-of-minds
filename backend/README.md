@@ -1,4 +1,4 @@
-# Become a God: online backend
+# Legion of Minds: online backend
 
 The server for online play: accounts and sign-in, published home bases, matchmaking, raids that the server re-runs to check, a battle log with replays, and a leaderboard. Rust (Axum + Postgres via sqlx). It uses the game's own `godcore` crate (read-only, by path) to re-run every raid, so a raid on the server plays out exactly as it did on the attacker's machine.
 
@@ -72,7 +72,7 @@ They cover the full raid flow, tampered armies and fake results, invalid bases, 
 The server is one container plus a Postgres database. Any host that runs a Dockerfile works (Fly.io, Railway, Render, AWS). Build from the **project root**, because the image needs `game/crates/godcore`:
 
 ```
-docker build -f backend/Dockerfile -t become-a-god-server .
+docker build -f backend/Dockerfile -t legion-of-minds-server .
 ```
 
 ### Deploy to the Azure VM with deploy.ps1
@@ -159,7 +159,7 @@ Code: `game/crates/app/src/online.rs`, using `bag-client` from here. Every serve
 **Which server the game talks to:** `BAG_SERVER` when the game starts, else `BAG_SERVER` when the game was built, else `http://localhost:8080`. Build the release game with the hosted address:
 
 ```
-BAG_SERVER=https://your-server.example cargo build --release -p become-a-god
+BAG_SERVER=https://your-server.example cargo build --release -p legion-of-minds
 ```
 
 **Try it on one machine** (Postgres running):
@@ -168,7 +168,7 @@ BAG_SERVER=https://your-server.example cargo build --release -p become-a-god
 # terminal 1, in backend/
 DATABASE_URL=postgres://localhost/bag DEV_LOGIN=true cargo run --release -p bag-server
 # terminal 2, in game/
-cargo run --release -p become-a-god
+cargo run --release -p legion-of-minds
 ```
 
 Type a name under "Test login" and sign in. To have someone to raid, sign in a second name with bagctl and publish a base (see above), or run a second copy of the game with its own save folder (`BAG_SAVE_DIR=/tmp/player2`).
