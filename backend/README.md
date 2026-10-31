@@ -4,6 +4,7 @@ The server for online play: accounts and sign-in, published home bases, matchmak
 
 ## How online raids work
 
+0. **Pay online.** The server keeps what each player has bought with online gold: Town Hall level, weapons and each troop's level. Gold, Town Hall and troop levels in the save file only count offline. A base above your online Town Hall, a troop above its online level, or a weapon you haven't unlocked online (each class's own weapon is free) is refused, so editing a save file gets you nothing online.
 1. **Publish.** After training, the game sends your home base (Town Hall level, buildings) and your placed defenders' brains. The server checks it and stores it as an immutable snapshot. That snapshot is what defends while you're offline.
 2. **Find a match.** An attacker asks for an opponent. The server picks a published base within 200 trophies (then anyone), skipping shielded bases and bases already under attack, and reserves it for 5 minutes.
 3. **Raid.** The attacker's game runs the raid locally (for the battle screen), then sends the army, placement and its own result.
@@ -111,7 +112,7 @@ Health check: `GET /health`. Serve it behind https (the host's TLS); tokens are 
 
 ## API
 
-All bodies are JSON. Publishing, matchmaking and raids need the header `x-sim-version: <godcore::sim::SIM_VERSION>` (bag-client sends it); a game on different battle rules gets 409 `update_required`. Bases published under older rules are skipped by matchmaking until their owner publishes again, and replays carry the `sim_version` they were fought under. Errors are `{"error": code, "message": text}`, e.g. `unauthorized`, `invalid` (422, failed a check), `no_opponent`, `raid_closed`.
+All bodies are JSON. Publishing, matchmaking and raids need the header `x-sim-version: <godcore::sim::SIM_VERSION>` (bag-client sends it); a game on different battle rules gets 409 `update_required`. Bases published under older rules are skipped by matchmaking until their owner publishes again, and replays carry the `sim_version` they were fought under. Errors are `{"error": code, "message": text}`, e.g. `unauthorized`, `invalid` (422, failed a check), `no_opponent`, `raid_closed`, `not_enough_gold`.
 
 | Method and path | Auth | What it does |
 |---|---|---|
@@ -122,7 +123,10 @@ All bodies are JSON. Publishing, matchmaking and raids need the header `x-sim-ve
 | `POST /v1/auth/logins/{id}/poll` `{poll_secret}` | | `{status: "pending"}` or `{status: "done", token, user}` |
 | `GET /v1/auth/{provider}/callback` | | Where the provider sends the browser back |
 | `POST /v1/auth/logout` | ✓ | End this session |
-| `GET /v1/me`, `PATCH /v1/me` `{display_name}` | ✓ | Profile: trophies, gold, Town Hall, shield |
+| `GET /v1/me`, `PATCH /v1/me` `{display_name}` | ✓ | Profile: trophies, online gold, published Town Hall, shield, and `upgrades` (online Town Hall, weapons, troop levels) |
+| `POST /v1/me/town-hall` | ✓ | Buy the next Town Hall level with online gold → profile |
+| `POST /v1/me/weapons` `{weapon}` | ✓ | Unlock a weapon online → profile |
+| `POST /v1/me/troops/{troop_id}/level` `{from}` | ✓ | Level a troop up online from `from` (its online level now, so a repeat doesn't pay twice) → profile |
 | `PUT /v1/me/base`, `GET /v1/me/base` | ✓ | Publish / read your base snapshot |
 | `POST /v1/matchmaking` | ✓ | Find and reserve an opponent → snapshot to fight |
 | `POST /v1/attacks/{id}` `{army, client_result}` | ✓ | Submit the raid; the server re-runs and scores it |
@@ -174,8 +178,8 @@ Recordings and screenshot tests (`BAG_SCREEN`, `BAG_RECORD`, `BAG_SCREENSHOT`) s
 ## Not done yet
 
 - **Online raids use your local troops as they are.** There is no army picker yet: the Online screen sends your best attackers and first four defenders.
-- **The game's economy is still local.** Gold, Town Hall level and troop levels live in the player's save file. The server keeps its own trophies and online gold, and trusts the Town Hall level in the published base (it checks buildings and troop levels against it). Moving progression onto the server is the next step against cheating.
+- **Online gold only comes from raids.** Campaign battles and defence waves are fought on the player's machine, so their gold stays offline. The server could re-run them (it already re-runs raids) to pay online gold too.
+- **Recruiting and buildings are still local.** They don't need paying for online: the server checks a base's buildings against its Town Hall, and a fresh recruit is level 1.
 - **Training can't be verified.** The server checks a troop's level and training cap, but a brain trained longer elsewhere would still pass. Signing training runs, or capping by rank, is a later problem.
-- **Weapon ownership isn't checked.** Weapons are bought with gold in the game's save file, so the server accepts any weapon a troop holds (its mastery is still checked). This goes with moving the economy onto the server.
 - Clans, wars, friend challenges, Steam login, rate limiting and an admin view.
 - Replays let the defender download the attacker's army brains (that's what makes "train against this raid" work). Decide later whether that's fair to attackers.

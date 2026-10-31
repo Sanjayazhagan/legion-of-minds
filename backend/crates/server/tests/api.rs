@@ -80,15 +80,46 @@ fn api_code<T: std::fmt::Debug>(r: Result<T, Error>) -> String {
     }
 }
 
+/// A fixture troop with its own id, as the game gives every troop.
+fn troop(name: &str, id: u64) -> Troop {
+    let mut t = fixture(name);
+    t.id = id;
+    t
+}
+
 fn home_defense() -> BaseSnapshot {
-    let g = fixture("guard");
-    let defs: Vec<_> = vec![g.clone(), g].into_iter().zip(defender_spots(2)).collect();
+    let defs: Vec<_> = vec![troop("guard", 1), troop("guard", 2)]
+        .into_iter()
+        .zip(defender_spots(2))
+        .collect();
     snapshot_from(&HomeBase::reference(), &defs)
 }
 
+/// Run SQL against the test database from blocking code.
+fn sql(db: &str, q: &str, gold: i64, id: uuid::Uuid) {
+    let (db, q) = (db.to_string(), q.to_string());
+    tokio::runtime::Runtime::new().unwrap().block_on(async move {
+        let pool = sqlx::PgPool::connect(&db).await.unwrap();
+        sqlx::query(&q).bind(gold).bind(id).execute(&pool).await.unwrap();
+    });
+}
+
+fn set_gold(db: &str, c: &Client, gold: i64) {
+    sql(db, "UPDATE users SET gold = $1 WHERE id = $2", gold, c.me().unwrap().id);
+}
+
+/// Buy Town Hall `th` online, leaving the player's gold as it was.
+fn buy_town_hall(db: &str, c: &Client, th: u32) {
+    let gold = c.me().unwrap().gold;
+    set_gold(db, c, 100_000);
+    while c.me().unwrap().upgrades.town_hall < th {
+        c.upgrade_town_hall().unwrap();
+    }
+    set_gold(db, c, gold);
+}
+
 fn army() -> Vec<Placement> {
-    let (f, h) = (fixture("fighter"), fixture("healer"));
-    let troops = vec![f.clone(), f, h];
+    let troops = vec![troop("fighter", 1), troop("fighter", 2), troop("healer", 3)];
     let spots = army_spots(troops.len());
     bag_client::army_from(&troops.into_iter().zip(spots).collect::<Vec<_>>())
 }
@@ -96,6 +127,7 @@ fn army() -> Vec<Placement> {
 #[tokio::test(flavor = "multi_thread")]
 async fn raid_flow_is_checked_and_scored() {
     let db = fresh_db().await;
+    let dbu = db.clone();
     let url = serve(|u| test_config(db, u, vec![])).await;
     blocking(move || {
         let mut alice = Client::new(&url);
@@ -111,6 +143,9 @@ async fn raid_flow_is_checked_and_scored() {
         // Nobody else has a base yet.
         assert_eq!(api_code(bob.find_match()), "no_opponent");
 
+        // The reference base is Town Hall 3, which Alice must buy online.
+        assert_eq!(api_code(alice.publish_base(&home_defense())), "invalid");
+        buy_town_hall(&dbu, &alice, 3);
         let p = alice.publish_base(&home_defense()).unwrap();
         assert_eq!((p.town_hall, p.defenders), (3, 2));
         assert_eq!(alice.me().unwrap().town_hall, Some(3));
@@ -171,10 +206,12 @@ async fn raid_flow_is_checked_and_scored() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tampered_raids_are_caught() {
     let db = fresh_db().await;
+    let dbu = db.clone();
     let url = serve(|u| test_config(db, u, vec![])).await;
     blocking(move || {
         let mut alice = Client::new(&url);
         alice.dev_login("Alice").unwrap();
+        buy_town_hall(&dbu, &alice, 3);
         alice.publish_base(&home_defense()).unwrap();
         let mut bob = Client::new(&url);
         bob.dev_login("Bob").unwrap();
@@ -204,6 +241,7 @@ async fn tampered_raids_are_caught() {
         let m = {
             let mut dave = Client::new(&url);
             dave.dev_login("Dave").unwrap();
+            buy_town_hall(&dbu, &dave, 3);
             dave.publish_base(&home_defense()).unwrap();
             bob.find_match().unwrap()
         };
@@ -251,9 +289,11 @@ async fn bases_from_older_rules_are_not_matched() {
     let url = serve(|u| test_config(db, u, vec![])).await;
     let pool = sqlx::PgPool::connect(&db2).await.unwrap();
     let u2 = url.clone();
+    let dbu = db2.clone();
     blocking(move || {
         let mut alice = Client::new(&u2);
         alice.dev_login("Alice").unwrap();
+        buy_town_hall(&dbu, &alice, 3);
         alice.publish_base(&home_defense()).unwrap();
     })
     .await;
@@ -270,6 +310,80 @@ async fn bases_from_older_rules_are_not_matched() {
         assert_eq!(m.sim_version, godcore::sim::SIM_VERSION);
         let (_, out) = bob.attack(&m, army()).unwrap();
         assert_eq!(alice.replay(out.attack_id).unwrap().sim_version, godcore::sim::SIM_VERSION);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upgrades_only_count_once_paid_online() {
+    use godcore::weapons::Weapon;
+    let db = fresh_db().await;
+    let dbu = db.clone();
+    let url = serve(|u| test_config(db, u, vec![])).await;
+    blocking(move || {
+        let mut bob = Client::new(&url);
+        bob.dev_login("Bob").unwrap();
+        bob.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
+
+        let mut alice = Client::new(&url);
+        let me = alice.dev_login("Alice").unwrap();
+        assert_eq!(me.upgrades.town_hall, 1);
+        assert!(me.upgrades.weapons.is_empty() && me.upgrades.levels.is_empty());
+
+        // A level 2 troop (allowed by Town Hall 1) that was only levelled offline.
+        let m = alice.find_match().unwrap();
+        let mut a = army();
+        a[0].troop.level = 2;
+        assert_eq!(api_code(alice.submit(m.attack_id, a.clone(), None)), "invalid");
+
+        // Levelling online takes its online level, so a repeat doesn't pay twice.
+        assert_eq!(api_code(alice.level_up(1, 2)), "invalid");
+        let me = alice.level_up(1, 1).unwrap();
+        assert_eq!(me.gold, 500 - 100);
+        assert_eq!(me.upgrades.level_of(1), 2);
+        assert_eq!(me.upgrades.level_of(2), 1);
+        assert_eq!(api_code(alice.level_up(1, 1)), "invalid");
+        // Level 3 needs Town Hall 2.
+        assert_eq!(api_code(alice.level_up(1, 2)), "invalid");
+
+        // A weapon other than the class's own must be unlocked online too.
+        a[1].troop.equip(Weapon::Daggers);
+        assert_eq!(api_code(alice.submit(m.attack_id, a.clone(), None)), "invalid");
+        let cost = Weapon::Daggers.stats().cost as i64;
+        let me = alice.buy_weapon(Weapon::Daggers).unwrap();
+        assert_eq!(me.gold, 400 - cost);
+        assert_eq!(me.upgrades.weapons, vec![Weapon::Daggers]);
+        assert_eq!(api_code(alice.buy_weapon(Weapon::Daggers)), "invalid");
+        // The class's own weapon is always free.
+        a[2].troop.equip(Weapon::HolyWand);
+
+        // The same troop can't be sent twice.
+        let mut twice = a.clone();
+        twice[2].troop.id = 1;
+        assert_eq!(api_code(alice.submit(m.attack_id, twice, None)), "invalid");
+
+        // Now it counts.
+        let out = alice.submit(m.attack_id, a, None).unwrap();
+        assert_eq!(out.attacker.upgrades.level_of(1), 2);
+
+        // A base above the online Town Hall is refused; buying it fixes that.
+        let base = snapshot_from(&bag_client::starter_layout(2), &[]);
+        assert_eq!(api_code(alice.publish_base(&base)), "invalid");
+        set_gold(&dbu, &alice, 0);
+        assert_eq!(api_code(alice.upgrade_town_hall()), "not_enough_gold");
+        set_gold(&dbu, &alice, 200);
+        let me = alice.upgrade_town_hall().unwrap();
+        assert_eq!((me.gold, me.upgrades.town_hall), (0, 2));
+        alice.publish_base(&base).unwrap();
+
+        // Defenders follow the same rules.
+        let mut g = troop("guard", 9);
+        g.level = 2;
+        let defs = vec![(g, defender_spots(1)[0])];
+        assert_eq!(api_code(alice.publish_base(&snapshot_from(&base.base, &defs))), "invalid");
+        set_gold(&dbu, &alice, 100);
+        alice.level_up(9, 1).unwrap();
+        alice.publish_base(&snapshot_from(&base.base, &defs)).unwrap();
     })
     .await;
 }

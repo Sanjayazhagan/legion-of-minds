@@ -3,12 +3,14 @@
 //! - `auth`: test login, Google and Discord OAuth, bearer sessions
 //! - `players`: profiles, leaderboard, publishing a base snapshot
 //! - `attacks`: matchmaking, server-checked raids, battle log, replays
+//! - `shop`: Town Hall, weapons and troop levels bought with online gold
 
 pub mod attacks;
 pub mod auth;
 pub mod config;
 pub mod error;
 pub mod players;
+pub mod shop;
 
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -73,6 +75,9 @@ pub fn router(st: AppState) -> Router {
             put(players::publish_base).get(players::my_base),
         )
         .route("/v1/me/attacks", get(attacks::my_log))
+        .route("/v1/me/town-hall", post(shop::upgrade_town_hall))
+        .route("/v1/me/weapons", post(shop::buy_weapon))
+        .route("/v1/me/troops/{id}/level", post(shop::level_up))
         .route("/v1/players/{id}", get(players::player))
         .route("/v1/leaderboard", get(players::leaderboard))
         .route("/v1/matchmaking", post(attacks::find_match))
