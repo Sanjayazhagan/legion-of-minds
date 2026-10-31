@@ -141,6 +141,7 @@ fn demo_screen(g: &mut Game) -> Option<Screen> {
         "armoury" => Screen::Armoury(armoury::ArmouryState { idx: 0 }),
         "team" => Screen::Team(teamtrain::TeamState::demo(g)),
         "signin" => Screen::SignIn(online::SignInState::from_game(&g.account)),
+        "online" => online::OnlineState::demo(g),
         _ => return None,
     })
 }
