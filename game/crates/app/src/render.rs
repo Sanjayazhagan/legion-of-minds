@@ -8,7 +8,7 @@ use crate::sfx::{self, Sfx};
 use crate::ui::*;
 use godcore::scenario::BuildKind;
 use godcore::scenario::DEPLOY_RADIUS;
-use godcore::sim::{EventKind, Kind, Team, Unit, World, ARENA};
+use godcore::sim::{EventKind, Kind, Outcome, Team, Unit, World, ARENA};
 use godcore::weapons::{Skill, Weapon};
 use macroquad::models::{draw_mesh, Mesh, Vertex};
 use macroquad::prelude::*;
@@ -112,6 +112,14 @@ struct Blend {
 const BLEND_TIME: f64 = 0.14;
 /// Attacks play this much faster than the clip's own speed.
 const ATTACK_RATE: f32 = 1.25;
+/// A standing unit's flinch when hit, seconds.
+const FLINCH_TIME: f64 = 0.35;
+/// The skeletons' climb out of the ground: clip length and how much faster
+/// than the clip it plays, so a deploy takes about a second and a half.
+const SPAWN_LEN: f32 = 3.57;
+const SPAWN_SPEED: f32 = 2.4;
+/// How deep the climb starts, in model units (the clip's root drops 3.1).
+const SPAWN_DEPTH: f32 = 3.1;
 /// The sim hits many times a second; one swing covers several hits, and a
 /// swing that has started is finished even if the fight ends.
 const FIGHT_LINGER: f64 = 0.3;
@@ -161,6 +169,8 @@ struct Anim {
     gait: f32,
     dist: f32,
     pdist: f32,
+    /// When it joined the battle (real time).
+    born: f64,
 }
 
 fn heading_of(dx: f32, dy: f32) -> f32 {
@@ -239,6 +249,7 @@ impl Effects {
                         gait: 0.0,
                         dist: 0.0,
                         pdist: 0.0,
+                        born: now,
                     }
                 })
                 .collect();
@@ -1083,15 +1094,40 @@ const CHAR_SCALE: f32 = 1.0;
 
 #[derive(Clone, Copy)]
 struct CharPose {
-    clip_kind: u8, // 0 idle, 1 walk, 2 attack, 3 death, 4 dodge, 5 block, 6 skill, 7 stunned, 8 run
+    // 0 idle, 1 walk, 2 attack, 3 death, 4 dodge, 5 block, 6 skill, 7 stunned,
+    // 8 run, 9 flinch, 10 rise from the ground, 11 victory
+    clip_kind: u8,
     t: f32,
     skill: Option<Skill>,
+    /// Picks between a clip's variants (swings, flinches, falls), so a
+    /// crowd doesn't move in lockstep.
+    seed: usize,
 }
 
 impl CharPose {
     const fn new(clip_kind: u8, t: f32) -> CharPose {
-        CharPose { clip_kind, t, skill: None }
+        CharPose { clip_kind, t, skill: None, seed: 0 }
     }
+
+    const fn seeded(mut self, seed: usize) -> CharPose {
+        self.seed = seed;
+        self
+    }
+}
+
+/// Swings that take turns with a weapon's main attack, about as long as it.
+fn swing_variants(attack: &str) -> &'static [&'static str] {
+    match attack {
+        "1H_Melee_Attack_Chop" => &["1H_Melee_Attack_Chop", "1H_Melee_Attack_Slice_Diagonal", "1H_Melee_Attack_Slice_Horizontal"],
+        "2H_Melee_Attack_Chop" => &["2H_Melee_Attack_Chop", "2H_Melee_Attack_Stab", "2H_Melee_Attack_Slice"],
+        "Dualwield_Melee_Attack_Stab" => &["Dualwield_Melee_Attack_Stab", "Dualwield_Melee_Attack_Chop", "Dualwield_Melee_Attack_Slice"],
+        _ => &[],
+    }
+}
+
+/// The first of `names` this model has.
+fn first_clip<'a>(m: &crate::scene::Model, names: &[&'a str]) -> Option<&'a str> {
+    names.iter().copied().find(|n| m.clip_len(n).is_some())
 }
 
 /// How a character in a battle looks this frame, besides its clip.
@@ -1145,24 +1181,45 @@ fn draw_character_ex(
 ) -> bool {
     let (lo, show) = gear(fig, npc_guard);
     let Some(m) = lib.models.get(lo.model) else { return false };
+    let skeleton = npc_guard || fig.raider;
+    let pick = |names: &[&'static str]| names[pose.seed % names.len()];
     let clip = match pose.clip_kind {
         1 => "Walking_A",
         8 => "Running_A",
         2 => lo.attack,
-        3 => "Death_A",
+        3 if skeleton && pose.seed % 2 == 0 => first_clip(m, &["Death_C_Skeletons", "Death_A"]).unwrap_or("Death_A"),
+        3 => first_clip(m, &[pick(&["Death_A", "Death_B"]), "Death_A"]).unwrap_or("Death_A"),
         4 => "Dodge_Backward",
         5 => "Blocking",
         6 => pose.skill.map_or(lo.attack, skill_clip),
         7 => "Hit_A",
+        9 => first_clip(m, &[pick(&["Hit_A", "Hit_B"]), "Hit_A"]).unwrap_or("Hit_A"),
+        10 => "Spawn_Ground_Skeletons",
+        11 if skeleton => first_clip(m, &["Taunt", "Cheer"]).unwrap_or(lo.idle),
+        11 => "Cheer",
         _ => lo.idle,
     };
-    let looped = matches!(pose.clip_kind, 0 | 1 | 2 | 5 | 8);
+    let looped = matches!(pose.clip_kind, 0 | 1 | 2 | 5 | 8 | 11);
     let speed = match pose.clip_kind {
         2 => ATTACK_RATE,
         4 => 1.6,
+        10 => SPAWN_SPEED,
         _ => 1.0,
     };
-    let now_clip = (clip, pose.t * speed, looped);
+    let mut now_clip = (clip, pose.t * speed, looped);
+    if pose.clip_kind == 2 {
+        // Melee swings take turns between a weapon's variants, each squeezed
+        // into the main swing's time so hits still land on the beat.
+        let vars = swing_variants(lo.attack);
+        if let (false, Some(base)) = (vars.is_empty(), m.clip_len(lo.attack)) {
+            let k = now_clip.1 / base;
+            let v = vars[(k.floor() as usize + pose.seed) % vars.len()];
+            if let Some(len) = m.clip_len(v) {
+                now_clip = (v, k.fract() * len, false);
+            }
+        }
+    }
+    let (clip, looped) = (now_clip.0, now_clip.2);
     let g = match blend {
         Some(b) => {
             let now = crate::record::now();
@@ -1371,7 +1428,7 @@ pub fn draw_portrait3d(c: Vec2, r: f32, fig: &Figure) -> bool {
     let cam = Camera3D { position: vec3(0.35, 1.55, 2.3), target: vec3(0.0, 1.2, 0.0), up: Vec3::Y, fovy: 0.62, ..Default::default() };
     begin_3d(rect, cam, true);
     let t = crate::record::now() as f32;
-    let ok = draw_character(&lib, fig, false, Vec3::ZERO, 0.25, CharPose { clip_kind: 0, t, skill: None }, 1.0);
+    let ok = draw_character(&lib, fig, false, Vec3::ZERO, 0.25, CharPose::new(0, t), 1.0);
     end_3d();
     ok
 }
@@ -1395,7 +1452,7 @@ pub fn draw_showcase3d(c: Vec2, r: f32, fig: &Figure) -> bool {
 pub fn draw_standing(v: View, x: f32, y: f32, fig: &Figure, name: Option<&str>) {
     let drawn = library().map_or(false, |lib| {
         begin_3d(v.r, v.camera(), false);
-        let ok = draw_character(&lib, fig, false, w3(x, y, 0.0), heading_of(C - x, C - y), CharPose { clip_kind: 0, t: crate::record::now() as f32, skill: None }, CHAR_SCALE);
+        let ok = draw_character(&lib, fig, false, w3(x, y, 0.0), heading_of(C - x, C - y), CharPose::new(0, crate::record::now() as f32), CHAR_SCALE);
         end_3d();
         ok
     });
@@ -1504,6 +1561,17 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             (since < FIGHT_LINGER || (ft / len).floor() <= swing_of_hit).then_some((ft as f32, len as f32))
         });
         let swing_no = fighting.map(|(ft, len)| (ft / len).floor() as i64);
+        // Raiding skeletons climb out of the ground as they are deployed.
+        let rising = (fig.raider || npc)
+            && u.team == Team::Attack
+            && ((now - a.born) as f32) < SPAWN_LEN / SPAWN_SPEED
+            && lib.models.get(gear(&fig, npc).0.model).is_some_and(|m| m.clip_len("Spawn_Ground_Skeletons").is_some());
+        // Once the battle is over the winners celebrate.
+        let cheering = match w.outcome() {
+            Outcome::Victory if u.team == Team::Attack => Some(t),
+            Outcome::Wiped | Outcome::Timeout if u.team == Team::Defend => Some(t),
+            _ => None,
+        };
         let stride = a.pdist + (a.dist - a.pdist) * fx.blend();
         let pose = if let Some(d) = a.died {
             let since = (now - d) as f32;
@@ -1512,26 +1580,37 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             }
             // Fall, lie still, then sink away.
             pos.y -= (since - 3.0).max(0.0) * 0.7;
-            CharPose::new(3, since)
+            CharPose::new(3, since).seeded(i)
         } else if !u.alive {
             continue;
         } else if u.stun > 0 {
-            CharPose { clip_kind: 7, t: 0.15, skill: None }
+            CharPose { clip_kind: 7, t: 0.15, skill: None, seed: 0 }
+        } else if let Some(t) = cheering {
+            CharPose::new(11, t + i as f32 * 0.29).seeded(i)
         } else if a.special == 1 && (now - a.acted) < 0.6 {
-            CharPose { clip_kind: 4, t: (now - a.acted) as f32, skill: None }
+            CharPose::new(4, (now - a.acted) as f32)
         } else if a.special == 2 && (now - a.acted) < 1.1 {
-            CharPose { clip_kind: 6, t: (now - a.acted) as f32, skill: a.skill }
+            CharPose { clip_kind: 6, t: (now - a.acted) as f32, skill: a.skill, seed: 0 }
         } else if u.block_ticks > 0 {
-            CharPose { clip_kind: 5, t: t + i as f32 * 0.37, skill: None }
+            CharPose::new(5, t + i as f32 * 0.37)
+        } else if rising {
+            // The clip's own climb is root motion, which the loader leaves
+            // out, so lift the body out of the ground here.
+            let k = ((now - a.born) as f32 * SPAWN_SPEED / SPAWN_LEN).min(1.0);
+            pos.y -= (1.0 - k).powi(2) * SPAWN_DEPTH * CHAR_SCALE;
+            CharPose::new(10, (now - a.born) as f32)
         } else if let Some((ft, len)) = fighting {
             swings[i] = Some(((ft / len).fract(), a.aim));
-            CharPose::new(2, ft * fx.speedup() as f32)
+            CharPose::new(2, ft * fx.speedup() as f32).seeded(i)
         } else if a.still < 0.25 && a.gait > 0.15 {
             CharPose::new(8, stride / RUN_STRIDE)
         } else if a.still < 0.25 {
             CharPose::new(1, stride / WALK_STRIDE)
+        } else if now - a.hurt < FLINCH_TIME {
+            // Hit while standing: a short flinch.
+            CharPose::new(9, (now - a.hurt) as f32).seeded(i + a.hurt.to_bits() as usize)
         } else {
-            CharPose { clip_kind: 0, t: t + i as f32 * 0.37, skill: None }
+            CharPose::new(0, t + i as f32 * 0.37)
         };
         // Team ring under the feet.
         if u.alive {
