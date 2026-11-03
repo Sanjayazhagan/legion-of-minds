@@ -1,5 +1,5 @@
 # Build from the project root, so the image can see the game's godcore crate:
-#   docker build -f backend/Dockerfile -t become-a-god-server .
+#   docker build -f backend/Dockerfile -t legion-of-minds-server .
 # (docker compose in this folder does that for you.)
 FROM rust:1.92-bookworm AS build
 WORKDIR /src

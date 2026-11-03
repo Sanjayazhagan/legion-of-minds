@@ -8,6 +8,9 @@
 //!   login PROVIDER                      open the URL it prints, then wait
 //!   me | rename NAME | leaderboard
 //!   publish --th N def1.troop.json ...  base = every building Town Hall N allows
+//!   town-hall                           buy the next Town Hall level online
+//!   weapon NAME                         unlock a weapon online, e.g. Daggers
+//!   level TROOP.json                    level a troop up online by one
 //!   find                                matchmaking only
 //!   raid army1.troop.json ...           find a match and raid it
 //!   log [defense|attack|all]
@@ -26,6 +29,9 @@ const USAGE: &str = "bagctl [--server URL] [--token-file F] <command>
   login PROVIDER                      open the URL it prints, then wait
   me | rename NAME | leaderboard
   publish --th N def1.troop.json ...  base = every building Town Hall N allows
+  town-hall                           buy the next Town Hall level online
+  weapon NAME                         unlock a weapon online, e.g. Daggers
+  level TROOP.json                    level a troop up online by one
   find                                matchmaking only
   raid army1.troop.json ...           find a match and raid it
   log [defense|attack|all]
@@ -103,6 +109,18 @@ fn main() {
             let spots = defender_spots(defs.len());
             let defs: Vec<_> = defs.into_iter().zip(spots).collect();
             json(&ok(c.publish_base(&snapshot_from(&starter_layout(th), &defs))));
+        }
+        "town-hall" => json(&ok(c.upgrade_town_hall())),
+        "weapon" => {
+            let name = args.first().unwrap_or_else(|| die(USAGE));
+            let w = serde_json::from_value(serde_json::Value::String(name.clone()))
+                .unwrap_or_else(|_| die("weapon names: SwordShield Greataxe Greatsword Daggers Crossbow FireStaff HolyWand"));
+            json(&ok(c.buy_weapon(w)));
+        }
+        "level" => {
+            let t = load(args.first().unwrap_or_else(|| die(USAGE)));
+            let from = ok(c.me()).upgrades.level_of(t.id);
+            json(&ok(c.level_up(t.id, from)));
         }
         "find" => {
             let m = ok(c.find_match());

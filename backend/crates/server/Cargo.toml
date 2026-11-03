@@ -2,7 +2,7 @@
 name = "bag-server"
 version.workspace = true
 edition.workspace = true
-description = "Become a God online backend: accounts, published bases, matchmaking, server-checked raids"
+description = "Legion of Minds online backend: accounts, published bases, matchmaking, server-checked raids"
 
 [dependencies]
 bag-protocol = { path = "../protocol" }

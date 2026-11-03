@@ -19,8 +19,10 @@ use godcore::sim::{Outcome, OBS_DIM};
 /// client in this header on every request.
 pub use godcore::sim::SIM_VERSION;
 pub const SIM_VERSION_HEADER: &str = "x-sim-version";
-use godcore::troop::{level_cap, Troop, MAX_LEVEL};
+use godcore::troop::{level_cap, level_up_cost, Troop, MAX_LEVEL};
+use godcore::weapons::Weapon;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub const MAX_DEFENDERS: usize = 4;
@@ -60,9 +62,116 @@ pub struct User {
     pub display_name: String,
     pub trophies: i32,
     pub gold: i64,
+    /// Town Hall of the published base, if any.
     pub town_hall: Option<i32>,
     pub has_base: bool,
     pub shield_until: Option<String>,
+    #[serde(default)]
+    pub upgrades: Upgrades,
+}
+
+/// What the player has paid for with online gold. Every published or
+/// raiding troop is checked against it, so upgrades bought offline (or
+/// edited into a save file) don't count online.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Upgrades {
+    pub town_hall: u32,
+    /// Weapons unlocked online. Each class's own weapon is always free.
+    pub weapons: Vec<Weapon>,
+    /// Troop id -> level, for troops levelled online. Others are level 1.
+    pub levels: BTreeMap<u64, u32>,
+}
+
+impl Default for Upgrades {
+    fn default() -> Self {
+        Upgrades {
+            town_hall: 1,
+            weapons: Vec::new(),
+            levels: BTreeMap::new(),
+        }
+    }
+}
+
+impl Upgrades {
+    pub fn level_of(&self, troop_id: u64) -> u32 {
+        self.levels.get(&troop_id).copied().unwrap_or(1)
+    }
+
+    pub fn owns_weapon(&self, w: Weapon, spec: &ClassSpec) -> bool {
+        w == Weapon::default_for(spec.main_class()) || self.weapons.contains(&w)
+    }
+
+    /// Why `t` can't fight online yet, if it can't.
+    pub fn blocker(&self, t: &Troop) -> Option<String> {
+        let online = self.level_of(t.id);
+        if t.level > online {
+            return Some(format!(
+                "{} is level {} but level {online} online: level it up online first",
+                t.name.trim(),
+                t.level
+            ));
+        }
+        let w = t.spec.weapon();
+        if !self.owns_weapon(w, &t.spec) {
+            return Some(format!(
+                "{} uses the {}, which isn't unlocked online yet",
+                t.name.trim(),
+                w.name()
+            ));
+        }
+        None
+    }
+
+    /// Check a whole army or base's defenders: each troop paid for, and no
+    /// troop sent twice.
+    pub fn check(&self, troops: &[Placement]) -> Result<(), Invalid> {
+        for (k, p) in troops.iter().enumerate() {
+            if troops[..k].iter().any(|q| q.troop.id == p.troop.id) {
+                return bad("the same troop can't be placed twice");
+            }
+            if let Some(why) = self.blocker(&p.troop) {
+                return bad(why);
+            }
+        }
+        Ok(())
+    }
+
+    /// Gold to raise the Town Hall one level, or why it can't be raised.
+    pub fn town_hall_price(&self) -> Result<i64, Invalid> {
+        if self.town_hall >= MAX_TOWN_HALL {
+            return bad("your Town Hall is already at the top level");
+        }
+        Ok(godcore::scenario::town_hall_cost(self.town_hall) as i64)
+    }
+
+    /// Gold to unlock `w` online, or why it can't be bought.
+    pub fn weapon_price(&self, w: Weapon) -> Result<i64, Invalid> {
+        if self.weapons.contains(&w) {
+            return bad(format!("you already own the {}", w.name()));
+        }
+        Ok(w.stats().cost as i64)
+    }
+
+    /// Gold to level troop `troop_id` from `from` to `from + 1`, or why it
+    /// can't be. `from` must be its online level, so a repeated request
+    /// doesn't pay twice.
+    pub fn level_price(&self, troop_id: u64, from: u32) -> Result<i64, Invalid> {
+        let now = self.level_of(troop_id);
+        if from != now {
+            return bad(format!("this troop is level {now} online, not {from}"));
+        }
+        if now >= MAX_LEVEL {
+            return bad("this troop is already at the top level");
+        }
+        if now >= max_troop_level(self.town_hall) {
+            return bad(format!(
+                "level {} troops need Town Hall {} online",
+                now + 1,
+                now
+            ));
+        }
+        Ok(level_up_cost(now) as i64)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -183,6 +292,17 @@ pub struct Replay {
     pub sim_version: u32,
     pub snapshot: BaseSnapshot,
     pub army: Vec<Placement>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BuyWeapon {
+    pub weapon: Weapon,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LevelUp {
+    /// The troop's online level now. It goes up by one.
+    pub from: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -5,9 +5,14 @@ use crate::error::{ApiError, ApiResult};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use bag_protocol::{canonical_snapshot, SIM_VERSION, BaseSnapshot, PublicPlayer, Published, RenameRequest, User};
+use bag_protocol::{
+    canonical_snapshot, BaseSnapshot, Invalid, PublicPlayer, Published, RenameRequest, Upgrades,
+    User, SIM_VERSION,
+};
 use chrono::{DateTime, Utc};
+use godcore::weapons::Weapon;
 use serde::Deserialize;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 #[derive(sqlx::FromRow)]
@@ -19,18 +24,55 @@ struct UserRow {
     shield_until: Option<DateTime<Utc>>,
     town_hall: Option<i32>,
     has_base: bool,
+    town_hall_level: i32,
 }
 
 const USER_SELECT: &str = "SELECT u.id, u.display_name, u.trophies, u.gold, u.shield_until,
-        s.town_hall, (u.current_snapshot IS NOT NULL) AS has_base
+        s.town_hall, (u.current_snapshot IS NOT NULL) AS has_base, u.town_hall_level
     FROM users u LEFT JOIN snapshots s ON s.id = u.current_snapshot";
 
-pub async fn load_user<'e, E: sqlx::PgExecutor<'e>>(db: E, id: Uuid) -> ApiResult<User> {
+pub async fn load_user(db: &PgPool, id: Uuid) -> ApiResult<User> {
+    load_user_in(&mut *db.acquire().await?, id).await
+}
+
+/// Weapons are stored by their name in the wire format, e.g. "Daggers".
+pub fn weapon_key(w: Weapon) -> String {
+    match serde_json::to_value(w) {
+        Ok(serde_json::Value::String(s)) => s,
+        _ => unreachable!("weapons serialise as strings"),
+    }
+}
+
+/// What `id` has paid for online.
+pub async fn load_upgrades(db: &mut PgConnection, id: Uuid, town_hall: i32) -> ApiResult<Upgrades> {
+    let weapons: Vec<String> =
+        sqlx::query_scalar("SELECT weapon FROM user_weapons WHERE user_id = $1 ORDER BY weapon")
+            .bind(id)
+            .fetch_all(&mut *db)
+            .await?;
+    let levels: Vec<(i64, i32)> =
+        sqlx::query_as("SELECT troop_id, level FROM troop_levels WHERE user_id = $1")
+            .bind(id)
+            .fetch_all(&mut *db)
+            .await?;
+    Ok(Upgrades {
+        town_hall: town_hall as u32,
+        // A weapon this build doesn't know (a newer server) is skipped.
+        weapons: weapons
+            .into_iter()
+            .filter_map(|w| serde_json::from_value(serde_json::Value::String(w)).ok())
+            .collect(),
+        levels: levels.into_iter().map(|(t, l)| (t as u64, l as u32)).collect(),
+    })
+}
+
+pub async fn load_user_in(db: &mut PgConnection, id: Uuid) -> ApiResult<User> {
     let r: UserRow = sqlx::query_as(&format!("{USER_SELECT} WHERE u.id = $1"))
         .bind(id)
-        .fetch_optional(db)
+        .fetch_optional(&mut *db)
         .await?
         .ok_or_else(|| ApiError::not_found("player"))?;
+    let upgrades = load_upgrades(db, id, r.town_hall_level).await?;
     Ok(User {
         id: r.id,
         display_name: r.display_name,
@@ -42,6 +84,7 @@ pub async fn load_user<'e, E: sqlx::PgExecutor<'e>>(db: E, id: Uuid) -> ApiResul
             .shield_until
             .filter(|t| *t > Utc::now())
             .map(|t| t.to_rfc3339()),
+        upgrades,
     })
 }
 
@@ -107,13 +150,23 @@ pub async fn leaderboard(
 }
 
 /// Publish the base other players will raid: layout plus defender brains.
-/// Checked and stored as a new immutable snapshot.
+/// Checked and stored as a new immutable snapshot. The Town Hall, troop
+/// levels and weapons must all have been paid for online.
 pub async fn publish_base(
     State(st): State<AppState>,
     user: AuthUser,
     SameRulesJson(snap): SameRulesJson<BaseSnapshot>,
 ) -> ApiResult<Json<Published>> {
     let snap = canonical_snapshot(&snap)?;
+    let paid = load_user(&st.db, user.id).await?.upgrades;
+    if snap.base.town_hall > paid.town_hall {
+        return Err(Invalid(format!(
+            "your base is Town Hall {} but you have Town Hall {} online: upgrade it online first",
+            snap.base.town_hall, paid.town_hall
+        ))
+        .into());
+    }
+    paid.check(&snap.defenders)?;
     let id = Uuid::new_v4();
     let data = serde_json::to_string(&snap).map_err(ApiError::internal)?;
     let mut tx = st.db.begin().await?;

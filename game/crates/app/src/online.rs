@@ -12,16 +12,17 @@ use crate::render::{draw_ground, draw_world, Look, View};
 use crate::ui::*;
 use crate::{Game, Screen};
 use bag_client::bag_protocol::{
-    AttackLog, LoginStart, Match, Providers, PublicPlayer, Published, Replay, User,
+    AttackLog, LoginStart, Match, Providers, PublicPlayer, Published, Replay, Upgrades, User,
 };
 use bag_client::{
     army_from, army_spots, defender_spots, replay_battle, snapshot_from, Client, Uuid,
 };
 use godcore::battle::Battle;
 use godcore::classes::Role;
-use godcore::scenario::max_troop_level;
+use godcore::scenario::{max_troop_level, town_hall_cost};
 use godcore::sim::{Outcome, Team};
-use godcore::troop::Troop;
+use godcore::troop::{level_up_cost, Troop};
+use godcore::weapons::Weapon;
 use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -634,6 +635,8 @@ enum Busy {
     Find(Task<Match>),
     Raid(Task<(User, Replay)>),
     Replay(Task<Replay>),
+    /// An online upgrade, and what to say once it's paid.
+    Buy(Task<User>, String),
 }
 
 pub struct OnlineState {
@@ -645,6 +648,13 @@ pub struct OnlineState {
 }
 
 impl OnlineState {
+    /// Test hook (BAG_SCREEN=online): the Online screen with the saved
+    /// session, loaded before the first frame.
+    pub fn demo(g: &mut Game) -> Screen {
+        g.account.user = g.account.client().me().ok();
+        Screen::Online(OnlineState::new(g))
+    }
+
     pub fn new(g: &Game) -> Self {
         let mut s = OnlineState {
             log: Vec::new(),
@@ -670,8 +680,9 @@ impl OnlineState {
 }
 
 /// The defenders a published base gets: the first defenders in the roster
-/// that this Town Hall allows, as on the Home Base screen.
-fn base_defenders(g: &Game) -> (Vec<(Troop, (f32, f32))>, usize) {
+/// that this Town Hall allows, as on the Home Base screen, and that are
+/// paid for online.
+fn base_defenders(g: &Game, paid: &Upgrades) -> (Vec<(Troop, (f32, f32))>, usize) {
     let cap = max_troop_level(g.profile.base.town_hall);
     let all: Vec<&Troop> = g
         .troops
@@ -680,7 +691,7 @@ fn base_defenders(g: &Game) -> (Vec<(Troop, (f32, f32))>, usize) {
         .collect();
     let ok: Vec<Troop> = all
         .iter()
-        .filter(|t| t.level <= cap)
+        .filter(|t| t.level <= cap && paid.blocker(t).is_none())
         .take(MAX_DEFENDERS)
         .map(|t| (*t).clone())
         .collect();
@@ -689,14 +700,14 @@ fn base_defenders(g: &Game) -> (Vec<(Troop, (f32, f32))>, usize) {
     (ok.into_iter().zip(spots).collect(), skipped)
 }
 
-/// The army for an online raid: your best attackers that your published
-/// Town Hall allows.
-fn raid_army(g: &Game, town_hall: u32) -> Vec<(Troop, (f32, f32))> {
-    let cap = max_troop_level(town_hall);
+/// The army for an online raid: your best attackers that your online
+/// Town Hall allows and that are paid for online.
+fn raid_army(g: &Game, paid: &Upgrades) -> Vec<(Troop, (f32, f32))> {
+    let cap = max_troop_level(paid.town_hall);
     let mut v: Vec<&Troop> = g
         .troops
         .iter()
-        .filter(|t| t.spec.role == Role::Attack && t.level <= cap)
+        .filter(|t| t.spec.role == Role::Attack && t.level <= cap && paid.blocker(t).is_none())
         .collect();
     v.sort_by(|a, b| {
         b.skills
@@ -707,6 +718,64 @@ fn raid_army(g: &Game, town_hall: u32) -> Vec<(Troop, (f32, f32))> {
     v.truncate(MAX_SQUAD);
     let spots = army_spots(v.len());
     v.into_iter().cloned().zip(spots).collect()
+}
+
+/// Something the player has offline that doesn't count online yet.
+struct Need {
+    label: String,
+    price: i64,
+    buy: Buy,
+    /// Why it can't be bought yet, short enough for the button.
+    blocked: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum Buy {
+    TownHall,
+    Weapon(Weapon),
+    Level(u64, u32),
+}
+
+/// What to pay for online so the Town Hall, weapons and troop levels in the
+/// save count online too: Town Hall first, then weapons, then levels.
+fn online_needs(g: &Game, paid: &Upgrades) -> Vec<Need> {
+    let mut v = Vec::new();
+    if g.profile.base.town_hall > paid.town_hall {
+        v.push(Need {
+            label: format!("Town Hall {}", paid.town_hall + 1),
+            price: town_hall_cost(paid.town_hall) as i64,
+            buy: Buy::TownHall,
+            blocked: None,
+        });
+    }
+    let mut weapons: Vec<Weapon> = Vec::new();
+    for t in &g.troops {
+        let w = t.spec.weapon();
+        if !paid.owns_weapon(w, &t.spec) && !weapons.contains(&w) {
+            weapons.push(w);
+        }
+    }
+    for w in weapons {
+        v.push(Need {
+            label: format!("Unlock the {}", w.name()),
+            price: w.stats().cost as i64,
+            buy: Buy::Weapon(w),
+            blocked: None,
+        });
+    }
+    for t in &g.troops {
+        let from = paid.level_of(t.id);
+        if t.level > from {
+            let name: String = t.name.trim().chars().take(12).collect();
+            v.push(Need {
+                label: format!("{name} to level {}", from + 1),
+                price: level_up_cost(from) as i64,
+                buy: Buy::Level(t.id, from),
+                blocked: (from >= max_troop_level(paid.town_hall)).then(|| "Town Hall".into()),
+            });
+        }
+    }
+    v
 }
 
 fn stars_text(n: u32) -> String {
@@ -777,6 +846,12 @@ impl Game {
                         None
                     }
                 }
+                Busy::Buy(t, what) => t.poll().map(|r| {
+                    r.map(|u| {
+                        self.account.user = Some(u);
+                        s.msg = Some((format!("Paid online: {what}"), GOOD));
+                    })
+                }),
             };
             match done {
                 Some(Ok(())) => s.busy = None,
@@ -832,7 +907,9 @@ impl Game {
         }
 
         let mut y = left.y + 186.0;
-        let (defenders, skipped) = base_defenders(self);
+        let paid = me.upgrades.clone();
+        let (defenders, skipped) = base_defenders(self, &paid);
+        let th_paid = self.profile.base.town_hall <= paid.town_hall;
         text(
             &format!(
                 "Your base: Town Hall {}, {} defenders",
@@ -844,9 +921,20 @@ impl Game {
             18.0,
             TEXT,
         );
-        if skipped > 0 {
+        if !th_paid {
             text(
-                &format!("{skipped} defender(s) above this Town Hall's level cap left out"),
+                &format!(
+                    "Buy Town Hall {} in Online upgrades first",
+                    self.profile.base.town_hall
+                ),
+                x,
+                y + 20.0,
+                15.0,
+                BAD,
+            );
+        } else if skipped > 0 {
+            text(
+                &format!("{skipped} defender(s) left out: over the level cap or not paid online"),
                 x,
                 y + 20.0,
                 15.0,
@@ -857,7 +945,7 @@ impl Game {
         if self.ui.button_ex(
             Rect::new(x, y, left.w - 40.0, 46.0),
             "Publish my base",
-            idle,
+            idle && th_paid,
             false,
         ) {
             let snap = snapshot_from(&self.profile.base, &defenders);
@@ -898,8 +986,7 @@ impl Game {
         panel(mid);
         let mx = mid.x + 20.0;
         text("Raid", mx, mid.y + 34.0, 26.0, TEXT);
-        let th = me.town_hall.unwrap_or(1).max(1) as u32;
-        let army = raid_army(self, th);
+        let army = raid_army(self, &paid);
         match &s.found {
             None => {
                 text(
@@ -920,8 +1007,13 @@ impl Game {
                     s.busy = Some(Busy::Find(Task::spawn(move || c.find_match().map_err(err))));
                 }
                 if army.is_empty() {
+                    let none = !self.troops.iter().any(|t| t.spec.role == Role::Attack);
                     text(
-                        "Recruit and train an attacker first.",
+                        if none {
+                            "Recruit and train an attacker first."
+                        } else {
+                            "Your attackers need online upgrades first."
+                        },
                         mx,
                         mid.y + 172.0,
                         16.0,
@@ -994,6 +1086,7 @@ impl Game {
             Some(Busy::Find(_)) => Some("Looking for an opponent...".into()),
             Some(Busy::Raid(_)) => Some("Raiding: the server is checking the battle...".into()),
             Some(Busy::Replay(_)) => Some("Loading the replay...".into()),
+            Some(Busy::Buy(..)) => Some("Paying with online gold...".into()),
             None => None,
         };
         if let Some(t) = status {
@@ -1060,7 +1153,7 @@ impl Game {
         }
 
         // Right: leaderboard.
-        let right = Rect::new(880.0, 66.0, W - 900.0, H - 86.0);
+        let right = Rect::new(880.0, 66.0, W - 900.0, 360.0);
         panel(right);
         text("Top players", right.x + 20.0, right.y + 34.0, 22.0, TEXT);
         for (k, p) in s.board.iter().enumerate() {
@@ -1081,6 +1174,45 @@ impl Game {
                 18.0,
                 col,
             );
+        }
+
+        // Right, below: online upgrades.
+        let up = Rect::new(880.0, 446.0, W - 900.0, H - 466.0);
+        panel(up);
+        let ux = up.x + 20.0;
+        text("Online upgrades", ux, up.y + 30.0, 22.0, TEXT);
+        text("Bought offline only counts offline.", ux, up.y + 52.0, 15.0, MUTED);
+        let needs = online_needs(self, &paid);
+        if needs.is_empty() {
+            text("Everything you have counts online.", ux, up.y + 84.0, 16.0, GOOD);
+        }
+        let rows = ((up.h - 80.0) / 42.0) as usize;
+        let mut ny = up.y + 64.0;
+        for n in needs.iter().take(rows) {
+            text(&n.label, ux, ny + 22.0, 16.0, TEXT);
+            let b = Rect::new(up.x + up.w - 124.0, ny + 2.0, 110.0, 32.0);
+            let label = n.blocked.clone().unwrap_or_else(|| format!("{}g", n.price));
+            let ok = idle && n.blocked.is_none() && me.gold >= n.price;
+            if self.ui.button_ex(b, &label, ok, false) {
+                let c = self.account.client();
+                let buy = n.buy;
+                s.msg = None;
+                s.busy = Some(Busy::Buy(
+                    Task::spawn(move || {
+                        match buy {
+                            Buy::TownHall => c.upgrade_town_hall(),
+                            Buy::Weapon(w) => c.buy_weapon(w),
+                            Buy::Level(id, from) => c.level_up(id, from),
+                        }
+                        .map_err(err)
+                    }),
+                    n.label.clone(),
+                ));
+            }
+            ny += 42.0;
+        }
+        if needs.len() > rows {
+            text(&format!("and {} more", needs.len() - rows), ux, ny + 18.0, 15.0, MUTED);
         }
 
         Screen::Online(s)

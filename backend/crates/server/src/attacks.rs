@@ -125,7 +125,8 @@ pub async fn submit(
         ));
     }
     let me = load_user(&st.db, user.id).await?;
-    let army = canonical_army(&req.army, me.town_hall.unwrap_or(1) as u32)?;
+    let army = canonical_army(&req.army, me.upgrades.town_hall)?;
+    me.upgrades.check(&army)?;
     let snapshot: BaseSnapshot = parse(&data)?;
 
     let (result, army) = {

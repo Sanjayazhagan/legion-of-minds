@@ -2,7 +2,7 @@
 name = "bag-protocol"
 version.workspace = true
 edition.workspace = true
-description = "Wire types, validation and the shared raid simulation for Become a God online play"
+description = "Wire types, validation and the shared raid simulation for Legion of Minds online play"
 
 [dependencies]
 godcore.workspace = true

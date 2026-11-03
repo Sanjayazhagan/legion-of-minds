@@ -1,4 +1,4 @@
-//! Client for the Become a God server, for the desktop game.
+//! Client for the Legion of Minds server, for the desktop game.
 //!
 //! Blocking calls, so run them off the render thread. A typical session:
 //!
@@ -219,6 +219,23 @@ impl Client {
         self.send(self.req(reqwest::Method::PUT, "/v1/me/base").json(&s))
     }
 
+    // ------------------------------------------------------------ online upgrades
+
+    /// Raise the online Town Hall one level, paid with online gold.
+    pub fn upgrade_town_hall(&self) -> Result<User> {
+        self.post("/v1/me/town-hall", &serde_json::json!({}))
+    }
+
+    /// Unlock a weapon online for every troop.
+    pub fn buy_weapon(&self, weapon: godcore::weapons::Weapon) -> Result<User> {
+        self.post("/v1/me/weapons", &BuyWeapon { weapon })
+    }
+
+    /// Level troop `troop_id` up online from `from` (its online level now).
+    pub fn level_up(&self, troop_id: u64, from: u32) -> Result<User> {
+        self.post(&format!("/v1/me/troops/{troop_id}/level"), &LevelUp { from })
+    }
+
     pub fn my_base(&self) -> Result<BaseSnapshot> {
         self.get("/v1/me/base")
     }
@@ -233,8 +250,9 @@ impl Client {
     /// Returns the local result (for the battle screen) and the server's
     /// verdict, which is the one that counts.
     pub fn attack(&self, m: &Match, army: Vec<Placement>) -> Result<(RaidResult, AttackOutcome)> {
-        let th = self.me()?.town_hall.unwrap_or(1) as u32;
-        let army = canonical_army(&army, th)?;
+        let paid = self.me()?.upgrades;
+        let army = canonical_army(&army, paid.town_hall)?;
+        paid.check(&army)?;
         let local = run_raid(&m.snapshot, &army);
         let out = self.submit(m.attack_id, army, Some(local.clone()))?;
         Ok((local, out))
