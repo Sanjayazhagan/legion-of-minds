@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Legion of Minds</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="A strategy game for Windows where every troop is a tiny AI you train on your own PC, then send to raid other players' bases.">
+<meta property="og:title" content="Legion of Minds">
+<meta property="og:description" content="Train tiny AI soldiers on your own PC. Send them to raid.">
+<meta property="og:image" content="media/battle-poster.jpg">
+<link rel="icon" href="media/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@500;700&family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  /* Layout: one dark war-room column; the game's own navy, gold and neuron blue, a
+     level-cap ladder as the signature graphic. Single dark look by choice. */
+  :root {
+    --night: #13151e;
+    --panel: #1c1f2d;
+    --line: #2d3146;
+    --gold: #f0b446;
+    --neuron: #7cc0ff;
+    --text: #e9e7e0;
+    --muted: #979bb0;
+    --grass: #6aa84a;
+    --display: "Pixelify Sans", "Courier New", monospace;
+    --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--night); }
+  body {
+    margin: 0;
+    background: var(--night);
+    color: var(--text);
+    font: 17px/1.6 var(--body);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  img, video { max-width: 100%; display: block; }
+  a { color: var(--neuron); }
+  a:focus-visible, .btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+
+  header.top {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding-block: 18px; border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font: 700 20px/1 var(--display); color: var(--gold); text-decoration: none; letter-spacing: .04em; }
+  .brand img { width: 32px; height: 32px; }
+  nav { display: flex; gap: 20px; flex-wrap: wrap; }
+  nav a { color: var(--muted); text-decoration: none; font-size: 15px; }
+  nav a:hover { color: var(--text); }
+
+  .hero {
+    display: grid; grid-template-columns: 1.05fr .95fr; gap: 48px; align-items: center;
+    padding-block: 56px 40px;
+  }
+  .hero > * { min-width: 0; }
+  .eyebrow { font: 600 13px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--neuron); }
+  h1 {
+    font: 700 clamp(44px, 7vw, 76px)/1 var(--display); color: var(--gold);
+    margin: 14px 0 18px; letter-spacing: .01em; text-wrap: balance;
+  }
+  .lede { font-size: 21px; line-height: 1.45; margin: 0 0 28px; max-width: 34ch; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 10px; padding: 14px 22px;
+    font: 700 16px/1 var(--body); text-decoration: none; border-radius: 4px;
+    border: 1px solid var(--line); color: var(--text); background: var(--panel);
+  }
+  .btn.primary { background: var(--gold); color: var(--night); border-color: var(--gold); }
+  .btn.primary:hover { filter: brightness(1.08); }
+  .btn:hover { border-color: var(--muted); }
+  .fine { margin-top: 12px; font: 13px/1.5 var(--mono); color: var(--muted); }
+
+  .screen {
+    border: 1px solid var(--line); background: var(--panel); padding: 10px; border-radius: 6px;
+  }
+  .screen video { width: 100%; aspect-ratio: 1; border-radius: 3px; background: var(--grass); }
+  .screen figcaption { font: 13px/1.4 var(--mono); color: var(--muted); padding: 10px 4px 2px; }
+
+  section { padding-block: 56px; border-top: 1px solid var(--line); }
+  h2 { font: 700 34px/1.1 var(--display); color: var(--text); margin: 0 0 12px; text-wrap: balance; }
+  .intro { color: var(--muted); max-width: 62ch; margin: 0 0 32px; }
+
+  .loop { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; counter-reset: s; }
+  .loop li { min-width: 0; counter-increment: s; }
+  .loop li::before {
+    content: counter(s); display: grid; place-items: center; width: 34px; height: 34px; margin-bottom: 12px;
+    font: 700 18px/1 var(--display); color: var(--night); background: var(--gold); border-radius: 50%;
+  }
+  .loop h3 { margin: 0 0 6px; font-size: 19px; }
+  .loop p { margin: 0; color: var(--muted); font-size: 16px; }
+
+  .ladder { display: grid; gap: 10px; margin: 8px 0 18px; max-width: 760px; }
+  .rung { display: grid; grid-template-columns: 74px 1fr 64px; gap: 14px; align-items: center; font: 14px/1 var(--mono); }
+  .rung .lv { color: var(--muted); }
+  .rung .bar { height: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 2px; overflow: hidden; }
+  .rung .bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--neuron), var(--gold)); transform-origin: left; animation: grow 1.2s cubic-bezier(.2,.7,.2,1) both; }
+  .rung .n { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  @keyframes grow { from { transform: scaleX(.15); } }
+
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: start; }
+  .split > * { min-width: 0; }
+  .classes { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .classes h3 { font: 600 13px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--neuron); margin: 0 0 10px; }
+  .classes ul { list-style: none; margin: 0; padding: 0; }
+  .classes li { padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 16px; }
+  .classes li span { color: var(--muted); font-size: 14px; }
+  .blend { margin-top: 24px; padding: 16px 18px; background: var(--panel); border-left: 3px solid var(--gold); font: 15px/1.6 var(--mono); }
+  .blend b { color: var(--gold); font-weight: 600; }
+
+  .shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .shots figure { margin: 0; min-width: 0; }
+  .shots img { width: 100%; aspect-ratio: 16 / 10; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; }
+  .shots figcaption { font: 13px/1.4 var(--mono); color: var(--muted); padding-top: 8px; }
+
+  .facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+  .facts h3 { margin: 0 0 6px; font-size: 18px; color: var(--gold); }
+  .facts p { margin: 0; color: var(--muted); font-size: 16px; }
+
+  .reqs { width: 100%; border-collapse: collapse; font-size: 16px; }
+  .reqs th, .reqs td { text-align: left; padding: 10px 12px 10px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .reqs th { color: var(--muted); font-weight: 400; width: 30%; }
+  .table-scroll { overflow-x: auto; }
+
+  .cta { text-align: left; }
+  footer { padding-block: 32px 48px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; }
+
+  @media (max-width: 860px) {
+    .hero, .split { grid-template-columns: 1fr; gap: 32px; }
+    .loop, .facts { grid-template-columns: 1fr 1fr; }
+    .shots { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 520px) {
+    .loop, .facts, .shots, .classes { grid-template-columns: 1fr; }
+    nav { display: none; }
+    .rung { grid-template-columns: 60px 1fr 54px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .rung .bar i { animation: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="#top"><img src="media/icon.png" alt="">LEGION OF MINDS</a>
+    <nav aria-label="Sections">
+      <a href="#how">How it plays</a>
+      <a href="#classes">Classes</a>
+      <a href="#screens">Screens</a>
+      <a href="#download">Download</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <div class="hero">
+      <div>
+        <div class="eyebrow">Strategy game for Windows</div>
+        <h1>Legion of Minds</h1>
+        <p class="lede">Every troop is a tiny AI that learns on your own PC. You recruit it, train it, and send it to raid. Then you watch what it figured out.</p>
+        <div class="actions">
+          <a class="btn primary" href="https://github.com/Sanjayazhagan/legion-of-minds/releases/latest">Download for Windows</a>
+          <a class="btn" href="#how">How it plays</a>
+        </div>
+        <p class="fine">Free · Windows 10 and 11, 64-bit · No graphics card needed</p>
+      </div>
+      <figure class="screen">
+        <video src="media/battle.mp4" poster="media/battle-poster.jpg" autoplay muted loop playsinline aria-label="Trained troops raiding a fort"></video>
+        <figcaption>Live footage: four trained troops take a fort for three stars.</figcaption>
+      </figure>
+    </div>
+
+    <section id="how">
+      <h2>You don't control your troops. You teach them.</h2>
+      <p class="intro">There's no unit micro in battle. Each troop is a small neural network that learns by playing thousands of practice drills. How well it fights depends on how you trained it.</p>
+      <ol class="loop">
+        <li><h3>Recruit</h3><p>Mix any classes by percentage, like Mage 50, Healer 30, Fighter 20, and set what the reward cares about.</p></li>
+        <li><h3>Train</h3><p>Give it a budget of practice steps. Watch the newest brain play live drills while the win rate climbs.</p></li>
+        <li><h3>Raid</h3><p>Place up to five troops outside a base and press Fight. Earn stars at 50%, at the Town Hall, and at 100%.</p></li>
+        <li><h3>Defend</h3><p>Train defenders, build towers and cannons, and publish your base. Other players raid it while you're away.</p></li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>More training, smarter troops</h2>
+      <p class="intro">Each level raises how many practice steps a troop can learn from. Levelling costs gold, and your Town Hall sets the highest level.</p>
+      <div class="ladder" role="list" aria-label="Training cap per troop level">
+        <div class="rung" role="listitem"><span class="lv">Level 1</span><span class="bar"><i style="width:8.6%"></i></span><span class="n">300k</span></div>
+        <div class="rung" role="listitem"><span class="lv">Level 2</span><span class="bar"><i style="width:17.1%"></i></span><span class="n">600k</span></div>
+        <div class="rung" role="listitem"><span class="lv">Level 3</span><span class="bar"><i style="width:34.3%"></i></span><span class="n">1.2M</span></div>
+        <div class="rung" role="listitem"><span class="lv">Level 4</span><span class="bar"><i style="width:57.1%"></i></span><span class="n">2M</span></div>
+        <div class="rung" role="listitem"><span class="lv">Level 5</span><span class="bar"><i style="width:100%"></i></span><span class="n">3.5M</span></div>
+      </div>
+      <p class="fine">Steps of training per level. Bigger brains (64 to 256 neurons per layer) learn more but train slower.</p>
+    </section>
+
+    <section id="classes">
+      <div class="split">
+        <div>
+          <h2>Eleven classes, endless blends</h2>
+          <p class="intro">Pick one class or blend several. The blend sets the stats, the gear on the troop's back, and what its drills reward. The same blend trained two different ways plays like two different troops.</p>
+          <div class="blend">Mage 50% + Healer 30% + Fighter 20%<br>= <b>Holy Sorcerer of Iron Arts</b><br>splash spells, a heal, a solid frame</div>
+        </div>
+        <div class="classes">
+          <div>
+            <h3>Attackers</h3>
+            <ul>
+              <li>Fighter <span>tough melee</span></li>
+              <li>Archer <span>ranged</span></li>
+              <li>Healer <span>keeps allies up</span></li>
+              <li>Mage <span>splash spells</span></li>
+              <li>Assassin <span>fast and fragile</span></li>
+              <li>Paladin <span>armoured tank</span></li>
+            </ul>
+          </div>
+          <div>
+            <h3>Defenders</h3>
+            <ul>
+              <li>Guard <span>holds the line</span></li>
+              <li>Sentry <span>long range</span></li>
+              <li>Keeper <span>heals the walls</span></li>
+              <li>Warlock <span>splash curses</span></li>
+              <li>Hunter <span>fast chaser</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="screens">
+      <h2>Inside the game</h2>
+      <p class="intro">Seven weapons with their own skills, team training for squads that learn to call out targets, tournaments, and a home base to build.</p>
+      <div class="shots">
+        <figure><img src="media/barracks.jpg" alt="Barracks screen with a roster of troops" loading="lazy"><figcaption>Barracks: your roster, levels and skills</figcaption></figure>
+        <figure><img src="media/train.jpg" alt="Training screen with a live drill and progress chart" loading="lazy"><figcaption>Training: live drills as the brain learns</figcaption></figure>
+        <figure><img src="media/battle.jpg" alt="Battle against a fort" loading="lazy"><figcaption>Battle: three stars to win</figcaption></figure>
+        <figure><img src="media/recruit.jpg" alt="Recruit screen mixing class percentages" loading="lazy"><figcaption>Recruit: blend classes, set the training plan</figcaption></figure>
+        <figure><img src="media/armoury.jpg" alt="Armoury with weapons to unlock" loading="lazy"><figcaption>Armoury: seven weapons, each with a skill</figcaption></figure>
+        <figure><img src="media/team.jpg" alt="Team training a squad together" loading="lazy"><figcaption>Team training: squads learn to work together</figcaption></figure>
+      </div>
+    </section>
+
+    <section>
+      <h2>Fair by design</h2>
+      <div class="facts">
+        <div><h3>Every raid is re-checked</h3><p>Battles replay exactly the same on any computer. The server re-runs every online raid itself, so a faked win doesn't count.</p></div>
+        <div><h3>Your PC does the learning</h3><p>Training runs on your processor, or on your graphics card for big brains. Nothing is trained in the cloud.</p></div>
+        <div><h3>Play offline any time</h3><p>Campaign bases, raid waves and tournaments work without an account. Sign in with Google or Discord to raid other players.</p></div>
+      </div>
+    </section>
+
+    <section id="download" class="cta">
+      <h2>Download</h2>
+      <p class="intro">The installer puts the game in your user folder, so it doesn't ask for administrator rights. Your saves stay in <code>%APPDATA%\legion-of-minds</code> through updates.</p>
+      <div class="actions">
+        <a class="btn primary" href="https://github.com/Sanjayazhagan/legion-of-minds/releases/latest">Download for Windows</a>
+        <a class="btn" href="https://github.com/Sanjayazhagan/legion-of-minds">Source code</a>
+      </div>
+      <div class="table-scroll" style="margin-top:32px">
+        <table class="reqs">
+          <tr><th>System</th><td>Windows 10 or 11, 64-bit</td></tr>
+          <tr><th>Graphics</th><td>Any chip with OpenGL 3. A separate graphics card speeds up training big brains, but isn't required.</td></tr>
+          <tr><th>Processor</th><td>More cores train faster. Battles always run on the processor.</td></tr>
+          <tr><th>Disk</th><td>About 40 MB, plus about 250 KB per saved troop</td></tr>
+          <tr><th>Mac and Linux</th><td>Build from source with Rust: <code>cargo run --release -p legion-of-minds</code></td></tr>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>Legion of Minds</span>
+    <span>3D art by Kay Lousberg (KayKit, CC0)</span>
+  </footer>
+</div>
+</body>
+</html>
