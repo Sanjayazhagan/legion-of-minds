@@ -25,6 +25,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+pub mod competition;
+pub use competition::*;
+
 pub const MAX_DEFENDERS: usize = 4;
 pub const MAX_ARMY: usize = 5;
 pub const MAX_NAME: usize = 24;
@@ -68,6 +71,9 @@ pub struct User {
     pub shield_until: Option<String>,
     #[serde(default)]
     pub upgrades: Upgrades,
+    /// The player's clan, if they're in one.
+    #[serde(default)]
+    pub clan: Option<ClanTag>,
 }
 
 /// What the player has paid for with online gold. Every published or
@@ -256,6 +262,10 @@ pub struct AttackSubmit {
     pub army: Vec<Placement>,
     /// What the attacker's machine got. Optional; a mismatch is recorded.
     pub client_result: Option<RaidResult>,
+    /// Troops lent by clanmates, placed after `army`. The server fetches
+    /// the troops itself, so only the loan and the spot are sent.
+    #[serde(default)]
+    pub borrowed: Vec<Borrowed>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -267,6 +277,9 @@ pub struct AttackOutcome {
     pub client_matched: Option<bool>,
     pub trophies: i32,
     pub gold_looted: i64,
+    /// Extra gold for a win, from the attacker's league.
+    #[serde(default)]
+    pub league_bonus: i64,
     pub attacker: User,
 }
 
@@ -322,7 +335,7 @@ impl std::fmt::Display for Invalid {
     }
 }
 
-fn bad<T>(msg: impl Into<String>) -> Result<T, Invalid> {
+pub(crate) fn bad<T>(msg: impl Into<String>) -> Result<T, Invalid> {
     Err(Invalid(msg.into()))
 }
 
@@ -450,7 +463,7 @@ fn total<'a>(v: impl Iterator<Item = &'a u64>) -> u64 {
     v.fold(0u64, |a, b| a.saturating_add(*b))
 }
 
-fn finite(x: f32, y: f32) -> bool {
+pub(crate) fn finite(x: f32, y: f32) -> bool {
     x.is_finite() && y.is_finite()
 }
 
