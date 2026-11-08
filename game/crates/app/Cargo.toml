@@ -21,3 +21,6 @@ rayon = "1"
 tinyaudio = "2"
 # Online play: the server's own client library (backend/crates/client).
 bag-client = { path = "../../../backend/crates/client" }
+
+[build-dependencies]
+winresource = "0.1"
