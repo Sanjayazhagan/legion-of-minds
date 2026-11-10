@@ -693,6 +693,7 @@ fn begin_3d(r: Rect, mut cam: Camera3D, clear_depth: bool) {
         cam.z_far = 100.0;
     }
     cam.viewport = Some(viewport_px(r));
+    crate::scene::set_view(cam.position, cam.fovy, viewport_px(r).3 as f32);
     cam.aspect = Some(r.w / r.h);
     let mut gl = unsafe { get_internal_gl() };
     gl.flush();
@@ -1183,7 +1184,38 @@ fn back_prop(c: godcore::classes::BaseClass) -> Option<&'static str> {
     }
 }
 
-const CHAR_SCALE: f32 = 1.0;
+/// Troops on the battlefield are drawn bigger than life next to buildings,
+/// so their faces, gear and class colours read from the battle camera.
+/// Drawing only: the sim's sizes and ranges are untouched.
+const CHAR_SCALE: f32 = 1.15;
+
+/// Body build per class: heavies a bit broader, sneaks a bit slighter.
+fn build_of(fig: &Figure) -> Vec3 {
+    use godcore::classes::BaseClass::*;
+    if fig.raider {
+        return Vec3::ONE;
+    }
+    match fig.main {
+        Fighter | Hunter => vec3(1.1, 1.04, 1.1),
+        Guard | Paladin => vec3(1.08, 1.06, 1.08),
+        Assassin => vec3(0.94, 0.97, 0.94),
+        Archer | Sentry => vec3(0.98, 1.0, 0.98),
+        _ => Vec3::ONE,
+    }
+}
+
+/// How much of a mesh part is painted in the class colour (0 to 1): capes
+/// and wizard hats fully, robes, tunics and armour partly, so classes that
+/// share a model (the four casters, the two hooded rogues) still stand apart.
+fn class_paint(name: &str) -> f32 {
+    match name {
+        "Mage_Hat" => 0.85,
+        "Mage_Body" | "Rogue_Body" => 0.6,
+        "Knight_Body" => 0.45,
+        n if n.ends_with("_Cape") => 0.85,
+        _ => 0.0,
+    }
+}
 
 #[derive(Clone, Copy)]
 struct CharPose {
@@ -1228,14 +1260,28 @@ fn first_clip<'a>(m: &crate::scene::Model, names: &[&'a str]) -> Option<&'a str>
 struct Extra {
     /// 0 to 1: the red flash of a hit just taken.
     hurt: f32,
+    /// Whose side it is on, for the outline colour: Some(true) enemy,
+    /// Some(false) the player's, None in menus.
+    hostile: Option<bool>,
 }
 
+/// The cartoon look for a character: dark outline (tinted by side) and rim light.
+fn toon_for(hostile: Option<bool>) -> crate::scene::Toon {
+    let outline = match hostile {
+        Some(true) => Color::new(0.30, 0.04, 0.05, 1.0),
+        Some(false) => Color::new(0.04, 0.09, 0.26, 1.0),
+        None => Color::new(0.07, 0.06, 0.1, 1.0),
+    };
+    crate::scene::Toon { outline_px: if hostile.is_some() { 2.2 } else { 2.6 }, outline, rim: 0.55 }
+}
+
+/// The class colour, as worn on capes and hats.
 fn tint_of(fig: &Figure) -> Color {
     if fig.raider {
         return WHITE;
     }
     let c = fig.outfit;
-    Color::new(0.7 + 0.3 * c.r, 0.7 + 0.3 * c.g, 0.7 + 0.3 * c.b, 1.0)
+    Color::new(0.15 + 0.85 * c.r, 0.15 + 0.85 * c.g, 0.15 + 0.85 * c.b, 1.0)
 }
 
 /// What this character wears, holds and plays.
@@ -1330,16 +1376,36 @@ fn draw_character_ex(
         }
         None => m.pose(Some(clip), now_clip.1, looped),
     };
-    let world = Mat4::from_scale_rotation_translation(Vec3::splat(scale), Quat::from_rotation_y(heading), pos);
-    let mut tint = if npc_guard { WHITE } else { tint_of(fig) };
-    if extra.hurt > 0.0 {
+    let build = if npc_guard { Vec3::ONE } else { build_of(fig) };
+    let world = Mat4::from_scale_rotation_translation(build * scale, Quat::from_rotation_y(heading), pos);
+    let hurt = |c: Color| {
         let h = extra.hurt;
-        tint = Color::new(tint.r, tint.g * (1.0 - 0.55 * h), tint.b * (1.0 - 0.6 * h), tint.a);
-    }
-    m.draw(world, &g, &|n| !is_accessory(m, n) || show.contains(&n), tint);
-    for &(prop, bone) in lo.props {
-        attach(lib, m, &g, world, prop, bone, Mat4::IDENTITY);
-    }
+        Color::new(c.r, c.g * (1.0 - 0.55 * h), c.b * (1.0 - 0.6 * h), c.a)
+    };
+    let plain = !npc_guard && !fig.raider;
+    let class_col = tint_of(fig);
+    // Skeletons' pale bone is toned down a little so it doesn't glare.
+    let body = if plain { WHITE } else { Color::new(0.84, 0.8, 0.78, 1.0) };
+    let paint = |n: &str| {
+        let k = if plain { class_paint(n) } else { 0.0 };
+        if k > 0.0 {
+            (hurt(class_col), k)
+        } else {
+            (hurt(body), 0.0)
+        }
+    };
+    crate::scene::toon_style(toon_for(extra.hostile), || {
+        m.draw_ex(world, &g, &|n| !is_accessory(m, n) || show.contains(&n), &paint);
+        for &(prop, bone) in lo.props {
+            attach(lib, m, &g, world, prop, bone, Mat4::IDENTITY);
+        }
+        draw_blend_gear(lib, m, &g, world, fig, npc_guard);
+    });
+    true
+}
+
+/// Blend parts beyond the first show as gear on the character.
+fn draw_blend_gear(lib: &Library, m: &Model, g: &[Mat4], world: Mat4, fig: &Figure, npc_guard: bool) {
     if !npc_guard && !fig.raider {
         // Blend parts beyond the first show as gear: the second slung across the
         // back over the right shoulder, the third over the left.
@@ -1360,7 +1426,6 @@ fn draw_character_ex(
             }
         }
     }
-    true
 }
 
 /// Named accessory meshes that are off unless a loadout turns them on.
@@ -1600,7 +1665,7 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             for &j in &movers[a + 1..] {
                 let (dx, dy) = (sp[j].0 - sp[i].0, sp[j].1 - sp[i].1);
                 let d = (dx * dx + dy * dy).sqrt();
-                const GAP: f32 = 0.8;
+                const GAP: f32 = 0.8 * CHAR_SCALE;
                 if d < GAP {
                     let (nx, ny) = if d > 1e-3 { (dx / d, dy / d) } else { let t = (i * 7 + j * 13) as f32; (t.cos(), t.sin()) };
                     let push = (GAP - d) * 0.35;
@@ -1748,7 +1813,10 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         if u.cloak > 0 && looks[i].as_ref().map_or(true, |l| l.hostile) {
             continue; // an enemy in cloak is invisible (a shimmer is drawn later)
         }
-        let extra = Extra { hurt: (1.0 - (now - a.hurt) as f32 / 0.15).clamp(0.0, 1.0) * u.alive as u8 as f32 };
+        let extra = Extra {
+            hurt: (1.0 - (now - a.hurt) as f32 / 0.15).clamp(0.0, 1.0) * u.alive as u8 as f32,
+            hostile: Some(looks[i].as_ref().map_or(true, |l| l.hostile)),
+        };
         let mut blends = fx.blends.borrow_mut();
         if blends.len() < w.units.len() {
             blends.resize(w.units.len(), Blend::default());
