@@ -19,6 +19,8 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
+use tower_http::compression::CompressionLayer;
+use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
@@ -60,7 +62,7 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 pub fn router(st: AppState) -> Router {
-    let limit = st.cfg.max_body_bytes;
+    let (wire, json) = (st.cfg.max_body_bytes, st.cfg.max_json_bytes);
     Router::new()
         .route("/health", get(health))
         .route("/v1/auth/providers", get(auth::providers))
@@ -83,8 +85,14 @@ pub fn router(st: AppState) -> Router {
         .route("/v1/matchmaking", post(attacks::find_match))
         .route("/v1/attacks/{id}", post(attacks::submit))
         .route("/v1/attacks/{id}/replay", get(attacks::replay))
-        .layer(RequestBodyLimitLayer::new(limit))
-        .layer(axum::extract::DefaultBodyLimit::max(limit))
+        // Layers run bottom to top on the way in: the body is size-checked as
+        // sent, then unzipped (game clients gzip big uploads), then read with
+        // a limit on the unzipped size, so a small zip can't unpack into
+        // gigabytes. Big replies (bases, replays) go out gzipped.
+        .layer(axum::extract::DefaultBodyLimit::max(json))
+        .layer(RequestDecompressionLayer::new())
+        .layer(RequestBodyLimitLayer::new(wire))
+        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(st)
 }

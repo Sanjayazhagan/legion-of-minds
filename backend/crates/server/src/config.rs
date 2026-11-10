@@ -66,7 +66,11 @@ pub struct Config {
     pub start_gold: i64,
     /// Matchmaking looks this many trophies either side first.
     pub match_range: i32,
+    /// Largest request body as sent (gzipped bodies count compressed).
     pub max_body_bytes: usize,
+    /// Largest JSON body once unzipped. A full army of 256-neuron brains is
+    /// about 6 MB.
+    pub max_json_bytes: usize,
 }
 
 fn var(k: &str) -> Option<String> {
@@ -122,7 +126,8 @@ impl Config {
             shield: mins(num("SHIELD_MINUTES", 60u64)?),
             start_gold: num("START_GOLD", 500i64)?,
             match_range: num("MATCH_TROPHY_RANGE", 200i32)?,
-            max_body_bytes: 4 << 20,
+            max_body_bytes: 8 << 20,
+            max_json_bytes: 16 << 20,
         })
     }
 
