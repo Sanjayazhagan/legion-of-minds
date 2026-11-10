@@ -397,9 +397,14 @@ async fn raids_are_rate_limited() {
     let url = serve(|u| Config { heavy_per_min: 2, ..test_config(db, u, vec![]) }).await;
     blocking(move || {
         let mut bob = Client::new(&url);
-        bob.dev_login("Bob").unwrap(); // a sign-in counts as heavy too
+        bob.dev_login("Bob").unwrap(); // sign-ins have their own, larger allowance
+        assert_eq!(api_code(bob.find_match()), "no_opponent");
         assert_eq!(api_code(bob.find_match()), "no_opponent");
         assert_eq!(api_code(bob.find_match()), "slow_down");
+        // Another player on the same address has their own allowance.
+        let mut amy = Client::new(&url);
+        amy.dev_login("Amy").unwrap();
+        assert_eq!(api_code(amy.find_match()), "no_opponent");
         // Light requests still go through.
         assert_eq!(bob.me().unwrap().display_name, "Bob");
         let r = reqwest::blocking::Client::new()
@@ -411,6 +416,20 @@ async fn raids_are_rate_limited() {
             .unwrap();
         assert_eq!(r.status(), 429);
         assert!(r.headers().get("retry-after").is_some());
+        // A big upload that is refused still gets its answer, not a dropped
+        // connection: the server reads the body before saying slow down.
+        let big = serde_json::json!({ "pad": "x".repeat(3_500_000) });
+        for _ in 0..10 {
+            let r = reqwest::blocking::Client::new()
+                .put(format!("{url}/v1/me/base"))
+                .bearer_auth(bob.token().unwrap())
+                .header("x-sim-version", godcore::sim::SIM_VERSION.to_string())
+                .json(&big)
+                .send()
+                .expect("an answer, not a broken connection");
+            assert_eq!(r.status(), 429);
+            assert!(r.text().unwrap().contains("slow_down"));
+        }
     })
     .await;
 }
