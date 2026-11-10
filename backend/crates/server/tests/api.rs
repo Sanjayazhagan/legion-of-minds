@@ -54,6 +54,7 @@ fn test_config(db: String, public_url: String, providers: Vec<OAuthProvider>) ->
         start_gold: 500,
         match_range: 200,
         max_body_bytes: 4 << 20,
+        keep_raids: Duration::from_secs(14 * 86_400),
     }
 }
 
@@ -159,6 +160,9 @@ async fn raid_flow_is_checked_and_scored() {
         // Alice is reserved while Bob's raid is open, so Carol gets Bob.
         let mut carol = Client::new(&url);
         carol.dev_login("Carol").unwrap();
+        // Only players with a base of their own can raid.
+        assert_eq!(api_code(carol.find_match()), "no_base");
+        carol.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
         assert_eq!(carol.find_match().unwrap().defender.display_name, "Bob");
 
         let (local, out) = bob.attack(&m, army()).unwrap();
@@ -215,6 +219,7 @@ async fn tampered_raids_are_caught() {
         alice.publish_base(&home_defense()).unwrap();
         let mut bob = Client::new(&url);
         bob.dev_login("Bob").unwrap();
+        bob.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
 
         // Honest local result for reference.
         let m = bob.find_match().unwrap();
@@ -283,6 +288,70 @@ async fn tampered_raids_are_caught() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn old_raids_and_their_bases_are_cleaned_up() {
+    let db = fresh_db().await;
+    let db2 = db.clone();
+    // No shields, so Bob can raid Alice twice.
+    let url = serve(|u| Config {
+        shield: Duration::ZERO,
+        ..test_config(db, u, vec![])
+    })
+    .await;
+    let pool = sqlx::PgPool::connect(&db2).await.unwrap();
+    let dbu = db2.clone();
+    let (old, new) = blocking(move || {
+        let mut alice = Client::new(&url);
+        alice.dev_login("Alice").unwrap();
+        buy_town_hall(&dbu, &alice, 3);
+        alice.publish_base(&home_defense()).unwrap();
+        let mut bob = Client::new(&url);
+        bob.dev_login("Bob").unwrap();
+        bob.publish_base(&snapshot_from(&HomeBase::default(), &[]))
+            .unwrap();
+        let m = bob.find_match().unwrap();
+        let (_, old) = bob.attack(&m, army()).unwrap();
+        // Alice publishes a new base; the old one stays while a raid needs it.
+        alice.publish_base(&home_defense()).unwrap();
+        bob.find_match().unwrap(); // given up: expired
+        let m = bob.find_match().unwrap();
+        let (_, new) = bob.attack(&m, army()).unwrap();
+        (old.attack_id, new.attack_id)
+    })
+    .await;
+    let count = |q: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(q)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(count("SELECT count(*) FROM snapshots").await, 3);
+    sqlx::query("UPDATE attacks SET finished_at = now() - interval '15 days' WHERE id = $1")
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE attacks SET expires_at = now() - interval '2 days' WHERE status = 'expired'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    bag_server::cleanup(&pool, Duration::from_secs(14 * 86_400))
+        .await
+        .unwrap();
+    let left: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM attacks")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, vec![new], "old and given-up raids are gone");
+    // Alice's first base went with its raid; her current one and Bob's stay.
+    assert_eq!(count("SELECT count(*) FROM snapshots").await, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bases_from_older_rules_are_not_matched() {
     let db = fresh_db().await;
     let db2 = db.clone();
@@ -301,6 +370,7 @@ async fn bases_from_older_rules_are_not_matched() {
     blocking(move || {
         let mut bob = Client::new(&url);
         bob.dev_login("Bob").unwrap();
+        bob.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
         assert_eq!(api_code(bob.find_match()), "no_opponent");
         // Re-publishing under the current rules makes Alice raidable again.
         let mut alice = Client::new(&url);
@@ -329,6 +399,7 @@ async fn upgrades_only_count_once_paid_online() {
         let me = alice.dev_login("Alice").unwrap();
         assert_eq!(me.upgrades.town_hall, 1);
         assert!(me.upgrades.weapons.is_empty() && me.upgrades.levels.is_empty());
+        alice.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
 
         // A level 2 troop (allowed by Town Hall 1) that was only levelled offline.
         let m = alice.find_match().unwrap();

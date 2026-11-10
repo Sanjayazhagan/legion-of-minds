@@ -24,11 +24,12 @@ async fn main() {
     tracing::info!(providers = ?names, public_url = %cfg.public_url, "starting");
 
     let bg = db.clone();
+    let keep_raids = cfg.keep_raids;
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(300));
         loop {
             tick.tick().await;
-            if let Err(e) = cleanup(&bg).await {
+            if let Err(e) = cleanup(&bg, keep_raids).await {
                 tracing::warn!("cleanup failed: {e}");
             }
         }

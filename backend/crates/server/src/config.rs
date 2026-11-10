@@ -67,6 +67,8 @@ pub struct Config {
     /// Matchmaking looks this many trophies either side first.
     pub match_range: i32,
     pub max_body_bytes: usize,
+    /// How long finished raids (battle log and replays) are kept.
+    pub keep_raids: Duration,
 }
 
 fn var(k: &str) -> Option<String> {
@@ -123,6 +125,7 @@ impl Config {
             start_gold: num("START_GOLD", 500i64)?,
             match_range: num("MATCH_TROPHY_RANGE", 200i32)?,
             max_body_bytes: 4 << 20,
+            keep_raids: Duration::from_secs(num("KEEP_RAIDS_DAYS", 14u64)? * 86_400),
         })
     }
 

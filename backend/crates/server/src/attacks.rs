@@ -29,6 +29,14 @@ pub async fn find_match(
     user: AuthUser,
 ) -> ApiResult<Json<Match>> {
     let me = load_user(&st.db, user.id).await?;
+    // Players who raid can be raided: without this, a player who never
+    // publishes keeps every coin and loses no trophies.
+    if !me.has_base {
+        return Err(ApiError::conflict(
+            "no_base",
+            "publish your own base first: players who raid can be raided",
+        ));
+    }
     let mut tx = st.db.begin().await?;
     sqlx::query("UPDATE attacks SET status = 'expired' WHERE attacker_id = $1 AND status = 'pending'")
         .bind(user.id)

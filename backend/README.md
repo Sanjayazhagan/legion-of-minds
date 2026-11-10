@@ -105,7 +105,7 @@ Set these environment variables on the host (as secrets where the host has them)
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | for Google sign-in | From Google Cloud Console → APIs & Services → Credentials → OAuth client ID (type "Web application"). Authorized redirect URI: `<PUBLIC_URL>/v1/auth/google/callback`. |
 | `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` | for Discord sign-in | From the Discord Developer Portal → your app → OAuth2. Redirect: `<PUBLIC_URL>/v1/auth/discord/callback`. |
 | `PORT` | — | Most hosts set it for you. Defaults to 8080. `BIND_ADDR` overrides both. |
-| `SESSION_DAYS`, `ATTACK_WINDOW_SECS`, `SHIELD_MINUTES`, `START_GOLD`, `MATCH_TROPHY_RANGE` | — | Tuning; defaults 30, 300, 60, 500, 200. |
+| `SESSION_DAYS`, `ATTACK_WINDOW_SECS`, `SHIELD_MINUTES`, `START_GOLD`, `MATCH_TROPHY_RANGE`, `KEEP_RAIDS_DAYS` | — | Tuning; defaults 30, 300, 60, 500, 200, 14. Raids older than `KEEP_RAIDS_DAYS` leave the battle log (each keeps the whole army for its replay, about 1 MB). |
 | `RUST_LOG` | — | Log level, default `info,sqlx=warn`. |
 
 Health check: `GET /health`. Serve it behind https (the host's TLS); tokens are bearer tokens.
@@ -174,6 +174,22 @@ cargo run --release -p legion-of-minds
 Type a name under "Test login" and sign in. To have someone to raid, sign in a second name with bagctl and publish a base (see above), or run a second copy of the game with its own save folder (`BAG_SAVE_DIR=/tmp/player2`).
 
 Recordings and screenshot tests (`BAG_SCREEN`, `BAG_RECORD`, `BAG_SCREENSHOT`) skip the sign-in screen; `BAG_SCREEN=signin` opens it directly.
+
+## Pretend players (bagsim)
+
+`bagsim` plays the game with a crowd of pretend players against a local server, to find what breaks before real players do. Train one troop per class first, for example `godctl train --class mage --steps 290000 --level 1 --out troops/mage.troop.json` (attackers and defenders both), then:
+
+```sh
+# Server with DEV_LOGIN=true on 127.0.0.1:8080
+cargo run --release -p bag-client --bin bagsim -- crowd --troops troops --players 150 --secs 150 --chaos --out crowd.json
+cargo run --release -p bag-client --bin bagsim -- matrix --troops troops       # every army vs every base, Town Hall 1-5
+cargo run --release -p bag-client --bin bagsim -- economy --troops troops --players 200 --days 30
+```
+
+- `crowd`: each player picks an army and a defence, publishes a base, raids, buys Town Halls, reads the log and the leaderboard. `--chaos` adds players who misbehave (old game versions, broken and huge uploads, the same raid or purchase sent 4 times at once, tampered troops, cut-off connections) and lists every answer that wasn't what a healthy server should say. Prints speed per call and stars per army.
+- `matrix` and `economy` need no server: they run the same battle code to show which armies beat which bases, and where online gold goes over many days.
+
+Every pretend player signs in from the same address, so with the rate limits of PR #21 on they share one allowance.
 
 ## Not done yet
 

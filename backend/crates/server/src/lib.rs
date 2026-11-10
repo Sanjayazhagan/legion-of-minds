@@ -89,9 +89,10 @@ pub fn router(st: AppState) -> Router {
         .with_state(st)
 }
 
-/// Delete expired sessions and sign-ins, close timed-out raids, and drop old
-/// snapshots nothing points at any more.
-pub async fn cleanup(db: &PgPool) -> Result<(), sqlx::Error> {
+/// Delete expired sessions and sign-ins, close timed-out raids, forget raids
+/// older than `keep_raids` (their replays hold whole armies, about 1 MB each),
+/// and drop old snapshots nothing points at any more.
+pub async fn cleanup(db: &PgPool, keep_raids: Duration) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM sessions WHERE expires_at < now()")
         .execute(db)
         .await?;
@@ -102,6 +103,16 @@ pub async fn cleanup(db: &PgPool) -> Result<(), sqlx::Error> {
         "UPDATE attacks SET status = 'expired'
          WHERE status = 'pending' AND expires_at < now() - interval '5 minutes'",
     )
+    .execute(db)
+    .await?;
+    // Finished raids leave the battle log after `keep_raids`; given-up and
+    // timed-out ones after a day.
+    sqlx::query(
+        "DELETE FROM attacks
+         WHERE (status = 'done' AND finished_at < now() - $1)
+            OR (status = 'expired' AND expires_at < now() - interval '1 day')",
+    )
+    .bind(keep_raids)
     .execute(db)
     .await?;
     sqlx::query(

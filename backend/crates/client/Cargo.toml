@@ -15,3 +15,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 [[bin]]
 name = "bagctl"
 path = "src/bin/bagctl.rs"
+
+[[bin]]
+name = "bagsim"
+path = "src/bin/bagsim.rs"
