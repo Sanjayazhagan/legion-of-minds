@@ -132,7 +132,7 @@ pub async fn leaderboard(
     Query(q): Query<Page>,
 ) -> ApiResult<Json<Vec<PublicPlayer>>> {
     let rows: Vec<UserRow> = sqlx::query_as(&format!(
-        "{USER_SELECT} ORDER BY u.trophies DESC, u.created_at ASC LIMIT $1"
+        "{USER_SELECT} WHERE NOT u.is_bot ORDER BY u.trophies DESC, u.created_at ASC LIMIT $1"
     ))
     .bind(q.limit.unwrap_or(100).clamp(1, 200))
     .fetch_all(&st.db)

@@ -69,6 +69,16 @@ pub struct Config {
     pub max_body_bytes: usize,
     /// How long finished raids (battle log and replays) are kept.
     pub keep_raids: Duration,
+    /// Gold the server pays a defender who holds a raid to no stars, and how
+    /// many such rewards a player can get in 24 hours.
+    pub defence_reward: i64,
+    pub defence_rewards_per_day: i64,
+    /// Gold for the first raid of the day (UTC) that wins a star.
+    pub daily_win_bonus: i64,
+    /// Gold per Town Hall level for a practice raid at 100% destruction, and
+    /// how many practice raids pay in 24 hours.
+    pub practice_gold: i64,
+    pub practice_paid_per_day: i64,
 }
 
 fn var(k: &str) -> Option<String> {
@@ -126,6 +136,11 @@ impl Config {
             match_range: num("MATCH_TROPHY_RANGE", 200i32)?,
             max_body_bytes: 4 << 20,
             keep_raids: Duration::from_secs(num("KEEP_RAIDS_DAYS", 14u64)? * 86_400),
+            defence_reward: num("DEFENCE_REWARD", 30i64)?.max(0),
+            defence_rewards_per_day: num("DEFENCE_REWARDS_PER_DAY", 5i64)?,
+            daily_win_bonus: num("DAILY_WIN_BONUS", 100i64)?.max(0),
+            practice_gold: num("PRACTICE_GOLD", 20i64)?.max(0),
+            practice_paid_per_day: num("PRACTICE_PAID_PER_DAY", 5i64)?,
         })
     }
 

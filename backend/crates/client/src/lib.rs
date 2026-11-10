@@ -16,13 +16,14 @@
 
 use bag_protocol::*;
 use godcore::battle::Battle;
-use godcore::scenario::{home_spots, BuildKind, HomeBase, Placed, RAID_ENTRY};
+use godcore::scenario::{home_spots, HomeBase, RAID_ENTRY};
 use godcore::troop::Troop;
 use reqwest::blocking::{Client as Http, RequestBuilder};
 use serde::de::DeserializeOwned;
 use std::time::{Duration, Instant};
 
 pub use bag_protocol;
+pub use bag_protocol::starter_layout;
 pub use uuid::Uuid;
 
 #[derive(Debug)]
@@ -281,6 +282,37 @@ impl Client {
     pub fn replay(&self, attack_id: Uuid) -> Result<Replay> {
         self.get(&format!("/v1/attacks/{attack_id}/replay"))
     }
+
+    /// Raid back the player who raided you in `attack_id` (from the battle
+    /// log, `can_revenge`). Their shield doesn't protect them.
+    pub fn revenge(&self, attack_id: Uuid) -> Result<Match> {
+        self.post(&format!("/v1/attacks/{attack_id}/revenge"), &serde_json::json!({}))
+    }
+
+    /// The best raid of the last 24 hours, to watch.
+    pub fn raid_of_the_day(&self) -> Result<Replay> {
+        self.get("/v1/raid-of-the-day")
+    }
+
+    // ------------------------------------------------------------ the cup
+
+    pub fn cup(&self) -> Result<CupStandings> {
+        self.get("/v1/cup")
+    }
+
+    /// Enter (or replace) this week's troop. Checked locally first.
+    pub fn enter_cup(&self, troop: &Troop) -> Result<CupStandings> {
+        let paid = self.me()?.upgrades;
+        let t = canonical_troop(troop, godcore::classes::Role::Attack, godcore::scenario::max_troop_level(paid.town_hall))?;
+        if let Some(why) = paid.blocker(&t) {
+            return Err(Error::Invalid(why));
+        }
+        self.post("/v1/cup/entry", &CupEntry { troop: t })
+    }
+
+    pub fn cup_replay(&self, week: i64, player: Uuid) -> Result<CupReplay> {
+        self.get(&format!("/v1/cup/{week}/{player}"))
+    }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -307,25 +339,6 @@ fn placements(v: &[(Troop, (f32, f32))]) -> Vec<Placement> {
         .collect()
 }
 
-/// A valid layout with every building a Town Hall level allows: towers on
-/// an outer ring, cannons inside. For tests and bagctl; players build their
-/// own in the game.
-pub fn starter_layout(town_hall: u32) -> HomeBase {
-    let mut base = HomeBase {
-        town_hall,
-        buildings: Vec::new(),
-    };
-    for (kind, r, phase) in [(BuildKind::Tower, 5.4f32, 0.0f32), (BuildKind::Cannon, 3.2, 0.5)] {
-        for k in 0..24 {
-            let a = (k as f32 + phase) / 24.0 * std::f32::consts::TAU;
-            let (x, y) = (r * a.cos(), r * a.sin());
-            if base.can_add(kind) && base.fits(x, y) {
-                base.buildings.push(Placed { kind, x, y });
-            }
-        }
-    }
-    base
-}
 
 /// Default defender spots (the game's auto-place).
 pub fn defender_spots(n: usize) -> Vec<(f32, f32)> {

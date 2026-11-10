@@ -4,10 +4,12 @@
 //! - `players`: profiles, leaderboard, publishing a base snapshot
 //! - `attacks`: matchmaking, server-checked raids, battle log, replays
 //! - `shop`: Town Hall, weapons and troop levels bought with online gold
+//! - `cup`: the weekly cup, one troop per player, paid in gold
 
 pub mod attacks;
 pub mod auth;
 pub mod config;
+pub mod cup;
 pub mod error;
 pub mod players;
 pub mod shop;
@@ -83,6 +85,11 @@ pub fn router(st: AppState) -> Router {
         .route("/v1/matchmaking", post(attacks::find_match))
         .route("/v1/attacks/{id}", post(attacks::submit))
         .route("/v1/attacks/{id}/replay", get(attacks::replay))
+        .route("/v1/attacks/{id}/revenge", post(attacks::revenge))
+        .route("/v1/raid-of-the-day", get(attacks::raid_of_the_day))
+        .route("/v1/cup", get(cup::standings))
+        .route("/v1/cup/entry", post(cup::enter))
+        .route("/v1/cup/{week}/{player}", get(cup::entry))
         .layer(RequestBodyLimitLayer::new(limit))
         .layer(axum::extract::DefaultBodyLimit::max(limit))
         .layer(TraceLayer::new_for_http())
@@ -115,6 +122,12 @@ pub async fn cleanup(db: &PgPool, keep_raids: Duration) -> Result<(), sqlx::Erro
     .bind(keep_raids)
     .execute(db)
     .await?;
+    cup::pay_finished(db, bag_protocol::cup_week(chrono::Utc::now().timestamp())).await?;
+    // Cup entries stay for last week's podium, then go (each holds a troop).
+    sqlx::query("DELETE FROM cup_entries WHERE week < $1")
+        .bind(bag_protocol::cup_week(chrono::Utc::now().timestamp()) as i32 - 4)
+        .execute(db)
+        .await?;
     sqlx::query(
         "DELETE FROM snapshots s
          WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.current_snapshot = s.id)
