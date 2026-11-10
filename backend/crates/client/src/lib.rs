@@ -60,6 +60,21 @@ impl From<Invalid> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Send a request; a non-success answer becomes `Error::Api`.
+fn checked(r: RequestBuilder) -> Result<reqwest::blocking::Response> {
+    let resp = r.send().map_err(|e| Error::Network(e.to_string()))?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let body: Option<ApiErrorBody> = resp.json().ok();
+    Err(Error::Api {
+        status: status.as_u16(),
+        code: body.as_ref().map_or("http".into(), |b| b.error.clone()),
+        message: body.map_or(format!("server returned {status}"), |b| b.message),
+    })
+}
+
 pub struct Client {
     base: String,
     http: Http,
@@ -100,21 +115,17 @@ impl Client {
     }
 
     fn send<T: DeserializeOwned>(&self, r: RequestBuilder) -> Result<T> {
-        let resp = r.send().map_err(|e| Error::Network(e.to_string()))?;
-        let status = resp.status();
-        if status.is_success() {
-            return resp.json().map_err(|e| Error::Network(e.to_string()));
-        }
-        let body: Option<ApiErrorBody> = resp.json().ok();
-        Err(Error::Api {
-            status: status.as_u16(),
-            code: body.as_ref().map_or("http".into(), |b| b.error.clone()),
-            message: body.map_or(format!("server returned {status}"), |b| b.message),
-        })
+        let resp = checked(r)?;
+        resp.json().map_err(|e| Error::Network(e.to_string()))
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.send(self.req(reqwest::Method::GET, path))
+    }
+
+    /// Like `send` for calls that answer with no body.
+    fn send_empty(&self, r: RequestBuilder) -> Result<()> {
+        checked(r).map(drop)
     }
 
     fn post<T: DeserializeOwned>(&self, path: &str, body: &impl serde::Serialize) -> Result<T> {
@@ -333,6 +344,23 @@ impl Client {
         self.get("/v1/me/seasons")
     }
 
+    // ------------------------------------------------------------ live ops
+
+    /// Running and upcoming events, the season and unclaimed gifts.
+    pub fn live(&self) -> Result<LiveView> {
+        self.get("/v1/live")
+    }
+
+    pub fn claim_gift(&self, id: Uuid) -> Result<GiftClaimed> {
+        self.post(&format!("/v1/me/gifts/{id}/claim"), &serde_json::json!({}))
+    }
+
+    /// The operator's controls, for scripts and tests. People normally use
+    /// the admin page at `<server>/admin`.
+    pub fn admin(&self, key: &str) -> Admin<'_> {
+        Admin { c: self, key: key.to_string() }
+    }
+
     // ------------------------------------------------------------ clans
 
     /// Clans by total trophies; `search` filters by name.
@@ -516,4 +544,61 @@ pub fn replay_battle(r: &Replay) -> Battle {
 /// self-play pool, `--vs` in godctl).
 pub fn raiders(r: &Replay) -> Vec<Troop> {
     r.army.iter().map(|p| p.troop.clone()).collect()
+}
+
+/// The admin API (`/v1/admin`), authorised by the server's ADMIN_KEY.
+pub struct Admin<'a> {
+    c: &'a Client,
+    key: String,
+}
+
+impl Admin<'_> {
+    fn req(&self, method: reqwest::Method, path: &str) -> RequestBuilder {
+        self.c
+            .http
+            .request(method, format!("{}{path}", self.c.base))
+            .header("x-admin-key", &self.key)
+    }
+
+    pub fn overview(&self) -> Result<AdminOverview> {
+        self.c.send(self.req(reqwest::Method::GET, "/v1/admin/overview"))
+    }
+
+    pub fn start_event(&self, e: &NewEvent) -> Result<LiveEvent> {
+        self.c.send(self.req(reqwest::Method::POST, "/v1/admin/events").json(e))
+    }
+
+    pub fn stop_event(&self, id: Uuid) -> Result<()> {
+        self.c.send_empty(self.req(reqwest::Method::POST, &format!("/v1/admin/events/{id}/stop")))
+    }
+
+    pub fn give(&self, g: &NewGift) -> Result<AdminGift> {
+        self.c.send(self.req(reqwest::Method::POST, "/v1/admin/gifts").json(g))
+    }
+
+    pub fn cancel_gift(&self, id: Uuid) -> Result<()> {
+        self.c.send_empty(self.req(reqwest::Method::POST, &format!("/v1/admin/gifts/{id}/cancel")))
+    }
+
+    pub fn season(&self) -> Result<Season> {
+        self.c.send(self.req(reqwest::Method::GET, "/v1/admin/season"))
+    }
+
+    pub fn edit_season(&self, e: &SeasonEdit) -> Result<Season> {
+        self.c.send(self.req(reqwest::Method::PATCH, "/v1/admin/season").json(e))
+    }
+
+    /// End the season now: pays rewards and starts the next one.
+    pub fn end_season(&self) -> Result<Season> {
+        self.c.send(self.req(reqwest::Method::POST, "/v1/admin/season/end"))
+    }
+
+    pub fn settings(&self) -> Result<Vec<SettingView>> {
+        self.c.send(self.req(reqwest::Method::GET, "/v1/admin/settings"))
+    }
+
+    pub fn change_settings(&self, values: &[(&str, i64)]) -> Result<Vec<SettingView>> {
+        let m: std::collections::BTreeMap<&str, i64> = values.iter().copied().collect();
+        self.c.send(self.req(reqwest::Method::PUT, "/v1/admin/settings").json(&m))
+    }
 }

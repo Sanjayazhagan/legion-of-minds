@@ -75,6 +75,8 @@ pub struct Config {
     pub war_battle: Duration,
     /// Members with a published base a clan needs to start a war.
     pub war_min_size: usize,
+    /// Key for the operator's admin page (`/admin`). Unset turns it off.
+    pub admin_key: Option<String>,
 }
 
 fn var(k: &str) -> Option<String> {
@@ -117,6 +119,15 @@ impl Config {
         if let Some((i, s)) = pair("DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET")? {
             providers.push(OAuthProvider::discord(i, s));
         }
+        let admin_key = var("ADMIN_KEY").map(|k| k.trim().to_string());
+        if let Some(k) = &admin_key {
+            if k.chars().count() < crate::admin::ADMIN_KEY_MIN {
+                return Err(format!(
+                    "ADMIN_KEY must be at least {} characters; make a long random one",
+                    crate::admin::ADMIN_KEY_MIN
+                ));
+            }
+        }
         let mins = |m: u64| Duration::from_secs(m * 60);
         Ok(Config {
             database_url,
@@ -135,6 +146,7 @@ impl Config {
             war_prep: mins(num("WAR_PREP_MINUTES", 360u64)?),
             war_battle: mins(num("WAR_BATTLE_MINUTES", 1440u64)?),
             war_min_size: num("WAR_MIN_SIZE", 3usize)?.max(1),
+            admin_key,
         })
     }
 

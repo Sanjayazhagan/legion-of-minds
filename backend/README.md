@@ -134,6 +134,20 @@ All bodies are JSON. Publishing, matchmaking and raids need the header `x-sim-ve
 | `GET /v1/attacks/{id}/replay` | ✓ | Snapshot + army, for either player |
 | `GET /v1/players/{id}` | ✓ | Public profile |
 | `GET /v1/leaderboard?limit=` | | Top players by trophies |
+| `GET /v1/live` | ✓ | Running and upcoming events, the season, and gifts waiting to be claimed |
+| `POST /v1/me/gifts/{id}/claim` | ✓ | Claim a gift → `{gold, user}` |
+| `/v1/admin/...` | admin key | The operator's controls, see "Running events, rewards and seasons" |
+
+## Running events, rewards and seasons
+
+The server has an admin page for the game's operator at `<PUBLIC_URL>/admin`. It is off until `ADMIN_KEY` is set (at least 20 characters; put it in `deploy.env`, never in the repo or chat). Open the page, paste the key, and from there:
+
+- **Events**: start or schedule a time-limited boost every player sees on the Online screen, for example a double gold weekend (`gold_pct` 200) or "+50 gold per win". Running events add up. They only change gold, never battle rules, so raids still check out on the server. Extra gold is new gold: the defender only loses normal loot.
+- **Give gold**: a gift to every player or one player (name or id), claimed in the game with one click; close it any time.
+- **Season**: rename the running season, move its end, or end it now (pays every player by league, halves trophies above 800, starts the next one).
+- **Rewards and timings**: season length, end-of-season gold per league, league win bonus, shield length, war rewards and starting gold. Changes apply at once; set a value back to its default to undo.
+
+Every change is listed under Recent changes (table `admin_log`). The API behind it is under `/v1/admin` with the header `x-admin-key` (`overview`, `events`, `events/{id}/stop`, `gifts`, `gifts/{id}/cancel`, `season`, `season/end`, `settings`); `bag_client::Client::admin(key)` wraps it for scripts. Changing how battles play still needs a game release with a new SIM_VERSION.
 
 ## Layout
 

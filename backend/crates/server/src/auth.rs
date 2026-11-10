@@ -173,12 +173,13 @@ pub async fn find_or_create_user(
     if let Some(id) = find().fetch_optional(&st.db).await? {
         return Ok(id);
     }
+    let start_gold = crate::liveops::Live::load(&st.db, &st.cfg).await?.get("start_gold");
     let mut tx = st.db.begin().await?;
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO users (id, display_name, gold) VALUES ($1, $2, $3)")
         .bind(id)
         .bind(clean_name(name))
-        .bind(st.cfg.start_gold)
+        .bind(start_gold)
         .execute(&mut *tx)
         .await?;
     let linked = sqlx::query(

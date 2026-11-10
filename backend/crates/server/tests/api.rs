@@ -26,6 +26,8 @@ fn fixture(name: &str) -> Troop {
     Troop::load_json(&std::fs::read_to_string(p).unwrap()).unwrap()
 }
 
+const ADMIN_KEY: &str = "test-admin-key-0123456789";
+
 async fn fresh_db() -> String {
     let admin = std::env::var("TEST_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://bag:bag@localhost/bag".into());
@@ -58,6 +60,7 @@ fn test_config(db: String, public_url: String, providers: Vec<OAuthProvider>) ->
         war_prep: Duration::from_secs(3600),
         war_battle: Duration::from_secs(86_400),
         war_min_size: 3,
+        admin_key: Some(ADMIN_KEY.into()),
     }
 }
 

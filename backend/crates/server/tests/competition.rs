@@ -1,8 +1,9 @@
-//! Leagues, seasons, clans, lent troops and clan wars, end to end against a
+//! Leagues, seasons, clans, lent troops, clan wars and the operator's live
+//! controls (events, gifts, season and reward settings), end to end against a
 //! real Postgres (TEST_DATABASE_URL, default postgres://bag:bag@localhost/bag).
 
 use bag_client::bag_protocol::{
-    loot, BaseSnapshot, ClanRole, League, Placement, WarResult, WarState, MAX_LOANS,
+    loot, scale_gold, NewEvent, NewGift, SeasonEdit, BaseSnapshot, ClanRole, League, Placement, WarResult, WarState, MAX_LOANS,
 };
 use bag_client::{army_spots, defender_spots, snapshot_from, Client, Error};
 use bag_server::config::Config;
@@ -32,6 +33,8 @@ async fn fresh_db() -> String {
     url.to_string()
 }
 
+const ADMIN_KEY: &str = "a-long-test-admin-key-42";
+
 fn config(db: String, public_url: String) -> Config {
     Config {
         database_url: db,
@@ -51,6 +54,7 @@ fn config(db: String, public_url: String) -> Config {
         war_prep: Duration::ZERO,
         war_battle: Duration::from_secs(3600),
         war_min_size: 2,
+        admin_key: Some(ADMIN_KEY.into()),
     }
 }
 
@@ -66,6 +70,13 @@ async fn serve(db: String) -> String {
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     tokio::task::spawn_blocking(f).await.unwrap()
+}
+
+/// The server's settings and events, as background work loads them.
+async fn live(p: &sqlx::PgPool) -> bag_server::liveops::Live {
+    bag_server::liveops::Live::load(p, &config(String::new(), String::new()))
+        .await
+        .unwrap()
 }
 
 /// Run SQL (with values written in) against the test database.
@@ -147,12 +158,12 @@ async fn seasons_pay_by_league_and_reset_trophies() {
 
         // Not due yet: nothing happens.
         server_work(&db, |p| async move {
-            assert_eq!(bag_server::league::roll(&p, Duration::from_secs(86_400)).await.unwrap(), None);
+            assert_eq!(bag_server::league::roll(&p, &live(&p).await).await.unwrap(), None);
         });
         sql(&db, "UPDATE seasons SET ends_at = now() - interval '1 second'");
         server_work(&db, |p| async move {
-            assert_eq!(bag_server::league::roll(&p, Duration::from_secs(86_400)).await.unwrap(), Some(1));
-            assert_eq!(bag_server::league::roll(&p, Duration::from_secs(86_400)).await.unwrap(), None);
+            assert_eq!(bag_server::league::roll(&p, &live(&p).await).await.unwrap(), Some(1));
+            assert_eq!(bag_server::league::roll(&p, &live(&p).await).await.unwrap(), None);
         });
 
         let r = alice.my_seasons().unwrap();
@@ -369,7 +380,7 @@ async fn clan_wars_are_fought_and_scored() {
 
         // End the war.
         sql(&db, "UPDATE wars SET ends_at = now() - interval '1 second'");
-        server_work(&db, |p| async move { bag_server::wars::settle(&p).await.unwrap() });
+        server_work(&db, |p| async move { bag_server::wars::settle(&p, &live(&p).await).await.unwrap() });
         let w = alice.war().unwrap();
         assert_eq!(w.state, WarState::Done);
         let expect = if first.stars > 0 || first.destruction > 0.0 {
@@ -383,6 +394,214 @@ async fn clan_wars_are_fought_and_scored() {
         assert_eq!(wolves_view.clan.war_wins + wolves_view.clan.war_draws, 1);
         // A new war can be searched for now.
         assert!(alice.search_war().unwrap().searching);
+    })
+    .await;
+}
+
+// ------------------------------------------------------------- live ops
+
+fn in_hours(h: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::hours(h)).to_rfc3339()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_needs_the_key() {
+    let db = fresh_db().await;
+    let url = serve(db.clone()).await;
+    blocking(move || {
+        let alice = login(&url, "Alice");
+        assert_eq!(api_code(alice.admin("wrong-key-wrong-key-wrong").overview()), "unauthorized");
+        assert_eq!(api_code(alice.admin("").settings()), "unauthorized");
+        assert!(alice.admin(ADMIN_KEY).overview().is_ok());
+        // The page itself is public; it holds nothing until given the key.
+        let page = reqwest::blocking::get(format!("{url}/admin")).unwrap();
+        assert_eq!(page.status(), 200);
+        assert!(page.text().unwrap().contains("Admin key"));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_is_off_without_a_key() {
+    let db = fresh_db().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let mut cfg = config(db, url.clone());
+    cfg.admin_key = None;
+    let pool = bag_server::connect(&cfg.database_url).await.unwrap();
+    let app = router(AppState::new(pool, cfg));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    blocking(move || {
+        let alice = login(&url, "Alice");
+        assert_eq!(api_code(alice.admin(ADMIN_KEY).overview()), "not_found");
+        assert_eq!(reqwest::blocking::get(format!("{url}/admin")).unwrap().status(), 404);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn events_boost_raid_gold_and_show_in_game() {
+    let db = fresh_db().await;
+    let url = serve(db.clone()).await;
+    blocking(move || {
+        let alice = login(&url, "Alice");
+        publish(&db, &alice);
+        let bob = login(&url, "Bob");
+        let admin = bob.admin(ADMIN_KEY);
+        assert!(bob.live().unwrap().events.is_empty());
+
+        // Bad events are refused.
+        let mut e = NewEvent {
+            title: "Double gold weekend".into(),
+            message: "All raid gold doubled!".into(),
+            starts_at: None,
+            ends_at: in_hours(48),
+            gold_pct: 200,
+            win_gold: 50,
+        };
+        let bad = NewEvent { gold_pct: 50, ..e.clone() };
+        assert_eq!(api_code(admin.start_event(&bad)), "bad_request");
+        let bad = NewEvent { ends_at: in_hours(-1), ..e.clone() };
+        assert_eq!(api_code(admin.start_event(&bad)), "bad_request");
+
+        let ev = admin.start_event(&e).unwrap();
+        assert!(ev.active);
+        // One coming up later shows too, but doesn't count yet.
+        e.title = "Gold rush".into();
+        e.starts_at = Some(in_hours(24));
+        e.ends_at = in_hours(30);
+        let later = admin.start_event(&e).unwrap();
+        assert!(!later.active);
+
+        let live = bob.live().unwrap();
+        assert_eq!(live.events.len(), 2);
+        assert_eq!((live.gold_pct, live.win_gold), (200, 50));
+        assert_eq!(live.events[0].perks(), "2x gold, +50 gold per win");
+
+        let m = bob.find_match().unwrap();
+        let (_, out) = bob.attack(&m, army()).unwrap();
+        let looted = loot(500, out.result.destruction);
+        assert_eq!(out.gold_looted, looted);
+        let base = looted + out.league_bonus;
+        let win = if out.result.stars > 0 { 50 } else { 0 };
+        assert_eq!(out.event_bonus, scale_gold(base, 200) - base + win);
+        assert_eq!(out.attacker.gold, 500 + base + out.event_bonus);
+        // The defender only loses normal loot.
+        assert_eq!(alice.me().unwrap().gold, 500 - looted);
+
+        admin.stop_event(ev.id).unwrap();
+        admin.stop_event(later.id).unwrap();
+        assert_eq!(api_code(admin.stop_event(ev.id)), "not_found");
+        let live = bob.live().unwrap();
+        assert!(live.events.is_empty());
+        assert_eq!(live.gold_pct, 100);
+        let o = admin.overview().unwrap();
+        // The stopped running one is listed as over; the cancelled one is gone.
+        assert_eq!(o.events.len(), 1);
+        assert!(o.log.iter().any(|l| l.action == "event stopped"));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gifts_are_claimed_once() {
+    let db = fresh_db().await;
+    let url = serve(db.clone()).await;
+    blocking(move || {
+        let alice = login(&url, "Alice");
+        let bob = login(&url, "Bob");
+        let admin = alice.admin(ADMIN_KEY);
+        let all = admin
+            .give(&NewGift { gold: 300, message: "Sorry for the downtime".into(), player: None, days: None })
+            .unwrap();
+        let just_bob = admin
+            .give(&NewGift { gold: 1000, message: "Cup winner".into(), player: Some("bob".into()), days: Some(3) })
+            .unwrap();
+        assert_eq!(just_bob.player, "Bob");
+        assert_eq!(
+            api_code(admin.give(&NewGift { gold: 5, message: String::new(), player: Some("Nobody".into()), days: None })),
+            "not_found"
+        );
+        assert_eq!(
+            api_code(admin.give(&NewGift { gold: 0, message: String::new(), player: None, days: None })),
+            "bad_request"
+        );
+
+        let gifts = alice.live().unwrap().gifts;
+        assert_eq!(gifts.len(), 1);
+        assert_eq!(gifts[0].message, "Sorry for the downtime");
+        let got = alice.claim_gift(all.id).unwrap();
+        assert_eq!((got.gold, got.user.gold), (300, 800));
+        assert_eq!(api_code(alice.claim_gift(all.id)), "already_claimed");
+        assert_eq!(api_code(alice.claim_gift(just_bob.id)), "not_found");
+        assert!(alice.live().unwrap().gifts.is_empty());
+
+        assert_eq!(bob.live().unwrap().gifts.len(), 2);
+        admin.cancel_gift(all.id).unwrap();
+        assert_eq!(bob.live().unwrap().gifts.len(), 1);
+        assert_eq!(api_code(bob.claim_gift(all.id)), "not_found");
+        assert_eq!(bob.claim_gift(just_bob.id).unwrap().user.gold, 1500);
+
+        let o = admin.overview().unwrap();
+        assert_eq!(o.gifts.len(), 2);
+        assert_eq!(o.gifts.iter().map(|g| g.claims).sum::<i64>(), 2);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_runs_the_season_and_rewards() {
+    let db = fresh_db().await;
+    let url = serve(db.clone()).await;
+    blocking(move || {
+        let alice = login(&url, "Alice");
+        let admin = alice.admin(ADMIN_KEY);
+        let a = alice.me().unwrap().id;
+        sql(&db, &format!("UPDATE users SET trophies = 1000 WHERE id = '{a}'"));
+
+        // Settings: checked, saved, and back to default removes the change.
+        assert_eq!(api_code(admin.change_settings(&[("season_days", 0)])), "bad_request");
+        assert_eq!(api_code(admin.change_settings(&[("battle_speed", 2)])), "bad_request");
+        let s = admin
+            .change_settings(&[("season_reward_gold", 777), ("start_gold", 900), ("season_days", 14)])
+            .unwrap();
+        let val = |k: &str| s.iter().find(|x| x.key == k).unwrap().value;
+        assert_eq!((val("season_reward_gold"), val("start_gold"), val("season_days")), (777, 900, 14));
+        assert_eq!(s.iter().find(|x| x.key == "start_gold").unwrap().default, 500);
+        assert_eq!(login(&url, "Newcomer").me().unwrap().gold, 900);
+
+        // Rename the season and move its end.
+        let s1 = alice.season().unwrap();
+        assert_eq!(s1.name, "");
+        let ends = in_hours(72);
+        let s = admin
+            .edit_season(&SeasonEdit { name: Some("Season of Frost".into()), ends_at: Some(ends.clone()) })
+            .unwrap();
+        assert_eq!(s.name, "Season of Frost");
+        assert_eq!(alice.season().unwrap().name, "Season of Frost");
+        assert_eq!(alice.live().unwrap().season.unwrap().ends_at, s.ends_at);
+        assert_eq!(
+            api_code(admin.edit_season(&SeasonEdit { name: None, ends_at: Some(in_hours(-2)) })),
+            "bad_request"
+        );
+
+        // End it now: Gold league pays the tuned reward and the next season
+        // uses the tuned length.
+        let s2 = admin.end_season().unwrap();
+        assert_eq!(s2.number, 2);
+        assert_eq!(s2.name, "");
+        let r = alice.my_seasons().unwrap();
+        assert_eq!((r[0].season, r[0].league, r[0].reward), (1, League::Gold, 777));
+        assert_eq!(alice.me().unwrap().gold, 500 + 777);
+        let start = chrono::DateTime::parse_from_rfc3339(&s2.started_at).unwrap();
+        let end = chrono::DateTime::parse_from_rfc3339(&s2.ends_at).unwrap();
+        assert_eq!((end - start).num_days(), 14);
+
+        let s = admin.change_settings(&[("start_gold", 500)]).unwrap();
+        assert_eq!(s.iter().find(|x| x.key == "start_gold").unwrap().value, 500);
+        let log: Vec<String> = admin.overview().unwrap().log.into_iter().map(|l| l.action).collect();
+        assert!(log.contains(&"season ended".to_string()));
+        assert!(log.contains(&"settings".to_string()));
     })
     .await;
 }

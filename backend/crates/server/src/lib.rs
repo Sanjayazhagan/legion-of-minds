@@ -7,13 +7,17 @@
 //! - `league`: seasons (leagues come from trophies)
 //! - `clans`: clans, chat and troops lent to clanmates
 //! - `wars`: clan wars
+//! - `liveops`: events, tuned rewards and gifts, as the game sees them
+//! - `admin`: the operator's admin page and API (needs ADMIN_KEY)
 
 pub mod attacks;
+pub mod admin;
 pub mod auth;
 pub mod clans;
 pub mod config;
 pub mod error;
 pub mod league;
+pub mod liveops;
 pub mod players;
 pub mod shop;
 pub mod wars;
@@ -91,6 +95,8 @@ pub fn router(st: AppState) -> Router {
         .route("/v1/attacks/{id}/replay", get(attacks::replay))
         .route("/v1/season", get(league::get_season))
         .route("/v1/me/seasons", get(league::my_seasons))
+        .route("/v1/live", get(liveops::live))
+        .route("/v1/me/gifts/{id}/claim", post(liveops::claim))
         .route("/v1/clans", get(clans::list).post(clans::create))
         .route("/v1/leaderboard/clans", get(clans::list))
         .route("/v1/clans/{id}", get(clans::get))
@@ -109,6 +115,7 @@ pub fn router(st: AppState) -> Router {
         )
         .route("/v1/me/clan/war/targets/{id}", post(wars::attack))
         .route("/v1/war-attacks/{id}", post(wars::submit))
+        .merge(admin::routes())
         .layer(RequestBodyLimitLayer::new(limit))
         .layer(axum::extract::DefaultBodyLimit::max(limit))
         .layer(TraceLayer::new_for_http())
@@ -118,9 +125,10 @@ pub fn router(st: AppState) -> Router {
 /// Background work, every few minutes: close a finished season, score
 /// finished wars, then `cleanup`.
 pub async fn tick(st: &AppState) -> Result<(), String> {
-    league::current(&st.db, st.cfg.season).await.map_err(|e| e.message)?;
-    league::roll(&st.db, st.cfg.season).await.map_err(|e| e.to_string())?;
-    wars::settle(&st.db).await.map_err(|e| e.message)?;
+    let live = liveops::Live::load(&st.db, &st.cfg).await.map_err(|e| e.to_string())?;
+    league::current(&st.db, live.season_length()).await.map_err(|e| e.message)?;
+    league::roll(&st.db, &live).await.map_err(|e| e.to_string())?;
+    wars::settle(&st.db, &live).await.map_err(|e| e.message)?;
     cleanup(&st.db).await.map_err(|e| e.to_string())
 }
 
