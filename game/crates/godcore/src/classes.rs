@@ -117,15 +117,15 @@ impl BaseClass {
                 "Ranged shooter that out-ranges guards. Learns to strike from a safe distance."
             }
             BaseClass::Healer => {
-                "Support. Learns to keep the squad alive while staying out of fire."
+                "Support. Heals the squad, and troops near it take 15% less damage."
             }
             BaseClass::Guard => "Defender. Melee wall that learns to intercept raiders before they reach your buildings.",
             BaseClass::Sentry => "Defender. Ranged shooter that learns to pick off raiders from behind the towers.",
-            BaseClass::Keeper => "Defender. Shrine keeper that learns to heal the guards holding the line.",
-            BaseClass::Mage => "Spell blasts hit everything near the target. Fragile, strong against crowds of guards.",
+            BaseClass::Keeper => "Defender. Shrine keeper: heals the guards, and those near it take 15% less damage.",
+            BaseClass::Mage => "Spell blasts hit everything near the target. Takes 25% more damage from troops: keep it behind a fighter.",
             BaseClass::Assassin => "Fast and deadly up close, but paper thin. Learns to pick its moment.",
             BaseClass::Paladin => "Slow armoured tank with a small heal. Soaks tower fire for the squad.",
-            BaseClass::Warlock => "Defender. Curses splash onto groups of raiders from behind the walls.",
+            BaseClass::Warlock => "Defender. Curses splash onto groups of raiders. Takes 25% more damage from troops: keep it behind the walls.",
             BaseClass::Hunter => "Defender. Fast melee chaser that runs raiders down before they reach the core.",
         }
     }
