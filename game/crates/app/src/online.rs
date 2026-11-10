@@ -12,7 +12,8 @@ use crate::render::{draw_ground, draw_world, Look, View};
 use crate::ui::*;
 use crate::{Game, Screen};
 use bag_client::bag_protocol::{
-    AttackLog, LoginStart, Match, Providers, PublicPlayer, Published, Replay, Upgrades, User,
+    AttackLog, CupReplay, CupStandings, LoginStart, Match, Providers, PublicPlayer, Published,
+    Replay, Upgrades, User, KIND_PRACTICE, KIND_REVENGE,
 };
 use bag_client::{
     army_from, army_spots, defender_spots, replay_battle, snapshot_from, Client, Uuid,
@@ -630,11 +631,15 @@ impl Game {
 
 /// What the Online screen is waiting on.
 enum Busy {
-    Refresh(Task<(User, Vec<AttackLog>, Vec<PublicPlayer>)>),
+    Refresh(Task<(User, Vec<AttackLog>, Vec<PublicPlayer>, Option<CupStandings>)>),
     Publish(Task<(Published, User)>),
     Find(Task<Match>),
-    Raid(Task<(User, Replay)>),
+    /// The raid's replay and any bonus gold the server paid.
+    Raid(Task<(User, Replay, i64)>),
     Replay(Task<Replay>),
+    /// Entering the weekly cup.
+    Cup(Task<CupStandings>),
+    CupWatch(Task<CupReplay>),
     /// An online upgrade, and what to say once it's paid.
     Buy(Task<User>, String),
 }
@@ -645,6 +650,9 @@ pub struct OnlineState {
     found: Option<Match>,
     busy: Option<Busy>,
     msg: Option<(String, Color)>,
+    cup: Option<CupStandings>,
+    /// The right panel shows the weekly cup instead of the top players.
+    show_cup: bool,
 }
 
 impl OnlineState {
@@ -652,7 +660,10 @@ impl OnlineState {
     /// session, loaded before the first frame.
     pub fn demo(g: &mut Game) -> Screen {
         g.account.user = g.account.client().me().ok();
-        Screen::Online(OnlineState::new(g))
+        let mut s = OnlineState::new(g);
+        // BAG_SCREEN=cup opens on the Weekly cup tab.
+        s.show_cup = std::env::var("BAG_SCREEN").as_deref() == Ok("cup");
+        Screen::Online(s)
     }
 
     pub fn new(g: &Game) -> Self {
@@ -662,6 +673,8 @@ impl OnlineState {
             found: None,
             busy: None,
             msg: None,
+            cup: None,
+            show_cup: false,
         };
         s.refresh(g);
         s
@@ -674,6 +687,8 @@ impl OnlineState {
                 c.me().map_err(err)?,
                 c.log("all").map_err(err)?,
                 c.leaderboard(10).map_err(err)?,
+                // An older server has no cup: the panel just stays empty.
+                c.cup().ok(),
             ))
         })));
     }
@@ -799,10 +814,11 @@ impl Game {
         if let Some(b) = &s.busy {
             let done = match b {
                 Busy::Refresh(t) => t.poll().map(|r| {
-                    r.map(|(u, log, board)| {
+                    r.map(|(u, log, board, cup)| {
                         self.account.user = Some(u);
                         s.log = log;
                         s.board = board;
+                        s.cup = cup;
                     })
                 }),
                 Busy::Publish(t) => t.poll().map(|r| {
@@ -821,10 +837,13 @@ impl Game {
                 Busy::Raid(t) => {
                     if let Some(r) = t.poll() {
                         match r {
-                            Ok((u, replay)) => {
+                            Ok((u, replay, bonus)) => {
                                 self.account.user = Some(u);
                                 s.busy = None;
                                 s.found = None;
+                                if bonus > 0 {
+                                    s.msg = Some((format!("+{bonus} bonus gold from that raid"), GOOD));
+                                }
                                 return Screen::OnlineWatch(WatchState::new(replay, me.id, s));
                             }
                             Err(e) => Some(Err(e)),
@@ -840,6 +859,27 @@ impl Game {
                                 s.busy = None;
                                 return Screen::OnlineWatch(WatchState::new(replay, me.id, s));
                             }
+                            Err(e) => Some(Err(e)),
+                        }
+                    } else {
+                        None
+                    }
+                }
+                Busy::Cup(t) => t.poll().map(|r| {
+                    r.map(|c| {
+                        if let Some(m) = &c.mine {
+                            s.msg = Some((
+                                format!("{} entered the cup: rank {} of {}", m.troop_name, m.rank, c.entries),
+                                GOOD,
+                            ));
+                        }
+                        s.cup = Some(c);
+                    })
+                }),
+                Busy::CupWatch(t) => {
+                    if let Some(r) = t.poll() {
+                        match r {
+                            Ok(e) => return crate::tournament::watch_cup_entry(self, e.troop),
                             Err(e) => Some(Err(e)),
                         }
                     } else {
@@ -985,7 +1025,12 @@ impl Game {
         let mid = Rect::new(440.0, 66.0, 420.0, 300.0);
         panel(mid);
         let mx = mid.x + 20.0;
-        text("Raid", mx, mid.y + 34.0, 26.0, TEXT);
+        let title = match s.found.as_ref().map(|m| m.kind.as_str()) {
+            Some(KIND_PRACTICE) => "Practice raid",
+            Some(KIND_REVENGE) => "Revenge!",
+            _ => "Raid",
+        };
+        text(title, mx, mid.y + 34.0, 26.0, TEXT);
         let army = raid_army(self, &paid);
         match &s.found {
             None => {
@@ -1036,13 +1081,12 @@ impl Game {
                     18.0,
                     TEXT,
                 );
-                text(
-                    &format!("Up to {} gold to loot", m.max_loot),
-                    mx,
-                    mid.y + 122.0,
-                    18.0,
-                    MUTED,
-                );
+                let offer = if m.kind == KIND_PRACTICE {
+                    format!("Nobody is free to raid. No trophies, up to {} gold (5 a day)", m.max_loot)
+                } else {
+                    format!("Up to {} gold to loot", m.max_loot)
+                };
+                text(&offer, mx, mid.y + 122.0, 16.0, MUTED);
                 let names: Vec<&str> = army.iter().map(|(t, _)| t.name.as_str()).collect();
                 text(
                     &format!("Sending: {}", names.join(", ")),
@@ -1064,7 +1108,7 @@ impl Game {
                     s.busy = Some(Busy::Raid(Task::spawn(move || {
                         let (_, out) = c.attack(&m, army).map_err(err)?;
                         let replay = c.replay(out.attack_id).map_err(err)?;
-                        Ok((out.attacker, replay))
+                        Ok((out.attacker, replay, out.bonus_gold))
                     })));
                 }
                 if self.ui.button_ex(
@@ -1086,6 +1130,8 @@ impl Game {
             Some(Busy::Find(_)) => Some("Looking for an opponent...".into()),
             Some(Busy::Raid(_)) => Some("Raiding: the server is checking the battle...".into()),
             Some(Busy::Replay(_)) => Some("Loading the replay...".into()),
+            Some(Busy::Cup(_)) => Some("Entering the cup: the server is running its raids...".into()),
+            Some(Busy::CupWatch(_)) => Some("Loading the cup entry...".into()),
             Some(Busy::Buy(..)) => Some("Paying with online gold...".into()),
             None => None,
         };
@@ -1108,29 +1154,59 @@ impl Game {
         ) {
             s.refresh(self);
         }
+        if self.ui.button_ex(
+            Rect::new(logr.x + logr.w - 276.0, logr.y + 8.0, 158.0, 30.0),
+            "Raid of the day",
+            idle,
+            false,
+        ) {
+            let c = self.account.client();
+            s.msg = None;
+            s.busy = Some(Busy::Replay(Task::spawn(move || {
+                c.raid_of_the_day().map_err(|e| match e {
+                    bag_client::Error::Api { status: 404, .. } => "No raids in the last day yet".into(),
+                    e => err(e),
+                })
+            })));
+        }
         if s.log.is_empty() {
             text("No raids yet.", logr.x + 20.0, logr.y + 64.0, 18.0, MUTED);
         }
         let mut ly = logr.y + 50.0;
         for l in s.log.iter().take(((logr.h - 60.0) / 46.0) as usize) {
             let mine = l.attacker.id == me.id;
-            let (who, swing) = if mine {
-                (
+            let (who, swing) = match (mine, l.kind.as_str()) {
+                (true, KIND_PRACTICE) => (
+                    format!("You practised on {}", l.defender.display_name),
+                    l.trophies,
+                ),
+                (true, KIND_REVENGE) => (
+                    format!("Your revenge on {}", l.defender.display_name),
+                    l.trophies,
+                ),
+                (true, _) => (
                     format!("You raided {}", l.defender.display_name),
                     l.trophies,
-                )
-            } else {
-                (
+                ),
+                (false, KIND_REVENGE) => (
+                    format!("{} took revenge", l.attacker.display_name),
+                    -l.trophies,
+                ),
+                (false, _) => (
                     format!("{} raided you", l.attacker.display_name),
                     -l.trophies,
-                )
+                ),
             };
             text(&who, logr.x + 20.0, ly + 18.0, 18.0, TEXT);
+            // Gold the server added: a bonus for the raider, a reward for
+            // a defender who held.
+            let extra = if mine { l.bonus_gold } else { l.defence_reward };
             let detail = format!(
-                "{}  {:.0}%  {:+} trophies",
+                "{}  {:.0}%  {:+} trophies{}",
                 stars_text(l.result.stars),
                 l.result.destruction * 100.0,
-                swing
+                swing,
+                if extra > 0 { format!("  +{extra}g") } else { String::new() }
             );
             text(
                 &detail,
@@ -1149,31 +1225,131 @@ impl Game {
                 let id = l.attack_id;
                 s.busy = Some(Busy::Replay(Task::spawn(move || c.replay(id).map_err(err))));
             }
+            if l.can_revenge
+                && self.ui.button_ex(
+                    Rect::new(logr.x + logr.w - 196.0, ly + 6.0, 90.0, 30.0),
+                    "Revenge",
+                    idle && !army.is_empty(),
+                    true,
+                )
+            {
+                let c = self.account.client();
+                let id = l.attack_id;
+                s.msg = None;
+                s.busy = Some(Busy::Find(Task::spawn(move || c.revenge(id).map_err(err))));
+            }
             ly += 46.0;
         }
 
-        // Right: leaderboard.
+        // Right: leaderboard or the weekly cup.
         let right = Rect::new(880.0, 66.0, W - 900.0, 360.0);
         panel(right);
-        text("Top players", right.x + 20.0, right.y + 34.0, 22.0, TEXT);
-        for (k, p) in s.board.iter().enumerate() {
-            let yy = right.y + 70.0 + k as f32 * 30.0;
-            let col = if p.id == me.id { ACCENT } else { TEXT };
+        let half = (right.w - 50.0) / 2.0;
+        if self.ui.button_ex(
+            Rect::new(right.x + 20.0, right.y + 10.0, half, 30.0),
+            "Top players",
+            true,
+            !s.show_cup,
+        ) {
+            s.show_cup = false;
+        }
+        if self.ui.button_ex(
+            Rect::new(right.x + 30.0 + half, right.y + 10.0, half, 30.0),
+            "Weekly cup",
+            true,
+            s.show_cup,
+        ) {
+            s.show_cup = true;
+        }
+        let row = |name: &str, value: &str, yy: f32, col: Color, inset: f32| {
+            text(name, right.x + 20.0, yy, 18.0, col);
             text(
-                &format!("{}. {}", k + 1, p.display_name),
+                value,
+                right.x + right.w - 20.0 - inset - text_width(value, 18.0),
+                yy,
+                18.0,
+                col,
+            );
+        };
+        if !s.show_cup {
+            for (k, p) in s.board.iter().enumerate() {
+                let yy = right.y + 70.0 + k as f32 * 28.0;
+                let col = if p.id == me.id { ACCENT } else { TEXT };
+                row(&format!("{}. {}", k + 1, p.display_name), &p.trophies.to_string(), yy, col, 0.0);
+            }
+        } else if let Some(cup) = s.cup.clone() {
+            text(
+                &format!("{} entered. Ends Monday 00:00 UTC.", cup.entries),
                 right.x + 20.0,
-                yy,
-                18.0,
-                col,
+                right.y + 62.0,
+                15.0,
+                MUTED,
             );
-            let t = p.trophies.to_string();
             text(
-                &t,
-                right.x + right.w - 20.0 - text_width(&t, 18.0),
-                yy,
-                18.0,
-                col,
+                "Gold: 500, 300, 200, top ten 100, everyone 25",
+                right.x + 20.0,
+                right.y + 80.0,
+                15.0,
+                MUTED,
             );
+            let mut rows: Vec<_> = cup.top.iter().take(6).collect();
+            if let Some(m) = &cup.mine {
+                if !rows.iter().any(|r| r.player.id == m.player.id) {
+                    rows.pop();
+                    rows.push(m);
+                }
+            }
+            if rows.is_empty() {
+                let champ = cup.last_week.first().map(|w| {
+                    format!("Last week: {} with {}", w.player.display_name, w.troop_name)
+                });
+                text(
+                    champ.as_deref().unwrap_or("Nobody has entered yet: be the first."),
+                    right.x + 20.0,
+                    right.y + 112.0,
+                    16.0,
+                    TEXT,
+                );
+            }
+            for (k, r) in rows.iter().enumerate() {
+                let yy = right.y + 110.0 + k as f32 * 32.0;
+                let col = if r.player.id == me.id { ACCENT } else { TEXT };
+                let who: String = format!("{}. {}: {}", r.rank, r.player.display_name, r.troop_name)
+                    .chars()
+                    .take(26)
+                    .collect();
+                row(&who, &format!("{:.0}", r.score), yy, col, 62.0);
+                if self.ui.button_ex(
+                    Rect::new(right.x + right.w - 72.0, yy - 20.0, 58.0, 26.0),
+                    "Watch",
+                    idle,
+                    false,
+                ) {
+                    let c = self.account.client();
+                    let (week, id) = (cup.week, r.player.id);
+                    s.busy = Some(Busy::CupWatch(Task::spawn(move || c.cup_replay(week, id).map_err(err))));
+                }
+            }
+            // Your best attacker goes in; entering again replaces it.
+            let champion = army.first().map(|(t, _)| t.clone());
+            let label = match &champion {
+                Some(t) => format!("Enter {}", t.name.trim()),
+                None => "Train an attacker to enter".into(),
+            };
+            if self.ui.button_ex(
+                Rect::new(right.x + 20.0, right.y + right.h - 52.0, right.w - 40.0, 40.0),
+                &label,
+                idle && champion.is_some(),
+                false,
+            ) {
+                if let Some(t) = champion {
+                    let c = self.account.client();
+                    s.msg = None;
+                    s.busy = Some(Busy::Cup(Task::spawn(move || c.enter_cup(&t).map_err(err))));
+                }
+            }
+        } else {
+            text("The cup isn't open on this server.", right.x + 20.0, right.y + 70.0, 16.0, MUTED);
         }
 
         // Right, below: online upgrades.

@@ -5,7 +5,7 @@
 //! bagsim crowd  --troops DIR [--server URL] [--players 100] [--secs 120]
 //!               [--think-ms 800] [--local-check 0.2] [--chaos] [--out report.json]
 //! bagsim matrix --troops DIR [--out matrix.json]
-//! bagsim economy --troops DIR [--players 200] [--days 30] [--out economy.json]
+//! bagsim economy --troops DIR [--players 200] [--days 30] [--defence-reward 30] [--daily-bonus 100] [--out economy.json]
 //! ```
 //!
 //! `--troops DIR` holds trained troop files (`godctl train ... --level 1`),
@@ -193,6 +193,9 @@ struct CallStats {
 
 #[derive(Serialize, Clone)]
 struct RaidRow {
+    /// "raid", "practice" or "revenge".
+    kind: String,
+    bonus_gold: i64,
     army: String,
     base: String,
     stars: u32,
@@ -334,6 +337,8 @@ fn player(crowd: &Crowd, st: &Shared, id: usize, s: Strategy) {
             if let Ok(o) = out {
                 let base = describe_base(r, &m.snapshot);
                 st.lock().unwrap().raids.push(RaidRow {
+                    kind: m.kind.clone(),
+                    bonus_gold: o.bonus_gold,
                     army: s.army_name.clone(),
                     base,
                     stars: o.result.stars,
@@ -697,7 +702,7 @@ fn chaos(crowd: &Crowd, st: &Shared, id: usize) {
         );
         if let (Ok(b), Ok(a), Some(o)) = (before, after, oks.first()) {
             // Other players may raid this one meanwhile; count those too.
-            let want = b + o.gold_looted - defended_since(&c, &seen).0;
+            let want = b + o.gold_looted + o.bonus_gold - defended_since(&c, &seen).0;
             check(
                 st,
                 "gold from a raid sent 4 times at once is paid once",
@@ -1018,6 +1023,12 @@ fn crowd(args: &[String]) {
         e.1 += r.stars;
         e.2 += r.destruction;
     }
+    let practice = s.raids.iter().filter(|r| r.kind == "practice").count();
+    println!(
+        "\n{} raids on players, {practice} practice raids, {} bonus gold paid by the server",
+        s.raids.len() - practice,
+        s.raids.iter().map(|r| r.bonus_gold).sum::<i64>()
+    );
     println!("\narmy                      raids  avg stars  avg destruction");
     for (k, (n, stars, d)) in &by_army {
         println!(
@@ -1154,6 +1165,9 @@ fn economy(args: &[String]) {
     let days: u32 = num(args, "--days", 30);
     let raids_per_day: usize = num(args, "--raids-per-day", 5);
     let start_gold: i64 = num(args, "--start-gold", 500);
+    // The server's gold rewards (0 turns one off, as before they existed).
+    let defence_reward: i64 = num(args, "--defence-reward", 30);
+    let daily_bonus: i64 = num(args, "--daily-bonus", 100);
     let a = armies(&r);
     let b = bases(&r);
     let mut rng = Rng::new(42);
@@ -1183,6 +1197,8 @@ fn economy(args: &[String]) {
             ..Default::default()
         };
         let mut stars = 0;
+        let mut won_today = vec![false; n];
+        let mut held_today = vec![0u32; n];
         for _ in 0..raids_per_day {
             for i in 0..n {
                 // Closest trophies first, like matchmaking (200 either side).
@@ -1204,6 +1220,14 @@ fn economy(args: &[String]) {
                 let sw = trophy_swing(st);
                 ps[i].gold += g;
                 ps[j].gold -= g;
+                if st > 0 && !won_today[i] {
+                    won_today[i] = true;
+                    ps[i].gold += daily_bonus;
+                }
+                if st == 0 && held_today[j] < 5 {
+                    held_today[j] += 1;
+                    ps[j].gold += defence_reward;
+                }
                 ps[i].trophies = (ps[i].trophies + sw).max(0);
                 ps[j].trophies = (ps[j].trophies - sw).max(0);
                 d.raids += 1;

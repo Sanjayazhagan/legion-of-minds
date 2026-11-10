@@ -106,6 +106,7 @@ Set these environment variables on the host (as secrets where the host has them)
 | `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` | for Discord sign-in | From the Discord Developer Portal → your app → OAuth2. Redirect: `<PUBLIC_URL>/v1/auth/discord/callback`. |
 | `PORT` | — | Most hosts set it for you. Defaults to 8080. `BIND_ADDR` overrides both. |
 | `SESSION_DAYS`, `ATTACK_WINDOW_SECS`, `SHIELD_MINUTES`, `START_GOLD`, `MATCH_TROPHY_RANGE`, `KEEP_RAIDS_DAYS` | — | Tuning; defaults 30, 300, 60, 500, 200, 14. Raids older than `KEEP_RAIDS_DAYS` leave the battle log (each keeps the whole army for its replay, about 1 MB). |
+| `DEFENCE_REWARD`, `DEFENCE_REWARDS_PER_DAY`, `DAILY_WIN_BONUS`, `PRACTICE_GOLD`, `PRACTICE_PAID_PER_DAY` | — | Gold the server hands out; defaults 30, 5, 100, 20, 5. A defender who holds a raid to no stars gets `DEFENCE_REWARD` (at most `DEFENCE_REWARDS_PER_DAY` times in 24 hours); the first raid of the UTC day that wins a star pays `DAILY_WIN_BONUS`; a practice raid pays `PRACTICE_GOLD` x Town Hall x destruction, for the first `PRACTICE_PAID_PER_DAY` in 24 hours. 0 turns one off. |
 | `RUST_LOG` | — | Log level, default `info,sqlx=warn`. |
 
 Health check: `GET /health`. Serve it behind https (the host's TLS); tokens are bearer tokens.
@@ -128,8 +129,13 @@ All bodies are JSON. Publishing, matchmaking and raids need the header `x-sim-ve
 | `POST /v1/me/weapons` `{weapon}` | ✓ | Unlock a weapon online → profile |
 | `POST /v1/me/troops/{troop_id}/level` `{from}` | ✓ | Level a troop up online from `from` (its online level now, so a repeat doesn't pay twice) → profile |
 | `PUT /v1/me/base`, `GET /v1/me/base` | ✓ | Publish / read your base snapshot |
-| `POST /v1/matchmaking` | ✓ | Find and reserve an opponent → snapshot to fight |
-| `POST /v1/attacks/{id}` `{army, client_result}` | ✓ | Submit the raid; the server re-runs and scores it |
+| `POST /v1/matchmaking` | ✓ | Find and reserve an opponent → snapshot to fight. Needs a published base (409 `no_base`). Never comes back empty: when nobody can be raided it returns `kind: "practice"`, a copy of another player's base or the Training Camp's computer-made one (no trophies, the defender loses nothing) |
+| `POST /v1/attacks/{id}/revenge` | ✓ | Raid back the attacker of a raid on you (`can_revenge` in the log), once; their shield doesn't count → snapshot to fight, `kind: "revenge"` |
+| `GET /v1/raid-of-the-day` | ✓ | Replay of the best raid of the last 24 hours (stars, then destruction, then speed) |
+| `GET /v1/cup` | ✓ | This week's cup: top 50, your entry, last week's podium |
+| `POST /v1/cup/entry` `{troop}` | ✓ | Enter an attacker (or replace your entry). Scored with `godcore::battle::tournament`. Weeks run Monday to Monday UTC; when one closes the cleanup pays 500/300/200, 100 for the rest of the top ten and 25 to everyone else |
+| `GET /v1/cup/{week}/{player}` | ✓ | An entry with its troop, to replay its cup raids |
+| `POST /v1/attacks/{id}` `{army, client_result}` | ✓ | Submit the raid; the server re-runs and scores it. Shields last 25%, 50% or 100% of `SHIELD_MINUTES` for 1, 2 or 3 stars. `bonus_gold` is what the server added (first win of the day, practice) |
 | `GET /v1/me/attacks?role=defense\|attack\|all` | ✓ | Battle log |
 | `GET /v1/attacks/{id}/replay` | ✓ | Snapshot + army, for either player |
 | `GET /v1/players/{id}` | ✓ | Public profile |
@@ -194,7 +200,9 @@ Every pretend player signs in from the same address, so with the rate limits of 
 ## Not done yet
 
 - **Online raids use your local troops as they are.** There is no army picker yet: the Online screen sends your best attackers and first four defenders.
-- **Online gold only comes from raids.** Campaign battles and defence waves are fought on the player's machine, so their gold stays offline. The server could re-run them (it already re-runs raids) to pay online gold too.
+- **Online gold comes from raids, the daily first win, held defences, practice raids and the weekly cup.** Campaign battles and defence waves are fought on the player's machine, so their gold stays offline. The server could re-run them (it already re-runs raids) to pay online gold too.
+- **The raid of the day and cup entries hand out brains.** Anyone can download the featured army and any cup troop (that is how they are replayed). Decide later whether to send recordings instead.
+- **The cup is troop against the same seeded drills, not troop against troop.** Scores don't depend on who else entered.
 - **Recruiting and buildings are still local.** They don't need paying for online: the server checks a base's buildings against its Town Hall, and a fresh recruit is level 1.
 - **Training can't be verified.** The server checks a troop's level and training cap, but a brain trained longer elsewhere would still pass. Signing training runs, or capping by rank, is a later problem.
 - Clans, wars, friend challenges, Steam login, rate limiting and an admin view.

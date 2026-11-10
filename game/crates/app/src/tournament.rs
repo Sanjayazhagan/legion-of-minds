@@ -73,6 +73,12 @@ impl ReplayState {
     }
 }
 
+/// Watch another player's weekly-cup entry run its first squad raid. Going
+/// back lands on the local Tournament screen.
+pub fn watch_cup_entry(g: &Game, troop: Troop) -> Screen {
+    Screen::Replay(ReplayState::new(troop, Drill::Squad, 0, TourState::new(g)))
+}
+
 impl Game {
     pub fn tournament(&mut self, mut s: TourState) -> Screen {
         if self.header("Tournament: the Proving Grounds", true) {
