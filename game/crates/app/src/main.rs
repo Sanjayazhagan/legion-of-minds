@@ -7,6 +7,7 @@ mod plan;
 mod record;
 mod barracks;
 mod battle_screen;
+mod clip;
 mod home;
 mod online;
 mod recruit;
@@ -19,6 +20,7 @@ mod save;
 mod tournament;
 mod training;
 mod ui;
+mod video;
 
 use godcore::rng::Rng;
 use godcore::troop::Troop;
@@ -42,6 +44,8 @@ pub enum Screen {
     SignIn(online::SignInState),
     Online(online::OnlineState),
     OnlineWatch(online::WatchState),
+    /// Saving a battle clip or training reel.
+    Clip(clip::ClipState),
 }
 
 pub struct Game {
@@ -142,6 +146,11 @@ fn demo_screen(g: &mut Game) -> Option<Screen> {
         "team" => Screen::Team(teamtrain::TeamState::demo(g)),
         "signin" => Screen::SignIn(online::SignInState::from_game(&g.account)),
         "online" => online::OnlineState::demo(g),
+        "clip" => {
+            let b = battle_screen::BattleState::demo(g, 1, all);
+            b.clip(Screen::Barracks)
+        }
+        "reel" => Screen::Clip(clip::ClipState::reel(&g.troops[0], Screen::Barracks)),
         _ => return None,
     })
 }
@@ -332,7 +341,18 @@ async fn main() {
                 Screen::SignIn(s) => game.sign_in(s),
                 Screen::Online(s) => game.online(s),
                 Screen::OnlineWatch(s) => game.online_watch(s),
+                Screen::Clip(s) => game.clip(s),
             };
+            // Test hook: BAG_CLIP_OUT saves a clip and quits when it is written.
+            if let (Screen::Clip(c), Some(_)) = (&screen, std::env::var_os("BAG_CLIP_OUT")) {
+                if let Some(r) = c.result() {
+                    match r {
+                        Ok(p) => println!("clip saved to {}", p.display()),
+                        Err(e) => eprintln!("clip failed: {e}"),
+                    }
+                    break;
+                }
+            }
         }
         game.draw_toast();
         if is_key_pressed(KeyCode::M) {

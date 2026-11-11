@@ -61,12 +61,14 @@ pub enum Mode {
 pub struct BattleState {
     mode: Mode,
     battle: Battle,
-    /// Rebuilds the same battle from scratch, for the replay check.
-    remake: Box<dyn Fn() -> Battle>,
+    /// Rebuilds the same battle from scratch, for the replay check and clips.
+    remake: std::rc::Rc<dyn Fn() -> Battle>,
     acc: f32,
     speed: f32,
     result: Option<(u32, u32, bool)>,
     replay_ok: Option<bool>,
+    /// The map fills the window, with a small overlay instead of the side panel.
+    full: bool,
 }
 
 impl BattleState {
@@ -74,12 +76,32 @@ impl BattleState {
         BattleState {
             mode,
             battle: remake(),
-            remake,
+            remake: remake.into(),
             acc: 0.0,
             speed: 1.0,
             result: None,
             replay_ok: None,
+            full: false,
         }
+    }
+
+    fn title(&self) -> String {
+        match self.mode {
+            Mode::Raid(b) => format!("Battle: {}", BASES[b].name),
+            Mode::Defend(Some(w)) => format!("Defending {} against {}", HOME_NAME, WAVES[w].name),
+            Mode::Defend(None) => format!("Defending {} against your own army", HOME_NAME),
+        }
+    }
+
+    /// Opens the clip saver on this battle; `back` is where Done returns to.
+    pub fn clip(self, back: Screen) -> Screen {
+        let title = match self.mode {
+            Mode::Raid(b) => format!("My squad vs {}", BASES[b].name),
+            Mode::Defend(Some(w)) => format!("{} attacks my base", WAVES[w].name),
+            Mode::Defend(None) => "My army attacks my own base".to_string(),
+        };
+        let defending = matches!(self.mode, Mode::Defend(_));
+        Screen::Clip(crate::clip::ClipState::battle(title, defending, self.remake.clone(), back))
     }
 }
 
@@ -405,13 +427,14 @@ impl Game {
     }
 
     pub fn battle(&mut self, mut s: BattleState) -> Screen {
-        let title = match s.mode {
-            Mode::Raid(b) => format!("Battle: {}", BASES[b].name),
-            Mode::Defend(Some(w)) => format!("Defending {} against {}", HOME_NAME, WAVES[w].name),
-            Mode::Defend(None) => format!("Defending {} against your own army", HOME_NAME),
-        };
+        let title = s.title();
         let defending = matches!(s.mode, Mode::Defend(_));
         self.header(&title, false);
+        // Full view: the map fills the window (F toggles it too).
+        let full_label = if s.full { "Side panel" } else { "Full view" };
+        if self.ui.button(Rect::new(W - 300.0, 10.0, 120.0, 32.0), full_label) || is_key_pressed(KeyCode::F) {
+            s.full = !s.full;
+        }
         let dt = crate::record::dt().min(0.1);
         if s.result.is_none() {
             s.acc += dt * WATCH_TPS * s.speed;
@@ -432,7 +455,7 @@ impl Game {
             }
         }
         self.fx.age(dt);
-        let v = base_view();
+        let v = if s.full { View::new(Rect::new(0.0, 53.0, W, H - 53.0)) } else { base_view() };
         let w = &s.battle.world;
         draw_ground(v, false, true, w);
         let troops = &s.battle.troops;
@@ -454,6 +477,9 @@ impl Game {
         let rx = 754.0;
         let rw = W - rx - 20.0;
         let secs_left = (w.max_ticks - w.tick) as f32 / WATCH_TPS;
+        if s.full {
+            full_hud(w, secs_left, defending);
+        } else {
         text(
             &format!("Time left {:.0}s", secs_left),
             rx,
@@ -570,6 +596,7 @@ impl Game {
                 y += 22.0;
             }
         }
+        }
         if s.result.is_none() {
             let by = H - 80.0;
             for (k, sp) in [1.0f32, 2.0, 4.0].into_iter().enumerate() {
@@ -590,7 +617,7 @@ impl Game {
             }
         } else {
             let (stars, gold, new_best) = s.result.unwrap();
-            let r = Rect::new(rx, H - 290.0, rw, 270.0);
+            let r = Rect::new(rx, H - 350.0, rw, 330.0);
             draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.06, 0.06, 0.09, 0.95));
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, ACCENT);
             let (title, good) = if defending {
@@ -655,6 +682,11 @@ impl Game {
             ) {
                 return Screen::Barracks;
             }
+            // One click: the battle replayed into a video to post.
+            if self.ui.button(Rect::new(r.x + 20.0, r.y + 258.0, r.w - 40.0, 50.0), "Save clip to share") {
+                let back = if defending { Screen::Home(crate::home::HomeState::new(self)) } else { Screen::BattleSetup(SetupState::new(self)) };
+                return s.clip(back);
+            }
             if self.ui.button(
                 Rect::new(r.x + r.w / 2.0 + 10.0, r.y + 196.0, r.w / 2.0 - 30.0, 50.0),
                 if defending {
@@ -709,6 +741,20 @@ impl Game {
         }
         self.store.save_profile(&self.profile);
         (stars, gold, new_stars > 0)
+    }
+}
+
+/// The small overlay in full view: time, destruction and stars.
+fn full_hud(w: &World, secs_left: f32, defending: bool) {
+    let r = Rect::new(16.0, 66.0, 330.0, 92.0);
+    draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.05, 0.05, 0.08, 0.8));
+    text(&format!("{:.0}s left", secs_left), r.x + 14.0, r.y + 28.0, 22.0, TEXT);
+    let dest = w.destruction();
+    let label = if defending { "lost" } else { "destroyed" };
+    text(&format!("{:.0}% {label}", dest * 100.0), r.x + 130.0, r.y + 28.0, 22.0, ACCENT);
+    bar(Rect::new(r.x + 14.0, r.y + 40.0, r.w - 28.0, 10.0), dest, ACCENT);
+    for k in 0..3 {
+        star(r.x + 30.0 + k as f32 * 40.0, r.y + 70.0, 14.0, k < w.stars());
     }
 }
 

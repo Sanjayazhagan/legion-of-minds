@@ -623,6 +623,27 @@ thread_local! {
     static ZOOM: Cell<f32> = const { Cell::new(0.8) };
     /// Camera jolt for this frame (impacts, collapses).
     static SHAKE: Cell<Vec3> = const { Cell::new(Vec3::ZERO) };
+    /// Off-screen picture being drawn instead of the window (battle clips).
+    static TARGET: std::cell::RefCell<Option<RenderTarget>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Draw into `rt` instead of the window until called with `None`. The 2D
+/// camera passed to `set_screen` must draw into the same target.
+pub fn set_target(rt: Option<RenderTarget>) {
+    TARGET.with(|t| *t.borrow_mut() = rt);
+}
+
+fn target() -> Option<RenderTarget> {
+    TARGET.with(|t| t.borrow().clone())
+}
+
+/// Map camera distance (the mouse wheel's zoom), for clips to pick their own.
+pub fn zoom() -> f32 {
+    ZOOM.with(|z| z.get())
+}
+
+pub fn set_zoom(z: f32) {
+    ZOOM.with(|c| c.set(z));
 }
 
 /// Mouse wheel over the map zooms the camera in and out.
@@ -645,7 +666,7 @@ pub fn set_screen(vx: f32, vy: f32, s: f32, cam: &Camera2D) {
             zoom: cam.zoom,
             target: cam.target,
             offset: cam.offset,
-            render_target: None,
+            render_target: cam.render_target.clone(),
             viewport: cam.viewport,
         })
     });
@@ -662,7 +683,10 @@ fn restore_ui_camera() {
 /// Pixel viewport (GL origin bottom-left) for a rect in UI coordinates.
 fn viewport_px(r: Rect) -> (i32, i32, i32, i32) {
     let (vx, vy, s) = SCREEN.with(|c| c.get());
-    let (sh, d) = (screen_height(), screen_dpi_scale());
+    let (sh, d) = match target() {
+        Some(rt) => (rt.texture.height(), 1.0),
+        None => (screen_height(), screen_dpi_scale()),
+    };
     let x = vx + r.x * s;
     let y = sh - (vy + (r.y + r.h) * s);
     // In real pixels (see Ui::begin).
@@ -677,10 +701,19 @@ fn begin_3d(r: Rect, mut cam: Camera3D, clear_depth: bool) {
     }
     cam.viewport = Some(viewport_px(r));
     cam.aspect = Some(r.w / r.h);
+    let rt = target();
+    cam.render_target = rt.clone();
     let mut gl = unsafe { get_internal_gl() };
     gl.flush();
     if clear_depth {
-        gl.quad_context.clear(None, Some(1.0), None);
+        match rt {
+            Some(rt) => {
+                let pass = rt.render_pass.raw_miniquad_id();
+                gl.quad_context.begin_pass(Some(pass), miniquad::PassAction::Clear { color: None, depth: Some(1.0), stencil: None });
+                gl.quad_context.end_render_pass();
+            }
+            None => gl.quad_context.clear(None, Some(1.0), None),
+        }
     }
     set_camera(&cam);
 }
