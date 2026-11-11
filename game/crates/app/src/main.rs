@@ -8,6 +8,7 @@ mod record;
 mod barracks;
 mod battle_screen;
 mod home;
+mod mind_view;
 mod online;
 mod recruit;
 mod render;

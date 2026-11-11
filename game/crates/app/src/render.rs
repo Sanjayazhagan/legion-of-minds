@@ -636,6 +636,11 @@ fn handle_zoom(r: Rect) {
     }
 }
 
+/// The UI letterbox: offset and scale from UI units to window points.
+pub fn screen() -> (f32, f32, f32) {
+    SCREEN.with(|c| c.get())
+}
+
 /// Called by the UI each frame with its letterbox.
 pub fn set_screen(vx: f32, vy: f32, s: f32, cam: &Camera2D) {
     SCREEN.with(|c| c.set((vx, vy, s)));
