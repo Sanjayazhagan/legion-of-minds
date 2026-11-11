@@ -1,0 +1,68 @@
+# New player tour (record with BAG_NEW_PLAYER=1 and an empty BAG_SAVE_DIR).
+wait 2.5
+move 770 485 0.8
+wait 0.6
+click
+wait 2.5
+move 370 643 0.8
+wait 0.5
+click
+wait 2
+move 300 88 0.8
+wait 0.5
+click
+wait 3
+move 1110 748 0.9
+wait 0.5
+click
+wait 3
+move 850 380 0.8
+wait 0.5
+click
+wait 1.2
+move 1000 748 0.8
+wait 0.5
+click
+wait 3
+move 885 742 0.8
+wait 0.4
+click
+wait 21
+wait 20
+move 885 731 0.8
+wait 0.5
+click
+wait 2.5
+move 549 636 0.8
+wait 0.5
+click
+wait 3
+move 1006 707 0.8
+wait 0.5
+click
+wait 13
+move 1040 26 0.8
+wait 0.5
+click
+wait 3
+wait 2
+move 370 310 0.8
+wait 0.5
+click
+wait 3.5
+move 940 288 0.8
+wait 0.5
+click
+wait 3.5
+move 750 310 0.8
+wait 0.5
+click
+wait 3.5
+move 1170 266 0.8
+wait 0.5
+click
+wait 3.5
+move 1170 220 0.8
+wait 0.5
+click
+wait 3

@@ -517,6 +517,7 @@ impl Game {
                     }
                 };
                 text(&sp, rx, y + 142.0, 16.0, MUTED);
+                crate::tour::mark("start_training", Rect::new(rx, y + 74.0, rw, 50.0));
                 if self.ui.button(
                     Rect::new(rx, y + 74.0, rw, 50.0),
                     &format!("Start training (+{})", fmt_steps(s.budget)),
