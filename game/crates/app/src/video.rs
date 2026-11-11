@@ -14,7 +14,7 @@ use std::thread::JoinHandle;
 
 pub const FPS: u32 = 30;
 
-/// One frame: RGBA rows, top row first.
+/// One frame as read back from the GPU: RGBA rows, bottom row first.
 pub struct Frame(pub Vec<u8>);
 
 /// Compresses frames on a background thread and writes the file at `finish`.
@@ -64,12 +64,18 @@ fn bitrate_for(w: u32, h: u32) -> u32 {
 fn encode_all(mut enc: Encoder, rx: Receiver<Frame>, out: &Path, w: u32, h: u32) -> Result<(), String> {
     let (w, h) = (w as usize, h as usize);
     let mut mp4 = Mp4::new(w as u16, h as u16);
+    let mut flipped = vec![0u8; w * h * 4];
     let mut annexb = Vec::new();
     for Frame(rgba) in rx {
         if rgba.len() != w * h * 4 {
             return Err("video: frame has the wrong size".into());
         }
-        let yuv = YUVBuffer::from_rgb8_source(RgbaSliceU8::new(&rgba, (w, h)));
+        // GL hands rows over bottom first.
+        for y in 0..h {
+            let src = &rgba[(h - 1 - y) * w * 4..(h - y) * w * 4];
+            flipped[y * w * 4..(y + 1) * w * 4].copy_from_slice(src);
+        }
+        let yuv = YUVBuffer::from_rgb8_source(RgbaSliceU8::new(&flipped, (w, h)));
         let bits = enc.encode(&yuv).map_err(|e| format!("video encoder: {e}"))?;
         annexb.clear();
         bits.write_vec(&mut annexb);

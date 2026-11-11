@@ -31,6 +31,8 @@ const MIN_TPS: f32 = 9.0;
 const INTRO_SECS: f32 = 0.8;
 const RESULT_SECS: f32 = 2.2;
 const END_CARD_SECS: f32 = 2.0;
+/// In a reel, how long a battle keeps going after the other one has ended.
+const CUT_SECS: f32 = 1.5;
 pub const PITCH: &str = "You don't control your troops. You train their brains.";
 
 #[derive(Clone, Copy, PartialEq)]
@@ -150,7 +152,11 @@ impl ClipState {
         let total: u64 = b.troops.iter().filter(|t| (t.spec.role == Role::Defend) == defending).map(|t| t.steps).sum();
         let n = b.troops.iter().filter(|t| (t.spec.role == Role::Defend) == defending).count();
         let sub = if total > 0 {
-            format!("{} troop{} I trained for {} steps", n, if n == 1 { "" } else { "s" }, fmt_steps(total))
+            if n == 1 {
+                format!("1 troop, {} training steps", fmt_steps(total))
+            } else {
+                format!("{n} troops, {} training steps in all", fmt_steps(total))
+            }
         } else {
             String::new()
         };
@@ -178,16 +184,15 @@ impl ClipState {
     }
 
     fn new(kind: Kind, lanes: Vec<Lane>, remake: Vec<Rc<dyn Fn() -> Battle>>, back: Screen) -> ClipState {
-        // Play fast enough that the longest battle fits.
-        let ticks = remake
-            .iter()
-            .map(|m| {
-                let mut b = m();
-                b.run();
-                b.world.tick
-            })
-            .max()
-            .unwrap_or(1);
+        // Play fast enough that the battle fits. In a reel the clip follows
+        // the shortest battle (the trained troop's, usually): the other one
+        // is cut a moment after it, so nobody watches a blank brain idle.
+        let lens = remake.iter().map(|m| {
+            let mut b = m();
+            b.run();
+            b.world.tick
+        });
+        let ticks = if remake.len() > 1 { lens.min() } else { lens.max() }.unwrap_or(1);
         let tps = (ticks as f32 / MAX_ACTION_SECS).max(MIN_TPS);
         ClipState {
             kind,
@@ -243,9 +248,17 @@ impl ClipState {
         crate::record::set_clip_clock(Some(self.frame));
         let dt = 1.0 / FPS as f32;
         let t = self.secs();
+        let first_end = self.lanes.iter().filter_map(|l| l.ended).min();
+        let cut = first_end.is_some_and(|e| self.frame >= e + (CUT_SECS * FPS as f32) as u64);
         if t >= INTRO_SECS {
             for l in &mut self.lanes {
                 if l.ended.is_some() {
+                    continue;
+                }
+                if cut {
+                    // Still running when the other battle ended a while ago.
+                    l.ended = Some(self.frame);
+                    crate::sfx::play_ui(crate::sfx::Sfx::Defeat);
                     continue;
                 }
                 l.acc += dt * self.tps;
@@ -270,8 +283,8 @@ impl ClipState {
         let rt = self.rt.clone().unwrap();
         let (cw, ch) = self.shape.canvas();
         // Off-screen pictures are stored the other way up from the window,
-        // so unlike the UI camera this one has a positive height (and the
-        // rows read back come top row first, as the video wants them).
+        // so unlike the UI camera this one has a positive height. Rows read
+        // back come bottom row first, like a screenshot.
         let mut cam = Camera2D::from_display_rect(Rect::new(0.0, 0.0, cw, ch));
         cam.render_target = Some(rt.clone());
         cam.viewport = Some((0, 0, (cw * PX) as i32, (ch * PX) as i32));
@@ -378,7 +391,7 @@ impl ClipState {
 fn draw_lane(l: &Lane, r: Rect) {
     // Pull the camera back on narrow maps so the whole arena fits across.
     let aspect = r.w / r.h;
-    crate::render::set_zoom(if aspect < 1.0 { 0.84 / aspect } else { 0.8 });
+    crate::render::set_zoom(if aspect < 1.0 { 0.84 / aspect } else { 0.7 });
     let v = View::new(r);
     draw_ground(v, false, false, &l.battle.world);
     let b = &l.battle;
@@ -528,10 +541,12 @@ fn fit_text(s: &str, cx: f32, y: f32, size: f32, max_w: f32, c: Color) {
 /// destruction), so the reel shows what its training is good for.
 fn best_stage(t: &Troop) -> (usize, (f32, f32)) {
     let c = ARENA / 2.0;
-    let r = DEPLOY_RADIUS + 2.0;
-    let spots: Vec<(f32, f32)> = (0..8)
-        .map(|k| {
-            let a = k as f32 * std::f32::consts::TAU / 8.0 + 0.4;
+    let r = DEPLOY_RADIUS + 1.0;
+    // Only spots on the camera's side of the base, which stay in frame.
+    let spots: Vec<(f32, f32)> = [230.0f32, 250.0, 270.0, 290.0, 310.0]
+        .iter()
+        .map(|deg| {
+            let a = deg.to_radians();
             ((c + r * a.cos()).clamp(1.0, ARENA - 1.0), (c + r * a.sin()).clamp(1.0, ARENA - 1.0))
         })
         .filter(|&(x, y)| godcore::scenario::can_deploy(x, y))
@@ -696,7 +711,8 @@ impl Game {
 impl ClipState {
     /// Frames the finished clip will have (for the progress bar).
     fn estimate_frames(&self) -> u64 {
-        ((INTRO_SECS + self.ticks as f32 / self.tps + RESULT_SECS + END_CARD_SECS) * FPS as f32) as u64
+        let cut = if self.lanes.len() > 1 { CUT_SECS } else { 0.0 };
+        ((INTRO_SECS + self.ticks as f32 / self.tps + cut + RESULT_SECS + END_CARD_SECS) * FPS as f32) as u64
     }
 }
 
