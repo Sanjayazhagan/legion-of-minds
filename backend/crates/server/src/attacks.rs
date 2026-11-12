@@ -9,7 +9,7 @@ use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use bag_protocol::{
-    canonical_army, loot, practice_gold, run_raid, shield_share, starter_layout, trophy_swing,
+    loot, practice_gold, run_raid, shield_share, starter_layout, trophy_swing,
     AttackLog, AttackOutcome, AttackSubmit, BaseSnapshot, Match, Placement, PublicPlayer,
     RaidResult, Replay, User, KIND_PRACTICE, KIND_RAID, KIND_REVENGE, SIM_VERSION,
     League,

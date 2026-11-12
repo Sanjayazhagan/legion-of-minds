@@ -1174,7 +1174,6 @@ impl Game {
                     format!("Up to {} gold to loot", m.max_loot)
                 };
                 text(&offer, mx, mid.y + 122.0, 16.0, MUTED);
-                let names: Vec<&str> = army.iter().map(|(t, _)| t.name.as_str()).collect();
                 let names: Vec<&str> = army
                     .iter()
                     .map(|(t, _)| t.name.as_str())
@@ -1397,7 +1396,7 @@ impl Game {
                     &p.trophies.to_string(),
                     yy,
                     col,
-                    text_width(League::of(p.trophies).name(), 14.0) + 10.0,
+                    0.0,
                 );
                 text(
                     League::of(p.trophies).name(),

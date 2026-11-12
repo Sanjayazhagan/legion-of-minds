@@ -2,7 +2,8 @@
 //! real Postgres (TEST_DATABASE_URL, default postgres://bag:bag@localhost/bag).
 
 use bag_client::bag_protocol::{
-    loot, BaseSnapshot, ClanRole, League, Placement, WarResult, WarState, MAX_LOANS,
+    loot, BaseSnapshot, ClanRole, League, Placement, WarResult, WarState, KIND_PRACTICE,
+    MAX_LOANS,
 };
 use bag_client::{army_spots, defender_spots, snapshot_from, Client, Error};
 use bag_server::config::Config;
@@ -46,6 +47,13 @@ fn config(db: String, public_url: String) -> Config {
         start_gold: 500,
         match_range: 200,
         max_body_bytes: 4 << 20,
+        keep_raids: Duration::from_secs(14 * 86_400),
+        // These tests count league and season gold, so the other rewards are off.
+        defence_reward: 0,
+        defence_rewards_per_day: 5,
+        daily_win_bonus: 0,
+        practice_gold: 0,
+        practice_paid_per_day: 5,
         season: Duration::from_secs(28 * 86_400),
         // Attacks open as soon as a war is made.
         war_prep: Duration::ZERO,
@@ -184,6 +192,7 @@ async fn winning_raids_pay_a_league_bonus() {
         let alice = login(&url, "Alice");
         publish(&db, &alice);
         let bob = login(&url, "Bob");
+        publish(&db, &bob); // raiders need a base of their own
         let b = bob.me().unwrap().id;
         sql(&db, &format!("UPDATE users SET trophies = 1700 WHERE id = '{b}'"));
         let m = bob.find_match().unwrap();
@@ -256,8 +265,16 @@ async fn clans_have_roles_and_chat() {
         let v = alice.create_clan("Pack", "", true).unwrap();
         bob.join_clan(v.clan.id).unwrap();
         publish(&db, &alice);
-        assert_eq!(api_code(bob.find_match()), "no_opponent");
-        assert_eq!(carol.find_match().unwrap().defender.display_name, "Alice");
+        publish(&db, &bob);
+        // Alice is the only base and she is Bob's clanmate, so he is offered
+        // a practice raid, never a real one on her.
+        assert_eq!(bob.find_match().unwrap().kind, KIND_PRACTICE);
+        // Carol is in no clan. Bob is shielded here so the match is Alice.
+        let b = bob.me().unwrap().id;
+        sql(&db, &format!("UPDATE users SET shield_until = now() + interval '1 hour' WHERE id = '{b}'"));
+        publish(&db, &carol);
+        let m = carol.find_match().unwrap();
+        assert_eq!((m.kind.as_str(), m.defender.display_name.as_str()), ("raid", "Alice"));
     })
     .await;
 }
@@ -287,6 +304,7 @@ async fn lent_troops_fight_in_raids() {
         assert_eq!(loans.len(), 1);
         assert_eq!(loans[0].owner.display_name, "Bob");
         let spot = army_spots(4)[3];
+        publish(&db, &alice); // raiders need a base of their own
         let m = alice.find_match().unwrap();
         let (local, out) = alice
             .attack_with(&m, army(), &[(loans[0].clone(), spot)])

@@ -616,13 +616,14 @@ async fn raids_are_rate_limited() {
     blocking(move || {
         let mut bob = Client::new(&url);
         bob.dev_login("Bob").unwrap(); // sign-ins have their own, larger allowance
-        assert_eq!(api_code(bob.find_match()), "no_opponent");
-        assert_eq!(api_code(bob.find_match()), "no_opponent");
+        // Bob has no base yet, so each allowed call is turned away with no_base.
+        assert_eq!(api_code(bob.find_match()), "no_base");
+        assert_eq!(api_code(bob.find_match()), "no_base");
         assert_eq!(api_code(bob.find_match()), "slow_down");
         // Another player on the same address has their own allowance.
         let mut amy = Client::new(&url);
         amy.dev_login("Amy").unwrap();
-        assert_eq!(api_code(amy.find_match()), "no_opponent");
+        assert_eq!(api_code(amy.find_match()), "no_base");
         // Light requests still go through.
         assert_eq!(bob.me().unwrap().display_name, "Bob");
         let r = reqwest::blocking::Client::new()

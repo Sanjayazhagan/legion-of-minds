@@ -436,6 +436,7 @@ pub async fn attack(
         snapshot,
         expires_at: expires.to_rfc3339(),
         max_loot: 0,
+        kind: bag_protocol::KIND_RAID.into(),
     }))
 }
 

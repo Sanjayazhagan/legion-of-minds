@@ -289,8 +289,8 @@ pub struct AttackOutcome {
     pub client_matched: Option<bool>,
     pub trophies: i32,
     pub gold_looted: i64,
-    /// Gold from the server on top of loot: the first win of the day, and
-    /// practice raids.
+    /// Gold from the server on top of loot: the first win of the day, practice
+    /// raids and the league bonus below (which is part of this total).
     #[serde(default)]
     pub bonus_gold: i64,
     /// Extra gold for a win, from the attacker's league.
