@@ -51,6 +51,9 @@ fn config(db: String, public_url: String) -> Config {
         war_prep: Duration::ZERO,
         war_battle: Duration::from_secs(3600),
         war_min_size: 2,
+        requests_per_min: 100_000,
+        heavy_per_min: 100_000,
+        trust_proxy: false,
     }
 }
 

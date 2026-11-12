@@ -42,7 +42,8 @@ async fn main() {
             std::process::exit(1);
         });
     tracing::info!("listening on {}", cfg.bind);
-    axum::serve(listener, router(state))
+    let app = router(state);
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

@@ -1,0 +1,31 @@
+# Pushing a tag like v0.2.0 builds the Windows zip and installer and
+# attaches them to a GitHub Release (what the launch page links to).
+# The online server address comes from the repository variable BAG_SERVER.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Inno Setup
+        run: if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Build zip and installer
+        working-directory: game/installer
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          .\build-installer.ps1 -Server "${{ vars.BAG_SERVER }}" -Version $version
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            game/dist/*.zip
+            game/dist/*-setup.exe
+          generate_release_notes: true

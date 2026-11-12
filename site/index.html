@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Legion of Minds</title>
+<meta name="description" content="Legion of Minds is a strategy game for Windows where every troop is a small AI you train on your own PC, then send to raid.">
+<meta property="og:title" content="Legion of Minds">
+<meta property="og:description" content="Recruit it. Train it. Send it to raid. A strategy game where every troop learns.">
+<meta property="og:image" content="media/hero-poster.jpg">
+<meta name="theme-color" content="#0b0d14">
+<link rel="icon" href="media/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,600;0,800;0,900;1,800;1,900&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap">
+<style>
+:root {
+  --night: #0b0d14;
+  --night-2: #11141e;
+  --panel: #161a26;
+  --line: #262c3d;
+  --gold: #f6b72e;
+  --gold-hot: #ffd36b;
+  --red: #ff4a3d;
+  --sky: #6cc4ff;
+  --text: #eef1f7;
+  --muted: #9ba4b8;
+  --ink: #0b0d14;
+  --display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --body: "Barlow", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  --gut: max(20px, env(safe-area-inset-left, 0px));
+  --gut-r: max(20px, env(safe-area-inset-right, 0px));
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--night); color: var(--text);
+  font: 400 17px/1.6 var(--body); overflow-x: hidden;
+}
+img, video { display: block; max-width: 100%; }
+a { color: inherit; }
+.wrap { max-width: 1240px; margin: 0 auto; padding-left: var(--gut); padding-right: var(--gut-r); }
+h1, h2, h3 { font-family: var(--display); text-transform: uppercase; line-height: .9; margin: 0; text-wrap: balance; }
+h2 { font-style: italic; font-weight: 900; font-size: clamp(44px, 7vw, 92px); letter-spacing: -.01em; }
+h2 em { font-style: italic; color: var(--gold); }
+.kicker { font: 700 13px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--gold); display: flex; align-items: center; gap: 12px; }
+.kicker::before { content: ""; width: 28px; height: 3px; background: var(--gold); transform: skewX(-30deg); }
+.intro { color: var(--muted); max-width: 60ch; font-size: 18px; margin: 0; }
+.skip { position: absolute; left: -999px; top: 8px; background: var(--gold); color: var(--ink); padding: 10px 16px; z-index: 50; }
+.skip:focus { left: 16px; }
+:focus-visible { outline: 3px solid var(--sky); outline-offset: 3px; }
+
+/* Buttons: slanted plates that step on hover and press on click */
+.btn {
+  --bg: transparent; --fg: var(--text);
+  position: relative; display: inline-flex; align-items: center; gap: 10px; min-height: 52px;
+  padding: 0 28px; text-decoration: none; color: var(--fg);
+  font: italic 800 20px/1 var(--display); text-transform: uppercase; letter-spacing: .03em;
+  isolation: isolate; transition: transform .18s var(--ease);
+}
+.btn::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; background: var(--bg);
+  border: 2px solid var(--line); transform: skewX(-14deg); transition: background .18s, border-color .18s, box-shadow .18s;
+}
+.btn:hover { transform: translateY(-2px); }
+.btn:hover::before { border-color: var(--gold); }
+.btn:active { transform: translateY(1px) scale(.98); }
+.btn.go { --bg: var(--gold); --fg: var(--ink); }
+.btn.go::before { border-color: var(--gold); box-shadow: 6px 6px 0 var(--red); }
+.btn.go:hover::before { background: var(--gold-hot); box-shadow: 9px 9px 0 var(--red); }
+.btn.go:active::before { box-shadow: 2px 2px 0 var(--red); }
+.btn svg { width: 20px; height: 20px; }
+
+/* Header */
+header.top {
+  position: absolute; inset: 0 0 auto; z-index: 20;
+  padding-top: env(safe-area-inset-top, 0px);
+}
+header.top .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 18px; }
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font: italic 900 22px/1 var(--display); text-transform: uppercase; letter-spacing: .02em; }
+.brand img { width: 34px; height: 34px; }
+header nav { display: flex; gap: 26px; }
+header nav a { position: relative; text-decoration: none; font: 600 15px/44px var(--body); color: var(--muted); transition: color .15s; }
+header nav a::after { content: ""; position: absolute; left: 0; right: 0; bottom: 8px; height: 2px; background: var(--gold); transform: scaleX(0); transform-origin: left; transition: transform .25s var(--ease); }
+header nav a:hover { color: var(--text); }
+header nav a:hover::after { transform: scaleX(1); }
+
+/* Hero */
+.hero { position: relative; min-height: 100vh; min-height: 100svh; display: grid; align-items: center; overflow: hidden; padding-block: 96px 48px; }
+.hero::before { /* speed lines */
+  content: ""; position: absolute; inset: -20% -10%; z-index: 0; pointer-events: none;
+  background: repeating-linear-gradient(-62deg, transparent 0 46px, rgba(255,255,255,.025) 46px 48px);
+}
+.slash { position: absolute; z-index: 0; height: 26px; transform: skewX(-38deg); pointer-events: none; }
+.slash.s1 { width: 58vw; right: -6vw; top: 22%; background: var(--gold); }
+.slash.s2 { width: 34vw; right: -4vw; top: calc(22% + 40px); background: var(--red); height: 12px; }
+.slash.s3 { width: 22vw; left: -4vw; bottom: 12%; background: var(--sky); height: 8px; opacity: .8; }
+.hero .wrap { position: relative; z-index: 1; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 40px; align-items: center; width: 100%; }
+.hero-copy { min-width: 0; display: grid; gap: 22px; }
+.status { display: inline-flex; align-items: center; gap: 10px; justify-self: start; padding: 8px 14px; border: 1px solid var(--line); background: var(--night-2); font: 700 12px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+.status i { width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 0 var(--red); animation: live 1.6s infinite; }
+@keyframes live { 70% { box-shadow: 0 0 0 8px rgba(255,74,61,0); } 100% { box-shadow: 0 0 0 0 rgba(255,74,61,0); } }
+h1 { font-style: italic; font-weight: 900; font-size: clamp(76px, 9.6vw, 138px); letter-spacing: -.02em; line-height: .82; }
+h1 .l { display: block; }
+h1 .out { color: transparent; -webkit-text-stroke: 2px var(--text); }
+h1 .gold { color: var(--gold); }
+.hero .lede { font-size: clamp(18px, 1.7vw, 21px); max-width: 34ch; margin: 0; color: #d3d8e4; }
+.hero .lede b { color: var(--text); }
+.actions { display: flex; flex-wrap: wrap; gap: 18px 26px; align-items: center; }
+.fine { font: 500 13px/1.5 var(--mono); color: var(--muted); margin: 0; }
+
+.stage { position: relative; min-width: 0; }
+.frame {
+  position: relative; aspect-ratio: 1; width: 100%; max-width: 620px; margin-left: auto;
+  clip-path: polygon(12% 0, 100% 0, 88% 100%, 0 100%); background: #1c2a14;
+}
+.frame video, .frame img { width: 100%; height: 100%; object-fit: cover; transform: scale(1.06); }
+.frame::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, transparent 55%, rgba(11,13,20,.55)); pointer-events: none; }
+.stage .num {
+  position: absolute; z-index: -1; right: -2%; top: -14%; font: italic 900 clamp(160px, 22vw, 330px)/1 var(--display);
+  color: transparent; -webkit-text-stroke: 2px rgba(246,183,46,.22); pointer-events: none;
+}
+.hud { position: absolute; left: 6%; bottom: 7%; display: flex; gap: 8px; z-index: 2; }
+.hud span { background: var(--ink); border-left: 4px solid var(--gold); padding: 8px 12px; font: 700 12px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+.hud span:nth-child(2) { border-color: var(--red); }
+
+.stats { display: flex; flex-wrap: wrap; gap: 0; border-top: 1px solid var(--line); padding-top: 22px; }
+.stats div { padding-right: 28px; margin-right: 28px; border-right: 1px solid var(--line); }
+.stats div:last-child { border: 0; margin: 0; padding: 0; }
+.stats b { display: block; font: italic 900 44px/1 var(--display); color: var(--text); }
+.stats span { font: 600 12px/1.4 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+
+/* Hero entrance, once on load */
+.js [data-in] { opacity: 0; }
+.js.ready [data-in] { animation: inL .8s var(--ease) both; animation-delay: calc(var(--d, 0) * 90ms + 80ms); }
+.js.ready .frame[data-in] { animation: wipe 1s var(--ease) both .25s; }
+.js.ready .slash { animation: dash .9s var(--ease) both; }
+.js.ready .slash.s2 { animation-delay: .12s; }
+.js.ready .slash.s3 { animation-delay: .3s; }
+@keyframes inL { from { opacity: 0; transform: translateX(-48px) skewX(-8deg); } to { opacity: 1; transform: none; } }
+@keyframes wipe { from { opacity: 1; clip-path: polygon(12% 0, 12% 0, 0 100%, 0 100%); } to { opacity: 1; clip-path: polygon(12% 0, 100% 0, 88% 100%, 0 100%); } }
+@keyframes dash { from { transform: translateX(110%) skewX(-38deg); } to { transform: skewX(-38deg); } }
+
+/* Marquee band */
+.band { position: relative; background: var(--gold); color: var(--ink); transform: skewY(-2.5deg); margin-block: 30px; border-block: 4px solid var(--ink); box-shadow: 0 8px 0 var(--red); }
+.band-row { display: flex; overflow: hidden; padding-block: 14px; }
+.band-track { display: flex; flex-shrink: 0; gap: 0; animation: roll 38s linear infinite; }
+.band-track span { font: italic 900 clamp(34px, 5vw, 60px)/1 var(--display); text-transform: uppercase; white-space: nowrap; padding-right: 36px; }
+.band-track span:nth-child(even) { color: transparent; -webkit-text-stroke: 2px var(--ink); }
+.band.paused .band-track { animation-play-state: paused; }
+@keyframes roll { to { transform: translateX(-100%); } }
+.band-toggle { position: absolute; right: var(--gut-r); top: 50%; transform: translateY(-50%) skewY(2.5deg); z-index: 2; width: 44px; height: 44px; border: 2px solid var(--ink); background: var(--gold); color: var(--ink); cursor: pointer; display: grid; place-items: center; }
+.band-toggle:hover { background: var(--gold-hot); }
+.band-toggle svg { width: 16px; height: 16px; }
+
+section.sec { padding-block: clamp(80px, 11vw, 140px); }
+.head { display: grid; gap: 22px; margin-bottom: 52px; }
+
+/* The loop */
+.plays { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
+.play { position: relative; background: var(--panel); border: 1px solid var(--line); transition: transform .2s var(--ease), border-color .2s; min-width: 0; }
+.play:hover { transform: translateY(-2px); border-color: var(--gold); }
+.play .pic { overflow: hidden; aspect-ratio: 4/3; clip-path: polygon(0 0, 100% 0, 100% 86%, 0 100%); }
+.play .pic img { width: 100%; height: 100%; object-fit: cover; object-position: left top; transition: transform .5s var(--ease); }
+.play:hover .pic img { transform: scale(1.03); }
+.play .body { padding: 6px 22px 26px; }
+.play { container-type: inline-size; }
+.play .n { position: absolute; right: 14px; top: calc(75cqw - 50px); font: italic 900 64px/1 var(--display); color: var(--gold); -webkit-text-stroke: 3px var(--night); paint-order: stroke fill; }
+.play h3 { font-style: italic; font-weight: 900; font-size: 40px; margin: 6px 0 10px; }
+.play p { margin: 0; color: var(--muted); font-size: 16px; }
+
+/* Training scoreboard */
+.camp { background: var(--night-2); border-block: 1px solid var(--line); position: relative; overflow: hidden; }
+.camp::before { content: "3.5M"; position: absolute; right: -2vw; bottom: -6vw; font: italic 900 clamp(160px, 30vw, 420px)/1 var(--display); color: transparent; -webkit-text-stroke: 2px rgba(255,255,255,.05); pointer-events: none; }
+.camp .wrap { position: relative; display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 56px; align-items: center; }
+.board { background: var(--night); border: 1px solid var(--line); padding: 10px 0; box-shadow: 14px 14px 0 rgba(246,183,46,.12); }
+.board-head { display: flex; justify-content: space-between; padding: 12px 24px 14px; border-bottom: 1px solid var(--line); font: 700 12px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.row { display: grid; grid-template-columns: 74px minmax(0, 1fr) 96px; align-items: center; gap: 18px; padding: 14px 24px; border-bottom: 1px solid rgba(38,44,61,.6); }
+.row:last-child { border: 0; }
+.row .lv { font: italic 900 30px/1 var(--display); }
+.row .lv small { font-size: 15px; color: var(--muted); margin-right: 4px; }
+.bar { height: 14px; background: var(--panel); transform: skewX(-20deg); overflow: hidden; }
+.bar i { display: block; height: 100%; width: var(--w); background: linear-gradient(90deg, var(--sky), var(--gold)); transform-origin: left; }
+.row.top .bar i { background: linear-gradient(90deg, var(--gold), var(--red)); }
+.js .board:not(.on) .bar i { transform: scaleX(0); }
+.js .board.on .bar i { transition: transform 1.1s var(--ease) calc(var(--i) * 110ms); }
+.steps { text-align: right; font: 700 22px/1 var(--mono); display: flex; justify-content: flex-end; }
+.digit { display: inline-block; height: 1em; overflow: hidden; line-height: 1; }
+.digit > span { display: flex; flex-direction: column; transition: transform 1.2s var(--ease); }
+.board-foot { padding: 14px 24px 6px; font: 500 13px/1.5 var(--mono); color: var(--muted); }
+
+/* Roster */
+.roster-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px 56px; align-items: end; margin-bottom: 44px; }
+.blend { position: relative; background: var(--panel); border-left: 6px solid var(--gold); padding: 22px 26px; font: 500 15px/1.8 var(--mono); }
+.blend b { color: var(--gold); font-weight: 700; }
+.blend .eq { color: var(--muted); }
+.side { font: 700 13px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; margin: 0 0 14px; display: flex; gap: 10px; align-items: center; }
+.side.atk { color: var(--red); }
+.side.def { color: var(--sky); }
+.cards { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 30px; }
+.cards.def { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.card {
+  position: relative; background: var(--panel); border: 1px solid var(--line); padding: 18px 16px 18px; min-height: 150px;
+  display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; transition: transform .2s var(--ease), border-color .2s;
+}
+.card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; background: var(--red); }
+.cards.def .card::before { background: var(--sky); }
+.card:hover { transform: translateY(-2px); border-color: var(--muted); }
+.card .no { position: absolute; right: 8px; top: 2px; font: italic 900 64px/1 var(--display); color: rgba(255,255,255,.06); }
+.card h3 { font-style: italic; font-weight: 900; font-size: 30px; }
+.card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.4; }
+
+/* Screens */
+.shots { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 14px; }
+.shot { overflow: hidden; border: 1px solid var(--line); background: var(--panel); min-width: 0; }
+.shot img { width: 100%; height: 100%; object-fit: cover; object-position: left top; transition: transform .5s var(--ease); }
+.shot:hover img { transform: scale(1.03); }
+.shot:nth-child(1) { grid-column: span 4; grid-row: span 2; }
+.shot:nth-child(2), .shot:nth-child(3) { grid-column: span 2; }
+.shot:nth-child(4), .shot:nth-child(5), .shot:nth-child(6) { grid-column: span 2; aspect-ratio: 16/10; }
+
+/* Fair play */
+.fair { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; border-top: 4px solid var(--gold); }
+.fair > div { padding: 30px 30px 10px 0; min-width: 0; }
+.fair > div + div { padding-left: 30px; border-left: 1px solid var(--line); }
+.fair .big { font: italic 900 72px/1 var(--display); color: var(--gold); }
+.fair h3 { font-style: italic; font-weight: 800; font-size: 30px; margin: 10px 0 10px; }
+.fair p { margin: 0; color: var(--muted); }
+
+/* Close */
+.close { position: relative; overflow: hidden; background: var(--gold); color: var(--ink); clip-path: polygon(0 6vw, 100% 0, 100% 100%, 0 100%); padding-block: calc(6vw + 90px) 90px; }
+.close::before { content: ""; position: absolute; inset: 0; background: repeating-linear-gradient(-62deg, transparent 0 40px, rgba(11,13,20,.06) 40px 44px); }
+.close .wrap { position: relative; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 48px; align-items: start; }
+.close h2 { font-size: clamp(56px, 9vw, 130px); }
+.close h2 span { display: block; color: transparent; -webkit-text-stroke: 2px var(--ink); }
+.close .intro { color: #2b2410; margin-top: 22px; }
+.close .intro code { font: 600 14px var(--mono); }
+.close .actions { margin-top: 30px; }
+.close .btn.go { --bg: var(--ink); --fg: var(--gold); }
+.close .btn.go::before { border-color: var(--ink); }
+.close .btn.go:hover::before { background: #1c2030; }
+.close .btn.ghost { --fg: var(--ink); }
+.close .btn.ghost::before { border-color: var(--ink); }
+.specs { width: 100%; border-collapse: collapse; font-size: 15px; }
+.specs th, .specs td { text-align: left; vertical-align: top; padding: 13px 0; border-bottom: 2px solid rgba(11,13,20,.18); }
+.specs th { font: 700 12px/1.6 var(--mono); letter-spacing: .12em; text-transform: uppercase; width: 34%; padding-right: 16px; }
+.specs code { font: 600 13px var(--mono); }
+
+footer { background: var(--ink); }
+footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding-block: 26px calc(26px + env(safe-area-inset-bottom, 0px)); font: 500 13px/1.6 var(--mono); color: var(--muted); }
+footer a { color: var(--text); }
+
+@media (max-width: 1000px) {
+  .hero .wrap, .camp .wrap, .roster-top, .close .wrap { grid-template-columns: minmax(0, 1fr); }
+  .stage { max-width: 560px; }
+  .plays { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .cards.def { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  header nav { display: none; }
+  .hero { padding-top: 96px; }
+  .shots { grid-template-columns: minmax(0, 1fr); }
+  .shot:nth-child(n) { grid-column: auto; grid-row: auto; aspect-ratio: 16/10; }
+  .fair { grid-template-columns: minmax(0, 1fr); }
+  .fair > div + div { padding-left: 0; border-left: 0; border-top: 1px solid var(--line); }
+  .stats div { padding-right: 18px; margin-right: 18px; }
+  .stats b { font-size: 36px; }
+}
+@media (max-width: 520px) {
+  .plays { grid-template-columns: minmax(0, 1fr); }
+  .cards, .cards.def { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .row { grid-template-columns: 56px minmax(0, 1fr) 76px; gap: 12px; padding-inline: 16px; }
+  .steps { font-size: 17px; }
+  .actions .btn { width: 100%; justify-content: center; }
+  h1 .out { -webkit-text-stroke-width: 1.5px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .js [data-in] { opacity: 1; }
+  .js .board:not(.on) .bar i { transform: none; }
+  html { scroll-behavior: auto; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="media/icon.png" alt="">Legion of Minds</a>
+    <nav aria-label="Sections">
+      <a href="#loop">How it plays</a>
+      <a href="#camp">Training</a>
+      <a href="#roster">Classes</a>
+      <a href="#download">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero" id="top">
+    <div class="slash s1" aria-hidden="true"></div>
+    <div class="slash s2" aria-hidden="true"></div>
+    <div class="wrap">
+      <div class="hero-copy">
+        <span class="status" data-in style="--d:0"><i></i>Early access · Free on Windows</span>
+        <h1 data-in style="--d:1"><span class="l">Legion</span><span class="l out">of</span><span class="l gold">Minds</span></h1>
+        <p class="lede" data-in style="--d:2">A strategy game where every troop is a small AI. <b>You don't control them in battle. You coach them.</b> Recruit, train on your own PC, then send them to raid.</p>
+        <div class="actions" data-in style="--d:3">
+          <a class="btn go" href="https://github.com/Sanjayazhagan/legion-of-minds/releases/latest"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>Download for Windows</a>
+          <a class="btn" href="#loop">See how it plays</a>
+        </div>
+        <div class="stats" data-in style="--d:4">
+          <div><b>11</b><span>classes</span></div>
+          <div><b>7</b><span>weapons</span></div>
+          <div><b>3.5M</b><span>steps of training</span></div>
+        </div>
+      </div>
+      <div class="stage">
+        <div class="frame" data-in>
+          <video src="media/hero.mp4" poster="media/hero-poster.jpg" autoplay muted loop playsinline aria-label="Four trained troops storm a fort and win three stars"></video>
+        </div>
+        <div class="hud" data-in style="--d:5" aria-hidden="true"><span>Real footage</span><span>No player input</span></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="band" id="band">
+    <div class="band-row" aria-hidden="true">
+      <div class="band-track"><span>Fighter</span><span>Archer</span><span>Healer</span><span>Mage</span><span>Assassin</span><span>Paladin</span><span>Guard</span><span>Sentry</span><span>Keeper</span><span>Warlock</span><span>Hunter</span></div>
+      <div class="band-track"><span>Fighter</span><span>Archer</span><span>Healer</span><span>Mage</span><span>Assassin</span><span>Paladin</span><span>Guard</span><span>Sentry</span><span>Keeper</span><span>Warlock</span><span>Hunter</span></div>
+    </div>
+    <button class="band-toggle" type="button" aria-pressed="false" aria-label="Pause the moving class names">
+      <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="3" y="2" width="3.5" height="12"/><rect x="9.5" y="2" width="3.5" height="12"/></svg>
+    </button>
+  </div>
+
+  <section class="sec" id="loop">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker">How it plays</span>
+        <h2>Four moves. <em>One season.</em></h2>
+        <p class="intro">There's no unit micro. Each troop is a neural network that learns from thousands of practice drills, so how it fights comes down to how you trained it.</p>
+      </div>
+      <div class="plays">
+        <article class="play"><div class="pic"><img src="media/recruit.jpg" alt="Recruit screen with class percentage sliders" loading="lazy"></div><span class="n">01</span><div class="body"><h3>Recruit</h3><p>Blend classes by percentage, like Mage 50, Healer 30, Fighter 20, and pick what its training rewards.</p></div></article>
+        <article class="play"><div class="pic"><img src="media/train.jpg" alt="Training screen showing a live drill" loading="lazy"></div><span class="n">02</span><div class="body"><h3>Train</h3><p>Give it a budget of practice steps and watch the newest brain play live drills as its win rate climbs.</p></div></article>
+        <article class="play"><div class="pic"><img src="media/battle.jpg" alt="A raid on a fort with three stars earned" loading="lazy"></div><span class="n">03</span><div class="body"><h3>Raid</h3><p>Place up to five troops and press Fight. Stars come at 50%, at the Town Hall, and at 100%.</p></div></article>
+        <article class="play"><div class="pic"><img src="media/team.jpg" alt="Team training with squad calls" loading="lazy"></div><span class="n">04</span><div class="body"><h3>Defend</h3><p>Train defenders, build towers and publish your base. Other players raid it while you're away.</p></div></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec camp" id="camp">
+    <div class="wrap">
+      <div class="head" style="margin:0">
+        <span class="kicker">Training camp</span>
+        <h2>More reps. <em>Smarter troops.</em></h2>
+        <p class="intro">Each level raises how many practice steps a troop can learn from. Levelling costs gold, and your Town Hall sets the cap. Bigger brains, from 64 to 256 neurons a layer, learn more but train slower.</p>
+      </div>
+      <div class="board" id="board">
+        <div class="board-head"><span>Level</span><span>Training cap</span></div>
+        <div class="row" style="--i:0"><span class="lv"><small>L</small>1</span><div class="bar"><i style="--w:8.6%"></i></div><span class="steps" data-v="300K">300K</span></div>
+        <div class="row" style="--i:1"><span class="lv"><small>L</small>2</span><div class="bar"><i style="--w:17.1%"></i></div><span class="steps" data-v="600K">600K</span></div>
+        <div class="row" style="--i:2"><span class="lv"><small>L</small>3</span><div class="bar"><i style="--w:34.3%"></i></div><span class="steps" data-v="1.2M">1.2M</span></div>
+        <div class="row" style="--i:3"><span class="lv"><small>L</small>4</span><div class="bar"><i style="--w:57.1%"></i></div><span class="steps" data-v="2.0M">2.0M</span></div>
+        <div class="row top" style="--i:4"><span class="lv"><small>L</small>5</span><div class="bar"><i style="--w:100%"></i></div><span class="steps" data-v="3.5M">3.5M</span></div>
+        <div class="board-foot">Steps of practice a troop can learn from at each level.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="roster">
+    <div class="wrap">
+      <div class="roster-top">
+        <div class="head" style="margin:0">
+          <span class="kicker">The roster</span>
+          <h2>Eleven classes. <em>Endless blends.</em></h2>
+          <p class="intro">Pick one class or mix several. The blend sets the stats, the gear on its back and what its drills reward. Train the same blend two ways and you get two different troops.</p>
+        </div>
+        <div class="blend">Mage 50% + Healer 30% + Fighter 20%<br><span class="eq">=</span> <b>Holy Sorcerer of Iron Arts</b><br><span class="eq">splash spells, a heal, a solid frame</span></div>
+      </div>
+      <p class="side atk">Attackers</p>
+      <div class="cards">
+        <div class="card"><span class="no">01</span><h3>Fighter</h3><p>Tough melee</p></div>
+        <div class="card"><span class="no">02</span><h3>Archer</h3><p>Ranged shots</p></div>
+        <div class="card"><span class="no">03</span><h3>Healer</h3><p>Keeps allies up</p></div>
+        <div class="card"><span class="no">04</span><h3>Mage</h3><p>Splash spells</p></div>
+        <div class="card"><span class="no">05</span><h3>Assassin</h3><p>Fast and fragile</p></div>
+        <div class="card"><span class="no">06</span><h3>Paladin</h3><p>Armoured tank</p></div>
+      </div>
+      <p class="side def">Defenders</p>
+      <div class="cards def">
+        <div class="card"><span class="no">07</span><h3>Guard</h3><p>Holds the line</p></div>
+        <div class="card"><span class="no">08</span><h3>Sentry</h3><p>Long range</p></div>
+        <div class="card"><span class="no">09</span><h3>Keeper</h3><p>Heals the walls</p></div>
+        <div class="card"><span class="no">10</span><h3>Warlock</h3><p>Splash curses</p></div>
+        <div class="card"><span class="no">11</span><h3>Hunter</h3><p>Fast chaser</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="screens" style="padding-top:0">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker">Inside the game</span>
+        <h2>Build the base. <em>Run the squad.</em></h2>
+        <p class="intro">Seven weapons with their own skills, squads that learn to call targets to each other, tournaments, and a home base to build.</p>
+      </div>
+      <div class="shots">
+        <div class="shot"><img src="media/barracks.jpg" alt="Barracks with the troop roster, levels and skills" loading="lazy"></div>
+        <div class="shot"><img src="media/armoury.jpg" alt="Armoury with seven weapons" loading="lazy"></div>
+        <div class="shot"><img src="media/train.jpg" alt="A training drill in progress" loading="lazy"></div>
+        <div class="shot"><img src="media/recruit.jpg" alt="Recruiting a blended class" loading="lazy"></div>
+        <div class="shot"><img src="media/battle.jpg" alt="Three-star raid result" loading="lazy"></div>
+        <div class="shot"><img src="media/team.jpg" alt="Team training session" loading="lazy"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="fair" style="padding-top:0">
+    <div class="wrap">
+      <div class="head">
+        <span class="kicker">Fair play</span>
+        <h2>No faked wins. <em>No cloud.</em></h2>
+      </div>
+      <div class="fair">
+        <div><div class="big">100%</div><h3>Of online raids re-checked</h3><p>Battles replay the same on every computer, so the server re-runs each online raid itself. A faked win doesn't count.</p></div>
+        <div><div class="big">0</div><h3>Cloud training</h3><p>Your processor does the learning, or your graphics card for big brains. Your troops are yours.</p></div>
+        <div><div class="big">4</div><h3>Offline bases to beat</h3><p>Outpost, Fort, Twin Gate and Citadel, plus raid waves and tournaments, all without an account. Sign in with Google or Discord to raid players.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="close" id="download">
+    <div class="wrap">
+      <div>
+        <h2>Train them.<span>Then let go.</span></h2>
+        <p class="intro">The installer puts the game in your user folder, so it never asks for admin rights. Saves stay in <code>%APPDATA%\legion-of-minds</code> through updates.</p>
+        <div class="actions">
+          <a class="btn go" href="https://github.com/Sanjayazhagan/legion-of-minds/releases/latest"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>Download for Windows</a>
+          <a class="btn ghost" href="https://github.com/Sanjayazhagan/legion-of-minds">View the source</a>
+        </div>
+      </div>
+      <table class="specs">
+        <tr><th scope="row">System</th><td>Windows 10 or 11, 64-bit</td></tr>
+        <tr><th scope="row">Graphics</th><td>Any chip with OpenGL 3. A graphics card speeds up training big brains but isn't required.</td></tr>
+        <tr><th scope="row">Processor</th><td>More cores train faster. Battles always run on the processor.</td></tr>
+        <tr><th scope="row">Disk</th><td>About 40 MB, plus about 250 KB per saved troop</td></tr>
+        <tr><th scope="row">Mac, Linux</th><td>Build from source: <code>cargo run --release -p legion-of-minds</code></td></tr>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Legion of Minds</span>
+    <span>3D characters and buildings by <a href="https://kaylousberg.com">Kay Lousberg</a> (KayKit, CC0)</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  root.classList.add('js');
+  requestAnimationFrame(function () { root.classList.add('ready'); });
+
+  // Marquee pause button
+  var band = document.getElementById('band');
+  var tog = band.querySelector('.band-toggle');
+  var play = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 2l10 6-10 6z"/></svg>';
+  var pause = tog.innerHTML;
+  tog.addEventListener('click', function () {
+    var p = band.classList.toggle('paused');
+    tog.setAttribute('aria-pressed', p);
+    tog.setAttribute('aria-label', p ? 'Play the moving class names' : 'Pause the moving class names');
+    tog.innerHTML = p ? play : pause;
+  });
+  if (still) { band.classList.add('paused'); tog.hidden = true; }
+
+  // Scoreboard: bars fill and digits roll once when it comes on screen
+  var board = document.getElementById('board');
+  if (still || !('IntersectionObserver' in window)) { board.classList.add('on'); return; }
+  var reels = [];
+  board.querySelectorAll('.steps').forEach(function (el) {
+    var v = el.dataset.v; el.textContent = '';
+    el.setAttribute('aria-label', v);
+    v.split('').forEach(function (ch, k) {
+      if (!/[0-9]/.test(ch)) { var s = document.createElement('span'); s.textContent = ch; s.setAttribute('aria-hidden', 'true'); el.appendChild(s); return; }
+      var d = document.createElement('span'); d.className = 'digit'; d.setAttribute('aria-hidden', 'true');
+      var col = document.createElement('span');
+      var spins = 10 * (1 + k % 2);
+      for (var n = 0; n <= spins; n++) { var c = document.createElement('span'); c.textContent = (+ch + n) % 10; col.appendChild(c); }
+      d.appendChild(col); el.appendChild(d);
+      reels.push([col, spins]);
+    });
+  });
+  var io = new IntersectionObserver(function (es) {
+    if (!es[0].isIntersecting) return;
+    io.disconnect();
+    board.classList.add('on');
+    reels.forEach(function (r) { r[0].style.transform = 'translateY(-' + r[1] + 'em)'; });
+  }, { threshold: 0.45 });
+  io.observe(board);
+})();
+</script>
+</body>
+</html>
