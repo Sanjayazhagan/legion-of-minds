@@ -12,6 +12,7 @@ mod barracks;
 mod battle_screen;
 mod clan;
 mod home;
+mod mind_view;
 mod online;
 mod recruit;
 mod render;
