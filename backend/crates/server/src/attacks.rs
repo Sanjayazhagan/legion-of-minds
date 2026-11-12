@@ -12,6 +12,7 @@ use bag_protocol::{
     canonical_army, loot, practice_gold, run_raid, shield_share, starter_layout, trophy_swing,
     AttackLog, AttackOutcome, AttackSubmit, BaseSnapshot, Match, Placement, PublicPlayer,
     RaidResult, Replay, User, KIND_PRACTICE, KIND_RAID, KIND_REVENGE, SIM_VERSION,
+    League,
 };
 use sqlx::{Postgres, Transaction};
 use chrono::{DateTime, Utc};
@@ -139,6 +140,9 @@ pub async fn find_match(
              WHERE u.id <> $1 AND NOT u.is_bot
                AND (u.shield_until IS NULL OR u.shield_until < now())
                AND abs(u.trophies::bigint - $2::bigint) <= $3::bigint
+               AND NOT EXISTS (SELECT 1 FROM clan_members mine JOIN clan_members theirs
+                               ON theirs.clan_id = mine.clan_id
+                               WHERE mine.user_id = $1 AND theirs.user_id = u.id)
                AND NOT EXISTS (SELECT 1 FROM attacks a WHERE a.defender_id = u.id
                                AND a.kind <> 'practice'
                                AND a.status = 'pending' AND a.expires_at > now())
@@ -258,8 +262,7 @@ pub async fn submit(
         ));
     }
     let me = load_user(&st.db, user.id).await?;
-    let army = canonical_army(&req.army, me.upgrades.town_hall)?;
-    me.upgrades.check(&army)?;
+    let army = crate::clans::raid_army(&st.db, &me, &req).await?;
     let snapshot: BaseSnapshot = parse(&data)?;
 
     let (result, army) = {
@@ -309,6 +312,7 @@ pub async fn submit(
     let mut att_new = att_trophies;
     let mut gold = 0;
     let mut bonus = 0;
+    let mut league_bonus = 0;
     let mut defence_reward = 0;
     if practice {
         // A little gold from the server, for the first few each day.
@@ -327,6 +331,8 @@ pub async fn submit(
         let swing = trophy_swing(result.stars);
         // Nobody drops below zero, so the real change can differ per side.
         att_new = (att_trophies + swing).max(0);
+        league_bonus = League::of(att_trophies).win_bonus(result.stars);
+        bonus += league_bonus;
         let def_new = (def_trophies - swing).max(0);
         gold = loot(def_gold, result.destruction);
         let shield = (result.stars > 0).then(|| {
@@ -410,6 +416,7 @@ pub async fn submit(
         trophies: att_new - att_trophies,
         gold_looted: gold,
         bonus_gold: bonus,
+        league_bonus,
         client_matched,
         result,
         attacker: load_user(&st.db, user.id).await?,

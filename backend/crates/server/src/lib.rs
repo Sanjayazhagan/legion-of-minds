@@ -5,14 +5,21 @@
 //! - `attacks`: matchmaking, server-checked raids, battle log, replays
 //! - `shop`: Town Hall, weapons and troop levels bought with online gold
 //! - `cup`: the weekly cup, one troop per player, paid in gold
+//! - `league`: seasons (leagues come from trophies)
+//! - `clans`: clans, chat and troops lent to clanmates
+//! - `wars`: clan wars
 
 pub mod attacks;
 pub mod auth;
+pub mod clans;
 pub mod config;
 pub mod cup;
 pub mod error;
+pub mod league;
 pub mod players;
+pub mod ratelimit;
 pub mod shop;
+pub mod wars;
 
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -31,6 +38,7 @@ pub struct AppState {
     pub db: PgPool,
     pub cfg: Arc<Config>,
     pub http: reqwest::Client,
+    pub limiter: Arc<ratelimit::Limiter>,
 }
 
 impl AppState {
@@ -43,6 +51,7 @@ impl AppState {
                 .user_agent("legion-of-minds-server")
                 .build()
                 .expect("http client"),
+            limiter: Default::default(),
         }
     }
 }
@@ -90,10 +99,40 @@ pub fn router(st: AppState) -> Router {
         .route("/v1/cup", get(cup::standings))
         .route("/v1/cup/entry", post(cup::enter))
         .route("/v1/cup/{week}/{player}", get(cup::entry))
+        .route("/v1/season", get(league::get_season))
+        .route("/v1/me/seasons", get(league::my_seasons))
+        .route("/v1/clans", get(clans::list).post(clans::create))
+        .route("/v1/leaderboard/clans", get(clans::list))
+        .route("/v1/clans/{id}", get(clans::get))
+        .route("/v1/clans/{id}/join", post(clans::join))
+        .route("/v1/me/clan", get(clans::mine))
+        .route("/v1/me/clan/leave", post(clans::leave))
+        .route("/v1/me/clan/members/{id}/kick", post(clans::kick))
+        .route("/v1/me/clan/members/{id}/promote", post(clans::promote))
+        .route("/v1/me/clan/chat", get(clans::chat).post(clans::post_chat))
+        .route("/v1/me/clan/loans", get(clans::loans).put(clans::lend))
+        .route("/v1/me/clan/my-loans", get(clans::my_loans))
+        .route("/v1/me/clan/war", get(wars::current))
+        .route(
+            "/v1/me/clan/war/search",
+            post(wars::search).delete(wars::cancel_search),
+        )
+        .route("/v1/me/clan/war/targets/{id}", post(wars::attack))
+        .route("/v1/war-attacks/{id}", post(wars::submit))
+        .layer(axum::middleware::from_fn_with_state(st.clone(), ratelimit::limit))
         .layer(RequestBodyLimitLayer::new(limit))
         .layer(axum::extract::DefaultBodyLimit::max(limit))
         .layer(TraceLayer::new_for_http())
         .with_state(st)
+}
+
+/// Background work, every few minutes: close a finished season, score
+/// finished wars, then `cleanup`.
+pub async fn tick(st: &AppState) -> Result<(), String> {
+    league::current(&st.db, st.cfg.season).await.map_err(|e| e.message)?;
+    league::roll(&st.db, st.cfg.season).await.map_err(|e| e.to_string())?;
+    wars::settle(&st.db).await.map_err(|e| e.message)?;
+    cleanup(&st.db, st.cfg.keep_raids).await.map_err(|e| e.to_string())
 }
 
 /// Delete expired sessions and sign-ins, close timed-out raids, forget raids
@@ -131,7 +170,8 @@ pub async fn cleanup(db: &PgPool, keep_raids: Duration) -> Result<(), sqlx::Erro
     sqlx::query(
         "DELETE FROM snapshots s
          WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.current_snapshot = s.id)
-           AND NOT EXISTS (SELECT 1 FROM attacks a WHERE a.snapshot_id = s.id)",
+           AND NOT EXISTS (SELECT 1 FROM attacks a WHERE a.snapshot_id = s.id)
+           AND NOT EXISTS (SELECT 1 FROM war_bases b WHERE b.snapshot_id = s.id)",
     )
     .execute(db)
     .await?;

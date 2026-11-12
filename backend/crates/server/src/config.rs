@@ -79,6 +79,21 @@ pub struct Config {
     /// how many practice raids pay in 24 hours.
     pub practice_gold: i64,
     pub practice_paid_per_day: i64,
+    /// How long a season lasts.
+    pub season: Duration,
+    /// Time between a war being matched and attacks opening.
+    pub war_prep: Duration,
+    /// How long war attacks stay open.
+    pub war_battle: Duration,
+    /// Members with a published base a clan needs to start a war.
+    pub war_min_size: usize,
+    /// Requests a minute per client address, and for raids, publishing and
+    /// sign-ins (which cost the server more).
+    pub requests_per_min: u32,
+    pub heavy_per_min: u32,
+    /// Behind our own HTTPS proxy: take the client address from the last
+    /// X-Forwarded-For entry.
+    pub trust_proxy: bool,
 }
 
 fn var(k: &str) -> Option<String> {
@@ -141,6 +156,13 @@ impl Config {
             daily_win_bonus: num("DAILY_WIN_BONUS", 100i64)?.max(0),
             practice_gold: num("PRACTICE_GOLD", 20i64)?.max(0),
             practice_paid_per_day: num("PRACTICE_PAID_PER_DAY", 5i64)?,
+            season: Duration::from_secs(num("SEASON_DAYS", 28u64)? * 86_400),
+            war_prep: mins(num("WAR_PREP_MINUTES", 360u64)?),
+            war_battle: mins(num("WAR_BATTLE_MINUTES", 1440u64)?),
+            war_min_size: num("WAR_MIN_SIZE", 3usize)?.max(1),
+            requests_per_min: num("REQUESTS_PER_MINUTE", 240u32)?,
+            heavy_per_min: num("RAIDS_PER_MINUTE", 20u32)?,
+            trust_proxy: matches!(var("TRUST_PROXY").as_deref(), Some("1" | "true" | "yes" | "on")),
         })
     }
 

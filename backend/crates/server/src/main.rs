@@ -1,4 +1,4 @@
-use bag_server::{cleanup, config::Config, connect, router, AppState};
+use bag_server::{config::Config, connect, router, tick, AppState};
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
@@ -23,14 +23,14 @@ async fn main() {
     let names: Vec<_> = cfg.providers.iter().map(|p| p.name).collect();
     tracing::info!(providers = ?names, public_url = %cfg.public_url, "starting");
 
-    let bg = db.clone();
-    let keep_raids = cfg.keep_raids;
+    let state = AppState::new(db, cfg.clone());
+    let bg = state.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(300));
+        let mut every = tokio::time::interval(Duration::from_secs(60));
         loop {
-            tick.tick().await;
-            if let Err(e) = cleanup(&bg, keep_raids).await {
-                tracing::warn!("cleanup failed: {e}");
+            every.tick().await;
+            if let Err(e) = tick(&bg).await {
+                tracing::warn!("background work failed: {e}");
             }
         }
     });
@@ -42,7 +42,8 @@ async fn main() {
             std::process::exit(1);
         });
     tracing::info!("listening on {}", cfg.bind);
-    axum::serve(listener, router(AppState::new(db, cfg)))
+    let app = router(state);
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

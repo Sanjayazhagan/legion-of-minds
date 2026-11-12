@@ -19,6 +19,13 @@
 //!   cup                                 this week's standings
 //!   cup-enter TROOP.json                enter (or replace) your troop
 //!   replay ATTACK_ID [--out DIR]        re-run locally; --out writes the raiders
+//!   season | seasons                    the current season | your past results
+//!   clans [SEARCH] | clan               list clans | your clan
+//!   clan-create NAME | clan-join NAME | clan-leave
+//!   say TEXT | chat                     clan chat
+//!   lend troop.json ...                 lend attackers to your clan
+//!   war | war-search | war-cancel
+//!   war-attack PLAYER army.troop.json ...  attack a base in the war (by name)
 //!   logout
 //! ```
 
@@ -44,6 +51,13 @@ const USAGE: &str = "bagctl [--server URL] [--token-file F] <command>
   cup                                 this week's standings
   cup-enter TROOP.json                enter (or replace) your troop
   replay ATTACK_ID [--out DIR]        re-run locally; --out writes the raiders
+  season | seasons                    the current season | your past results
+  clans [SEARCH] | clan               list clans | your clan
+  clan-create NAME | clan-join NAME | clan-leave
+  say TEXT | chat                     clan chat
+  lend troop.json ...                 lend attackers to your clan
+  war | war-search | war-cancel
+  war-attack PLAYER army.troop.json ...  attack a base in the war (by name)
   logout";
 
 fn flag(args: &mut Vec<String>, name: &str) -> Option<String> {
@@ -205,6 +219,61 @@ fn main() {
             if let Some(m) = s.mine {
                 println!("you: rank {} with {} ({:.1})", m.rank, m.troop_name, m.score);
             }
+        }
+        "season" => json(&ok(c.season())),
+        "seasons" => json(&ok(c.my_seasons())),
+        "clans" => json(&ok(c.clans(&args.join(" ")))),
+        "clan" => json(&ok(c.my_clan())),
+        "clan-create" => json(&ok(c.create_clan(&args.join(" "), "", true))),
+        "clan-join" => {
+            let name = args.join(" ");
+            let found = ok(c.clans(&name));
+            let clan = found
+                .iter()
+                .find(|k| k.name.eq_ignore_ascii_case(&name))
+                .unwrap_or_else(|| die("no clan with that name"));
+            json(&ok(c.join_clan(clan.id)));
+        }
+        "clan-leave" => ok(c.leave_clan()),
+        "say" => json(&ok(c.say(&args.join(" ")))),
+        "chat" => {
+            for m in ok(c.chat(0)) {
+                let from = if m.from.is_empty() { "*" } else { m.from.as_str() };
+                println!("{}  {from}: {}", m.at, m.body);
+            }
+        }
+        "lend" => {
+            let troops: Vec<Troop> = args.iter().map(|p| load(p)).collect();
+            json(&ok(c.lend(troops)));
+        }
+        "war" => json(&ok(c.war())),
+        "war-search" => json(&ok(c.search_war())),
+        "war-cancel" => json(&ok(c.cancel_war_search())),
+        "war-attack" => {
+            if args.len() < 2 {
+                die("war-attack PLAYER army1.troop.json ...");
+            }
+            let who = args.remove(0);
+            let w = ok(c.war());
+            let target = w
+                .them
+                .bases
+                .iter()
+                .find(|b| b.player.display_name.eq_ignore_ascii_case(&who))
+                .unwrap_or_else(|| die("no enemy base by that name"));
+            let army: Vec<Troop> = args.iter().map(|p| load(p)).collect();
+            let spots = army_spots(army.len());
+            let army: Vec<_> = army.into_iter().zip(spots).collect();
+            let m = ok(c.war_target(target.player.id));
+            let (_, out) = ok(c.war_attack(&m, army_from(&army), &[]));
+            println!(
+                "{} stars, {:.0}% destroyed, {} new stars; score {} - {}",
+                out.result.stars,
+                out.result.destruction * 100.0,
+                out.new_stars,
+                out.war.us.stars,
+                out.war.them.stars
+            );
         }
         "log" => {
             let role = args.first().map(String::as_str).unwrap_or("all");

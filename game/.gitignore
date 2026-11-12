@@ -1,3 +1,4 @@
 /target
 *.troop.json
 /videos
+/dist
