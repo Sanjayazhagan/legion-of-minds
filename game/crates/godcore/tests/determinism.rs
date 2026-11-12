@@ -80,3 +80,17 @@ fn golden_fingerprint() {
 
 /// Sim version 8 (seven calls to teammates: 121 inputs, 28 actions).
 const GOLDEN: u64 = 0x3206_af1e_9372_0321;
+
+/// The battle rules are locked at the launch version. Online bases, server
+/// re-checks and every player's trained brains depend on them, so a change
+/// (a new GOLDEN, a new input or action) must also bump SIM_VERSION and
+/// follow docs/RELEASING.md. Then update these numbers together.
+#[test]
+fn rules_are_locked() {
+    use godcore::sim::{N_ACTIONS, OBS_DIM, SIM_VERSION};
+    assert_eq!(
+        (SIM_VERSION, OBS_DIM, N_ACTIONS, GOLDEN),
+        (8, 121, 28, 0x3206_af1e_9372_0321),
+        "battle rules changed: bump SIM_VERSION and read docs/RELEASING.md first"
+    );
+}
