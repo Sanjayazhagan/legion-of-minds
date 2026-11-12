@@ -277,12 +277,52 @@ impl Client {
     /// Returns the local result (for the battle screen) and the server's
     /// verdict, which is the one that counts.
     pub fn attack(&self, m: &Match, army: Vec<Placement>) -> Result<(RaidResult, AttackOutcome)> {
-        let paid = self.me()?.upgrades;
-        let army = canonical_army(&army, paid.town_hall)?;
-        paid.check(&army)?;
-        let local = run_raid(&m.snapshot, &army);
-        let out = self.submit(m.attack_id, army, Some(local.clone()))?;
+        self.attack_with(m, army, &[])
+    }
+
+    /// Like `attack`, taking troops borrowed from clanmates along. They're
+    /// placed after your own, as on the server.
+    pub fn attack_with(
+        &self,
+        m: &Match,
+        army: Vec<Placement>,
+        borrowed: &[(Loan, (f32, f32))],
+    ) -> Result<(RaidResult, AttackOutcome)> {
+        let (own, borrowed, local) = self.fight(m, army, borrowed)?;
+        let out: AttackOutcome = self.post(
+            &format!("/v1/attacks/{}", m.attack_id),
+            &AttackSubmit {
+                army: own,
+                client_result: Some(local.clone()),
+                borrowed,
+            },
+        )?;
         Ok((local, out))
+    }
+
+    /// Check the army and fight the raid locally.
+    fn fight(
+        &self,
+        m: &Match,
+        army: Vec<Placement>,
+        borrowed: &[(Loan, (f32, f32))],
+    ) -> Result<(Vec<Placement>, Vec<Borrowed>, RaidResult)> {
+        let paid = self.me()?.upgrades;
+        let own = canonical_army(&army, paid.town_hall)?;
+        paid.check(&own)?;
+        let b: Vec<Borrowed> = borrowed
+            .iter()
+            .map(|(l, (x, y))| Borrowed {
+                loan_id: l.id,
+                x: *x,
+                y: *y,
+            })
+            .collect();
+        let full = with_borrowed(own.clone(), &b, |id| {
+            borrowed.iter().find(|(l, _)| l.id == id).map(|(l, _)| l.troop.clone())
+        })?;
+        let local = run_raid(&m.snapshot, &full);
+        Ok((own, b, local))
     }
 
     pub fn submit(
@@ -296,6 +336,7 @@ impl Client {
             &AttackSubmit {
                 army,
                 client_result,
+                borrowed: Vec::new(),
             },
         )
     }
@@ -307,6 +348,128 @@ impl Client {
 
     pub fn replay(&self, attack_id: Uuid) -> Result<Replay> {
         self.get(&format!("/v1/attacks/{attack_id}/replay"))
+    }
+
+    // ------------------------------------------------------------ seasons
+
+    pub fn season(&self) -> Result<Season> {
+        self.get("/v1/season")
+    }
+
+    pub fn my_seasons(&self) -> Result<Vec<SeasonResult>> {
+        self.get("/v1/me/seasons")
+    }
+
+    // ------------------------------------------------------------ clans
+
+    /// Clans by total trophies; `search` filters by name.
+    pub fn clans(&self, search: &str) -> Result<Vec<ClanSummary>> {
+        let q: String = search
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == ' ')
+            .collect::<String>()
+            .trim()
+            .replace(' ', "%20");
+        self.get(&format!("/v1/clans?q={q}"))
+    }
+
+    pub fn clan(&self, id: Uuid) -> Result<ClanView> {
+        self.get(&format!("/v1/clans/{id}"))
+    }
+
+    pub fn create_clan(&self, name: &str, description: &str, open: bool) -> Result<ClanView> {
+        self.post(
+            "/v1/clans",
+            &CreateClan {
+                name: name.into(),
+                description: description.into(),
+                open,
+            },
+        )
+    }
+
+    pub fn join_clan(&self, id: Uuid) -> Result<ClanView> {
+        self.post(&format!("/v1/clans/{id}/join"), &serde_json::json!({}))
+    }
+
+    pub fn my_clan(&self) -> Result<ClanView> {
+        self.get("/v1/me/clan")
+    }
+
+    pub fn leave_clan(&self) -> Result<()> {
+        self.post("/v1/me/clan/leave", &serde_json::json!({}))
+    }
+
+    pub fn kick(&self, member: Uuid) -> Result<ClanView> {
+        self.post(&format!("/v1/me/clan/members/{member}/kick"), &serde_json::json!({}))
+    }
+
+    pub fn promote(&self, member: Uuid) -> Result<ClanView> {
+        self.post(&format!("/v1/me/clan/members/{member}/promote"), &serde_json::json!({}))
+    }
+
+    /// The last 50 chat messages after message `after` (0 for the latest).
+    pub fn chat(&self, after: i64) -> Result<Vec<ChatMessage>> {
+        self.get(&format!("/v1/me/clan/chat?after={after}"))
+    }
+
+    pub fn say(&self, body: &str) -> Result<ChatMessage> {
+        self.post("/v1/me/clan/chat", &ChatPost { body: body.into() })
+    }
+
+    /// Troops clanmates lend you.
+    pub fn loans(&self) -> Result<Vec<Loan>> {
+        self.get("/v1/me/clan/loans")
+    }
+
+    /// Your own troops on loan.
+    pub fn my_loans(&self) -> Result<Vec<Loan>> {
+        self.get("/v1/me/clan/my-loans")
+    }
+
+    /// Lend these troops to the clan, replacing what you lent before.
+    pub fn lend(&self, troops: Vec<Troop>) -> Result<Vec<Loan>> {
+        self.send(
+            self.req(reqwest::Method::PUT, "/v1/me/clan/loans")
+                .json(&Lend { troops }),
+        )
+    }
+
+    // ------------------------------------------------------------ wars
+
+    pub fn war(&self) -> Result<WarView> {
+        self.get("/v1/me/clan/war")
+    }
+
+    pub fn search_war(&self) -> Result<WarSearch> {
+        self.post("/v1/me/clan/war/search", &serde_json::json!({}))
+    }
+
+    pub fn cancel_war_search(&self) -> Result<WarSearch> {
+        self.send(self.req(reqwest::Method::DELETE, "/v1/me/clan/war/search"))
+    }
+
+    /// Start a war attack on an enemy base. Fight it with `war_attack`.
+    pub fn war_target(&self, defender: Uuid) -> Result<Match> {
+        self.post(&format!("/v1/me/clan/war/targets/{defender}"), &serde_json::json!({}))
+    }
+
+    pub fn war_attack(
+        &self,
+        m: &Match,
+        army: Vec<Placement>,
+        borrowed: &[(Loan, (f32, f32))],
+    ) -> Result<(RaidResult, WarOutcome)> {
+        let (own, borrowed, local) = self.fight(m, army, borrowed)?;
+        let out: WarOutcome = self.post(
+            &format!("/v1/war-attacks/{}", m.attack_id),
+            &AttackSubmit {
+                army: own,
+                client_result: Some(local.clone()),
+                borrowed,
+            },
+        )?;
+        Ok((local, out))
     }
 }
 

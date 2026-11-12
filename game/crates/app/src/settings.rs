@@ -25,12 +25,12 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { volume: 0.8, muted: false, shake: true, sight: true, test_mode: false }
+        Settings { volume: 0.8, muted: false, shake: true, sight: false, test_mode: false }
     }
 }
 
 static SHAKE_ON: AtomicBool = AtomicBool::new(true);
-static SIGHT_ON: AtomicBool = AtomicBool::new(true);
+static SIGHT_ON: AtomicBool = AtomicBool::new(false);
 
 pub fn shake_on() -> bool {
     SHAKE_ON.load(Ordering::Relaxed)

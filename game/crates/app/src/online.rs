@@ -12,7 +12,8 @@ use crate::render::{draw_ground, draw_world, Look, View};
 use crate::ui::*;
 use crate::{Game, Screen};
 use bag_client::bag_protocol::{
-    AttackLog, LoginStart, Match, Providers, PublicPlayer, Published, Replay, Upgrades, User,
+    AttackLog, ClanSummary, League, Loan, LoginStart, Match, Providers, PublicPlayer, Published,
+    Replay, Season, Upgrades, User, MAX_BORROWED,
 };
 use bag_client::{
     army_from, army_spots, defender_spots, replay_battle, snapshot_from, Client, Uuid,
@@ -85,7 +86,7 @@ impl Account {
         self.token.is_some() && self.user.is_some()
     }
 
-    fn client(&self) -> Client {
+    pub(crate) fn client(&self) -> Client {
         let c = Client::new(&self.server);
         match &self.token {
             Some(t) => c.with_token(t.clone()),
@@ -98,7 +99,7 @@ impl Account {
 pub struct Task<T>(Receiver<Result<T, String>>);
 
 impl<T: Send + 'static> Task<T> {
-    fn spawn(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Self {
+    pub(crate) fn spawn(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Self {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let _ = tx.send(f());
@@ -107,7 +108,7 @@ impl<T: Send + 'static> Task<T> {
     }
 
     /// The answer, once it has arrived.
-    fn poll(&self) -> Option<Result<T, String>> {
+    pub(crate) fn poll(&self) -> Option<Result<T, String>> {
         match self.0.try_recv() {
             Ok(r) => Some(r),
             Err(TryRecvError::Empty) => None,
@@ -629,8 +630,18 @@ impl Game {
 // ------------------------------------------------------------ online screen
 
 /// What the Online screen is waiting on.
+/// Everything the Online screen shows, loaded together.
+struct Refreshed {
+    user: User,
+    log: Vec<AttackLog>,
+    board: Vec<PublicPlayer>,
+    clans: Vec<ClanSummary>,
+    season: Option<Season>,
+    loans: Vec<Loan>,
+}
+
 enum Busy {
-    Refresh(Task<(User, Vec<AttackLog>, Vec<PublicPlayer>)>),
+    Refresh(Task<Refreshed>),
     Publish(Task<(Published, User)>),
     Find(Task<Match>),
     Raid(Task<(User, Replay)>),
@@ -642,6 +653,12 @@ enum Busy {
 pub struct OnlineState {
     log: Vec<AttackLog>,
     board: Vec<PublicPlayer>,
+    clan_board: Vec<ClanSummary>,
+    /// The leaderboard shows clans instead of players.
+    show_clans: bool,
+    season: Option<Season>,
+    /// Troops clanmates lend, which fill empty army slots.
+    loans: Vec<Loan>,
     found: Option<Match>,
     busy: Option<Busy>,
     msg: Option<(String, Color)>,
@@ -659,6 +676,10 @@ impl OnlineState {
         let mut s = OnlineState {
             log: Vec::new(),
             board: Vec::new(),
+            clan_board: Vec::new(),
+            show_clans: false,
+            season: None,
+            loans: Vec::new(),
             found: None,
             busy: None,
             msg: None,
@@ -670,11 +691,21 @@ impl OnlineState {
     fn refresh(&mut self, g: &Game) {
         let c = g.account.client();
         self.busy = Some(Busy::Refresh(Task::spawn(move || {
-            Ok((
-                c.me().map_err(err)?,
-                c.log("all").map_err(err)?,
-                c.leaderboard(10).map_err(err)?,
-            ))
+            let user = c.me().map_err(err)?;
+            let loans = if user.clan.is_some() {
+                c.loans().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            Ok(Refreshed {
+                log: c.log("all").map_err(err)?,
+                board: c.leaderboard(10).map_err(err)?,
+                // Older servers have no clans or seasons yet.
+                clans: c.clans("").unwrap_or_default(),
+                season: c.season().ok(),
+                loans,
+                user,
+            })
         })));
     }
 }
@@ -702,7 +733,7 @@ fn base_defenders(g: &Game, paid: &Upgrades) -> (Vec<(Troop, (f32, f32))>, usize
 
 /// The army for an online raid: your best attackers that your online
 /// Town Hall allows and that are paid for online.
-fn raid_army(g: &Game, paid: &Upgrades) -> Vec<(Troop, (f32, f32))> {
+pub(crate) fn raid_army(g: &Game, paid: &Upgrades) -> Vec<(Troop, (f32, f32))> {
     let cap = max_troop_level(paid.town_hall);
     let mut v: Vec<&Troop> = g
         .troops
@@ -799,10 +830,13 @@ impl Game {
         if let Some(b) = &s.busy {
             let done = match b {
                 Busy::Refresh(t) => t.poll().map(|r| {
-                    r.map(|(u, log, board)| {
-                        self.account.user = Some(u);
-                        s.log = log;
-                        s.board = board;
+                    r.map(|f| {
+                        self.account.user = Some(f.user);
+                        s.log = f.log;
+                        s.board = f.board;
+                        s.clan_board = f.clans;
+                        s.season = f.season;
+                        s.loans = f.loans;
                     })
                 }),
                 Busy::Publish(t) => t.poll().map(|r| {
@@ -880,33 +914,59 @@ impl Game {
         text(
             &format!("Trophies {}", me.trophies),
             x,
-            left.y + 78.0,
+            left.y + 76.0,
             24.0,
             ACCENT,
         );
+        let league = League::of(me.trophies);
+        let badge = Rect::new(x + 200.0, left.y + 56.0, left.w - 240.0, 28.0);
+        league_badge(badge, league);
+        // Progress to the next league.
+        if let Some(next) = league.next() {
+            let f = (me.trophies - league.floor()) as f32 / (next.floor() - league.floor()) as f32;
+            bar(Rect::new(x, left.y + 90.0, left.w - 40.0, 6.0), f, league_color(league));
+            text(
+                &format!("{} more to {}", next.floor() - me.trophies, next.name()),
+                x,
+                left.y + 112.0,
+                15.0,
+                MUTED,
+            );
+        } else {
+            text("Top league", x, left.y + 112.0, 15.0, MUTED);
+        }
+        if let Some(season) = &s.season {
+            let left_s = time_left(&season.ends_at);
+            let t = format!("Season {} ends in {left_s}", season.number);
+            text(&t, left.x + left.w - 20.0 - text_width(&t, 15.0), left.y + 112.0, 15.0, SKY);
+        }
         text(
-            &format!("Online gold {}", me.gold),
+            &format!(
+                "Online gold {}   Win bonus {}/star",
+                me.gold,
+                league.bonus_per_star()
+            ),
             x,
-            left.y + 106.0,
-            20.0,
+            left.y + 136.0,
+            18.0,
             MUTED,
         );
         let base = match (me.has_base, me.town_hall) {
             (true, Some(th)) => format!("Published base: Town Hall {th}"),
             _ => "No base published yet".into(),
         };
-        text(&base, x, left.y + 132.0, 20.0, MUTED);
+        text(&base, x, left.y + 158.0, 18.0, MUTED);
         if let Some(sh) = &me.shield_until {
             text(
                 &format!("Shield until {}", short_time(sh)),
                 x,
-                left.y + 156.0,
-                18.0,
+                left.y + 180.0,
+                16.0,
                 SKY,
             );
         }
 
-        let mut y = left.y + 186.0;
+        let mut y = left.y + 206.0;
         let paid = me.upgrades.clone();
         let (defenders, skipped) = base_defenders(self, &paid);
         let th_paid = self.profile.base.town_hall <= paid.town_hall;
@@ -971,6 +1031,18 @@ impl Game {
             MUTED,
         );
 
+        let clan_label = match &me.clan {
+            Some(c) => format!("Clan: {}", c.name),
+            None => "Clans and wars".to_string(),
+        };
+        if self.ui.button_ex(
+            Rect::new(x, left.y + left.h - 122.0, left.w - 40.0, 46.0),
+            &clan_label,
+            idle,
+            false,
+        ) {
+            return Screen::Clan(crate::clan::ClanState::new(self));
+        }
         if self.ui.button_ex(
             Rect::new(x, left.y + left.h - 66.0, left.w - 40.0, 46.0),
             "Sign out",
@@ -986,16 +1058,30 @@ impl Game {
         panel(mid);
         let mx = mid.x + 20.0;
         text("Raid", mx, mid.y + 34.0, 26.0, TEXT);
-        let army = raid_army(self, &paid);
+        let mut army = raid_army(self, &paid);
+        // Troops clanmates lend fill the empty army slots.
+        let free = MAX_SQUAD.saturating_sub(army.len()).min(MAX_BORROWED);
+        let borrowed: Vec<Loan> = s.loans.iter().take(free).cloned().collect();
+        let spots = army_spots(army.len() + borrowed.len());
+        for (k, (_, spot)) in army.iter_mut().enumerate() {
+            *spot = spots[k];
+        }
+        let borrowed: Vec<(Loan, (f32, f32))> = borrowed
+            .into_iter()
+            .zip(spots[army.len()..].iter().copied())
+            .collect();
         match &s.found {
             None => {
-                text(
-                    &format!("Your army: your best {} attackers", army.len()),
-                    mx,
-                    mid.y + 70.0,
-                    18.0,
-                    MUTED,
-                );
+                let line = if borrowed.is_empty() {
+                    format!("Your army: your best {} attackers", army.len())
+                } else {
+                    format!(
+                        "Your army: {} attackers + {} lent by your clan",
+                        army.len(),
+                        borrowed.len()
+                    )
+                };
+                text(&line, mx, mid.y + 70.0, 18.0, MUTED);
                 if self.ui.button_ex(
                     Rect::new(mx, mid.y + 96.0, mid.w - 40.0, 50.0),
                     "Find an opponent",
@@ -1043,7 +1129,11 @@ impl Game {
                     18.0,
                     MUTED,
                 );
-                let names: Vec<&str> = army.iter().map(|(t, _)| t.name.as_str()).collect();
+                let names: Vec<&str> = army
+                    .iter()
+                    .map(|(t, _)| t.name.as_str())
+                    .chain(borrowed.iter().map(|(l, _)| l.troop.name.as_str()))
+                    .collect();
                 text(
                     &format!("Sending: {}", names.join(", ")),
                     mx,
@@ -1060,9 +1150,10 @@ impl Game {
                     let c = self.account.client();
                     let m = m.clone();
                     let army = army_from(&army);
+                    let borrowed = borrowed.clone();
                     s.msg = None;
                     s.busy = Some(Busy::Raid(Task::spawn(move || {
-                        let (_, out) = c.attack(&m, army).map_err(err)?;
+                        let (_, out) = c.attack_with(&m, army, &borrowed).map_err(err)?;
                         let replay = c.replay(out.attack_id).map_err(err)?;
                         Ok((out.attacker, replay))
                     })));
@@ -1155,25 +1246,49 @@ impl Game {
         // Right: leaderboard.
         let right = Rect::new(880.0, 66.0, W - 900.0, 360.0);
         panel(right);
-        text("Top players", right.x + 20.0, right.y + 34.0, 22.0, TEXT);
-        for (k, p) in s.board.iter().enumerate() {
-            let yy = right.y + 70.0 + k as f32 * 30.0;
-            let col = if p.id == me.id { ACCENT } else { TEXT };
-            text(
-                &format!("{}. {}", k + 1, p.display_name),
-                right.x + 20.0,
-                yy,
-                18.0,
-                col,
-            );
-            let t = p.trophies.to_string();
-            text(
-                &t,
-                right.x + right.w - 20.0 - text_width(&t, 18.0),
-                yy,
-                18.0,
-                col,
-            );
+        text("Top", right.x + 20.0, right.y + 34.0, 22.0, TEXT);
+        for (k, (label, clans)) in [("Players", false), ("Clans", true)].into_iter().enumerate() {
+            if self.ui.button_ex(
+                Rect::new(right.x + 70.0 + k as f32 * 96.0, right.y + 12.0, 88.0, 30.0),
+                label,
+                true,
+                s.show_clans == clans,
+            ) {
+                s.show_clans = clans;
+            }
+        }
+        let rows: Vec<(String, String, Color, Option<League>)> = if s.show_clans {
+            let mine = me.clan.as_ref().map(|c| c.id);
+            s.clan_board
+                .iter()
+                .take(10)
+                .map(|c| {
+                    let col = if Some(c.id) == mine { ACCENT } else { TEXT };
+                    (format!("{} ({})", c.name, c.members), c.trophies.to_string(), col, None)
+                })
+                .collect()
+        } else {
+            s.board
+                .iter()
+                .map(|p| {
+                    let col = if p.id == me.id { ACCENT } else { TEXT };
+                    (p.display_name.clone(), p.trophies.to_string(), col, Some(League::of(p.trophies)))
+                })
+                .collect()
+        };
+        if rows.is_empty() && s.show_clans {
+            text("No clans yet.", right.x + 20.0, right.y + 74.0, 18.0, MUTED);
+        }
+        for (k, (name, t, col, league)) in rows.iter().enumerate() {
+            let yy = right.y + 74.0 + k as f32 * 28.0;
+            let name: String = name.chars().take(22).collect();
+            text(&format!("{}. {name}", k + 1), right.x + 20.0, yy, 18.0, *col);
+            let tw = text_width(t, 18.0);
+            text(t, right.x + right.w - 20.0 - tw, yy, 18.0, *col);
+            if let Some(l) = league {
+                let lw = text_width(l.name(), 14.0);
+                text(l.name(), right.x + right.w - 30.0 - tw - lw, yy, 14.0, league_color(*l));
+            }
         }
 
         // Right, below: online upgrades.
@@ -1219,6 +1334,87 @@ impl Game {
     }
 }
 
+pub(crate) fn league_color(l: League) -> Color {
+    match l {
+        League::Bronze => Color::new(0.80, 0.52, 0.30, 1.0),
+        League::Silver => Color::new(0.78, 0.80, 0.86, 1.0),
+        League::Gold => ACCENT,
+        League::Crystal => Color::new(0.62, 0.48, 0.95, 1.0),
+        League::Master => Color::new(0.35, 0.80, 0.85, 1.0),
+        League::Champion => BAD,
+        League::Legend => Color::new(1.0, 0.86, 0.45, 1.0),
+    }
+}
+
+/// A league name in its colour, on a dark plate.
+pub(crate) fn league_badge(r: Rect, l: League) {
+    let c = league_color(l);
+    draw_rectangle(r.x, r.y, r.w, r.h, Color::new(c.r * 0.22, c.g * 0.22, c.b * 0.22, 1.0));
+    draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, c);
+    text_centered(
+        &format!("{} league", l.name()),
+        r.x + r.w / 2.0,
+        r.y + r.h * 0.7,
+        r.h * 0.62,
+        c,
+    );
+}
+
+/// Seconds since 1970 for an RFC 3339 time like "2026-11-08T14:55:24.123+00:00".
+pub(crate) fn unix_secs(ts: &str) -> Option<i64> {
+    let (date, rest) = ts.split_once('T')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>());
+    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
+    let hms: Vec<i64> = rest
+        .get(..8)?
+        .split(':')
+        .map(|p| p.parse::<i64>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    // Offset after the seconds (and any fraction): Z, +hh:mm or -hh:mm.
+    let tail = &rest[8..];
+    let tail = tail.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let offset = match tail.chars().next() {
+        Some(sign @ ('+' | '-')) => {
+            let h: i64 = tail.get(1..3)?.parse().ok()?;
+            let mi: i64 = tail.get(4..6)?.parse().ok()?;
+            let o = h * 3600 + mi * 60;
+            if sign == '+' { o } else { -o }
+        }
+        _ => 0,
+    };
+    // Days from civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hms[0] * 3600 + hms[1] * 60 + hms[2] - offset)
+}
+
+/// "3d 4h", "5h 10m" or "12m" until `ts`; "now" once it has passed.
+pub(crate) fn time_left(ts: &str) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let Some(t) = unix_secs(ts) else {
+        return "soon".into();
+    };
+    let s = t - now;
+    if s <= 0 {
+        "now".into()
+    } else if s >= 86_400 {
+        format!("{}d {}h", s / 86_400, s % 86_400 / 3600)
+    } else if s >= 3600 {
+        format!("{}h {}m", s / 3600, s % 3600 / 60)
+    } else {
+        format!("{}m", (s / 60).max(1))
+    }
+}
+
 /// "2026-10-21T10:38:26.123Z" -> "10:38 UTC".
 fn short_time(ts: &str) -> String {
     ts.split('T')
@@ -1237,7 +1433,15 @@ pub struct WatchState {
     attacking: bool,
     acc: f32,
     speed: f32,
-    back: Option<OnlineState>,
+    back: Option<Back>,
+    /// Set for a clan war attack: the stars it added for the clan.
+    war_stars: Option<u32>,
+}
+
+/// Where Back goes after watching.
+enum Back {
+    Online(OnlineState),
+    Clan(crate::clan::ClanState),
 }
 
 impl WatchState {
@@ -1248,7 +1452,21 @@ impl WatchState {
             replay,
             acc: 0.0,
             speed: 1.0,
-            back: Some(back),
+            back: Some(Back::Online(back)),
+            war_stars: None,
+        }
+    }
+
+    /// Watching your own clan war attack, then back to the clan.
+    pub(crate) fn war(replay: Replay, new_stars: u32, back: crate::clan::ClanState) -> Self {
+        WatchState {
+            battle: replay_battle(&replay),
+            attacking: true,
+            replay,
+            acc: 0.0,
+            speed: 1.0,
+            back: Some(Back::Clan(back)),
+            war_stars: Some(new_stars),
         }
     }
 }
@@ -1323,35 +1541,35 @@ impl Game {
             panel(r);
             let res = &l.result;
             let swing = if s.attacking { l.trophies } else { -l.trophies };
-            let head = match (s.attacking, res.stars) {
-                (true, 0) => "Raid failed",
-                (true, _) => "Raid won",
-                (false, 0) => "Your base held",
-                (false, _) => "Your base was raided",
+            let head = match (s.war_stars, s.attacking, res.stars) {
+                (Some(_), _, 0) => "War attack failed",
+                (Some(_), _, _) => "War attack won",
+                (None, true, 0) => "Raid failed",
+                (None, true, _) => "Raid won",
+                (None, false, 0) => "Your base held",
+                (None, false, _) => "Your base was raided",
             };
             text_centered(
                 head,
                 r.x + r.w / 2.0,
                 r.y + 44.0,
                 32.0,
-                if swing >= 0 { GOOD } else { BAD },
+                if swing >= 0 && !(s.war_stars.is_some() && res.stars == 0) { GOOD } else { BAD },
             );
-            text_centered(
-                &format!(
+            let line = match s.war_stars {
+                Some(_) => format!("{} stars, {:.0}% destroyed", res.stars, res.destruction * 100.0),
+                None => format!(
                     "{} stars, {:.0}% destroyed, {:+} trophies",
                     res.stars,
                     res.destruction * 100.0,
                     swing
                 ),
-                r.x + r.w / 2.0,
-                r.y + 84.0,
-                22.0,
-                TEXT,
-            );
-            let gold = if s.attacking {
-                format!("{} gold looted", l.gold_looted)
-            } else {
-                format!("{} gold lost", l.gold_looted)
+            };
+            text_centered(&line, r.x + r.w / 2.0, r.y + 84.0, 22.0, TEXT);
+            let gold = match s.war_stars {
+                Some(n) => format!("+{n} new stars for your clan"),
+                None if s.attacking => format!("{} gold looted", l.gold_looted),
+                None => format!("{} gold lost", l.gold_looted),
             };
             text_centered(&gold, r.x + r.w / 2.0, r.y + 114.0, 20.0, ACCENT);
             // The server's result counts; this checks the replay agrees.
@@ -1371,6 +1589,8 @@ impl Game {
         }
         let back_label = if running {
             "Skip to the end"
+        } else if s.war_stars.is_some() {
+            "Back to the war"
         } else {
             "Back to Online"
         };
@@ -1382,9 +1602,17 @@ impl Game {
                 s.battle.run();
                 return Screen::OnlineWatch(s);
             }
-            let mut back = s.back.take().unwrap_or_else(|| OnlineState::new(self));
-            back.refresh(self);
-            return Screen::Online(back);
+            return match s.back.take() {
+                Some(Back::Clan(mut c)) => {
+                    c.reload(self);
+                    Screen::Clan(c)
+                }
+                Some(Back::Online(mut back)) => {
+                    back.refresh(self);
+                    Screen::Online(back)
+                }
+                None => Screen::Online(OnlineState::new(self)),
+            };
         }
         Screen::OnlineWatch(s)
     }
@@ -1392,7 +1620,15 @@ impl Game {
 
 #[cfg(test)]
 mod tests {
-    use super::is_this_computer;
+    use super::{is_this_computer, unix_secs};
+
+    #[test]
+    fn server_times_parse() {
+        assert_eq!(unix_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(unix_secs("2026-11-08T14:55:24.123456+00:00"), Some(1_794_149_724));
+        assert_eq!(unix_secs("2026-11-08T16:55:24+02:00"), Some(1_794_149_724));
+        assert_eq!(unix_secs("garbage"), None);
+    }
 
     #[test]
     fn local_server_addresses() {
