@@ -114,13 +114,15 @@ pub fn router(st: AppState) -> Router {
         )
         .route("/v1/me/clan/war/targets/{id}", post(wars::attack))
         .route("/v1/war-attacks/{id}", post(wars::submit))
-        .layer(axum::middleware::from_fn_with_state(st.clone(), ratelimit::limit))
         // Layers run bottom to top on the way in: the body is size-checked as
-        // sent, then unzipped (game clients gzip big uploads), then read with
-        // a limit on the unzipped size, so a small zip can't unpack into
-        // gigabytes. Big replies (bases, replays) go out gzipped.
+        // sent, rate-limited (a refused upload is drained while still
+        // compressed, so the size check bounds it), then unzipped (game
+        // clients gzip big uploads), then read with a limit on the unzipped
+        // size, so a small zip can't unpack into gigabytes. Big replies
+        // (bases, replays) go out gzipped.
         .layer(axum::extract::DefaultBodyLimit::max(json))
         .layer(RequestDecompressionLayer::new())
+        .layer(axum::middleware::from_fn_with_state(st.clone(), ratelimit::limit))
         .layer(RequestBodyLimitLayer::new(wire))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
