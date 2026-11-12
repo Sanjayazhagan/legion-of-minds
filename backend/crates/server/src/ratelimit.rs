@@ -83,7 +83,9 @@ fn class_of(method: &Method, path: &str) -> Class {
     if method == Method::POST && path.starts_with("/v1/auth/") && !path.ends_with("/poll") {
         Class::SignIn
     } else if (method == Method::POST
-        && (path == "/v1/matchmaking" || path.starts_with("/v1/attacks/")))
+        && (path == "/v1/matchmaking"
+            || path.starts_with("/v1/attacks/")
+            || path.starts_with("/v1/war-attacks/")))
         || (method == Method::PUT && path == "/v1/me/base")
     {
         Class::Heavy
@@ -247,6 +249,7 @@ mod tests {
         assert_eq!(class_of(&Method::POST, "/v1/matchmaking"), Class::Heavy);
         assert_eq!(class_of(&Method::POST, "/v1/attacks/123"), Class::Heavy);
         assert_eq!(class_of(&Method::PUT, "/v1/me/base"), Class::Heavy);
+        assert_eq!(class_of(&Method::POST, "/v1/war-attacks/7"), Class::Heavy);
         assert_eq!(class_of(&Method::POST, "/v1/auth/login"), Class::SignIn);
         assert_eq!(
             class_of(&Method::POST, "/v1/auth/logins/1/poll"),

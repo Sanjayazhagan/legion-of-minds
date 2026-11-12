@@ -10,7 +10,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use bag_protocol::{
-    canonical_army, loot, run_raid, trophy_swing, AttackLog, AttackOutcome, AttackSubmit,
+    League, loot, run_raid, trophy_swing, AttackLog, AttackOutcome, AttackSubmit,
     BaseSnapshot, Match, Placement, PublicPlayer, RaidResult, Replay, SIM_VERSION,
 };
 use chrono::{DateTime, Utc};
@@ -43,6 +43,9 @@ pub async fn find_match(
              WHERE u.id <> $1
                AND (u.shield_until IS NULL OR u.shield_until < now())
                AND abs(u.trophies::bigint - $2::bigint) <= $3::bigint
+               AND NOT EXISTS (SELECT 1 FROM clan_members mine JOIN clan_members theirs
+                               ON theirs.clan_id = mine.clan_id
+                               WHERE mine.user_id = $1 AND theirs.user_id = u.id)
                AND NOT EXISTS (SELECT 1 FROM attacks a WHERE a.defender_id = u.id
                                AND a.status = 'pending' AND a.expires_at > now())
              ORDER BY random() LIMIT 1
@@ -125,8 +128,7 @@ pub async fn submit(
         ));
     }
     let me = load_user(&st.db, user.id).await?;
-    let army = canonical_army(&req.army, me.upgrades.town_hall)?;
-    me.upgrades.check(&army)?;
+    let army = crate::clans::raid_army(&st.db, &me, &req).await?;
     let snapshot: BaseSnapshot = parse(&data)?;
 
     let (result, army) = {
@@ -175,12 +177,14 @@ pub async fn submit(
     let att_new = (att_trophies + swing).max(0);
     let def_new = (def_trophies - swing).max(0);
     let gold = loot(def_gold, result.destruction);
+    // Winning pays more the higher your league. It's new gold, not loot.
+    let bonus = League::of(att_trophies).win_bonus(result.stars);
     let shield = (result.stars > 0)
         .then(|| Utc::now() + chrono::Duration::from_std(st.cfg.shield).expect("fits"));
 
     sqlx::query("UPDATE users SET trophies = $1, gold = gold + $2 WHERE id = $3")
         .bind(att_new)
-        .bind(gold)
+        .bind(gold + bonus)
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
@@ -219,6 +223,7 @@ pub async fn submit(
         attack_id,
         trophies: att_new - att_trophies,
         gold_looted: gold,
+        league_bonus: bonus,
         client_matched,
         result,
         attacker: load_user(&st.db, user.id).await?,
