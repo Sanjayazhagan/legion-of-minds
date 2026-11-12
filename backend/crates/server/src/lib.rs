@@ -19,6 +19,7 @@ pub mod error;
 pub mod league;
 pub mod liveops;
 pub mod players;
+pub mod ratelimit;
 pub mod shop;
 pub mod wars;
 
@@ -39,6 +40,7 @@ pub struct AppState {
     pub db: PgPool,
     pub cfg: Arc<Config>,
     pub http: reqwest::Client,
+    pub limiter: Arc<ratelimit::Limiter>,
 }
 
 impl AppState {
@@ -51,6 +53,7 @@ impl AppState {
                 .user_agent("legion-of-minds-server")
                 .build()
                 .expect("http client"),
+            limiter: Default::default(),
         }
     }
 }
@@ -116,6 +119,7 @@ pub fn router(st: AppState) -> Router {
         .route("/v1/me/clan/war/targets/{id}", post(wars::attack))
         .route("/v1/war-attacks/{id}", post(wars::submit))
         .merge(admin::routes())
+        .layer(axum::middleware::from_fn_with_state(st.clone(), ratelimit::limit))
         .layer(RequestBodyLimitLayer::new(limit))
         .layer(axum::extract::DefaultBodyLimit::max(limit))
         .layer(TraceLayer::new_for_http())

@@ -77,6 +77,13 @@ pub struct Config {
     pub war_min_size: usize,
     /// Key for the operator's admin page (`/admin`). Unset turns it off.
     pub admin_key: Option<String>,
+    /// Requests a minute per client address, and for raids, publishing and
+    /// sign-ins (which cost the server more).
+    pub requests_per_min: u32,
+    pub heavy_per_min: u32,
+    /// Behind our own HTTPS proxy: take the client address from the last
+    /// X-Forwarded-For entry.
+    pub trust_proxy: bool,
 }
 
 fn var(k: &str) -> Option<String> {
@@ -147,6 +154,9 @@ impl Config {
             war_battle: mins(num("WAR_BATTLE_MINUTES", 1440u64)?),
             war_min_size: num("WAR_MIN_SIZE", 3usize)?.max(1),
             admin_key,
+            requests_per_min: num("REQUESTS_PER_MINUTE", 240u32)?,
+            heavy_per_min: num("RAIDS_PER_MINUTE", 20u32)?,
+            trust_proxy: matches!(var("TRUST_PROXY").as_deref(), Some("1" | "true" | "yes" | "on")),
         })
     }
 

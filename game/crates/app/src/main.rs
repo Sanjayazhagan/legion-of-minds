@@ -1,6 +1,9 @@
 //! Legion of Minds: desktop app. Recruit troops, train their tiny brains on your
 //! own CPU, then send them against AI-built bases.
 
+// Windows release builds open no console window next to the game.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod armoury;
 mod art;
 mod plan;
@@ -9,6 +12,7 @@ mod barracks;
 mod battle_screen;
 mod clan;
 mod home;
+mod mind_view;
 mod online;
 mod recruit;
 mod render;
@@ -206,6 +210,11 @@ fn window_conf() -> macroquad::conf::Conf {
             high_dpi: true,
             window_resizable: true,
             sample_count: 4,
+            icon: Some(macroquad::miniquad::conf::Icon {
+                small: *include_bytes!("../icon/16.rgba"),
+                medium: *include_bytes!("../icon/32.rgba"),
+                big: *include_bytes!("../icon/64.rgba"),
+            }),
             ..Default::default()
         },
         // 3D characters are sent as one mesh per body part.

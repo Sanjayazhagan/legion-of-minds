@@ -106,6 +106,8 @@ Set these environment variables on the host (as secrets where the host has them)
 | `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` | for Discord sign-in | From the Discord Developer Portal → your app → OAuth2. Redirect: `<PUBLIC_URL>/v1/auth/discord/callback`. |
 | `PORT` | — | Most hosts set it for you. Defaults to 8080. `BIND_ADDR` overrides both. |
 | `SESSION_DAYS`, `ATTACK_WINDOW_SECS`, `SHIELD_MINUTES`, `START_GOLD`, `MATCH_TROPHY_RANGE` | — | Tuning; defaults 30, 300, 60, 500, 200. |
+| `REQUESTS_PER_MINUTE`, `RAIDS_PER_MINUTE` | — | Per-address limits; defaults 240 for everything and 20 for raids, publishing and sign-ins. Over the limit the server answers 429 `slow_down` with `Retry-After`. |
+| `TRUST_PROXY` | — | `true` behind our own HTTPS proxy (deploy.ps1 sets it with `-Domain`): the client address comes from the last `X-Forwarded-For` entry. Leave off when the server is reached directly, or clients could fake their address. |
 | `RUST_LOG` | — | Log level, default `info,sqlx=warn`. |
 
 Health check: `GET /health`. Serve it behind https (the host's TLS); tokens are bearer tokens.
@@ -195,5 +197,5 @@ Recordings and screenshot tests (`BAG_SCREEN`, `BAG_RECORD`, `BAG_SCREENSHOT`) s
 - **Online gold only comes from raids.** Campaign battles and defence waves are fought on the player's machine, so their gold stays offline. The server could re-run them (it already re-runs raids) to pay online gold too.
 - **Recruiting and buildings are still local.** They don't need paying for online: the server checks a base's buildings against its Town Hall, and a fresh recruit is level 1.
 - **Training can't be verified.** The server checks a troop's level and training cap, but a brain trained longer elsewhere would still pass. Signing training runs, or capping by rank, is a later problem.
-- Clans, wars, friend challenges, Steam login, rate limiting and an admin view.
+- Clans, wars, friend challenges, Steam login and an admin view. Rate limits are per address, not per account.
 - Replays let the defender download the attacker's army brains (that's what makes "train against this raid" work). Decide later whether that's fair to attackers.

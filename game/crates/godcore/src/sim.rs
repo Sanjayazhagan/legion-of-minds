@@ -1862,6 +1862,50 @@ impl World {
         }
     }
 
+    // ------------------------------------------------- read-only peeks
+    // For the "see what it's thinking" view. These only read the world, so
+    // they can't change a battle.
+
+    /// Where troop `i` believes unit `j` is, and how fresh that is (1 = in
+    /// sight now, less = an old memory). None if it doesn't know of it yet,
+    /// including something just spotted that it is still reacting to.
+    pub fn belief(&self, i: usize, j: usize) -> Option<(f32, f32, f32)> {
+        self.knows(i, j).map(|k| (k.x, k.y, k.fresh))
+    }
+
+    /// Where the nearest fight troop `i` can hear is, if any.
+    pub fn hears(&self, i: usize) -> Option<(f32, f32)> {
+        let me = &self.units[i];
+        self.heard(i).map(|((dx, dy), _)| (me.x + dx, me.y + dy))
+    }
+
+    /// The calls troop `i` has heard and taken in: (kind, x, y it points at).
+    pub fn calls_heard(&self, i: usize) -> Vec<(u8, f32, f32)> {
+        self.heard_calls(i)
+            .iter()
+            .enumerate()
+            .filter_map(|(k, c)| c.map(|(x, y, _)| (k as u8, x, y)))
+            .collect()
+    }
+
+    /// Who action `a` by troop `i` would land on, if it aims at someone.
+    pub fn aim(&self, i: usize, a: u8) -> Option<usize> {
+        match a {
+            ACT_HIT_UNIT => self.unit_target(i),
+            ACT_SKILL => match self.units[i].skill {
+                Some(Skill::ShieldBash) | Some(Skill::Volley) => self.unit_target(i),
+                Some(Skill::Fireball) => self.unit_target(i).or_else(|| self.building_target(i)),
+                Some(Skill::Shadowstep) => self.shadowstep_target(i),
+                _ => None,
+            },
+            ACT_HIT_BUILDING => self.building_target(i),
+            ACT_HEAL => self.heal_target(i, 0),
+            ACT_HEAL_2 => self.heal_target(i, 1),
+            ACT_CHARGE => self.charge_target(i),
+            _ => None,
+        }
+    }
+
     pub fn troops_alive(&self) -> usize {
         self.units
             .iter()

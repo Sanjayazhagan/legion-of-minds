@@ -55,6 +55,9 @@ fn config(db: String, public_url: String) -> Config {
         war_battle: Duration::from_secs(3600),
         war_min_size: 2,
         admin_key: Some(ADMIN_KEY.into()),
+        requests_per_min: 100_000,
+        heavy_per_min: 100_000,
+        trust_proxy: false,
     }
 }
 
