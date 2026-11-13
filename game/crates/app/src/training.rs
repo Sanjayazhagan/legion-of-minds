@@ -36,7 +36,17 @@ struct Job {
     stop: Arc<AtomicBool>,
     target: u64,
     start: u64,
+    /// The troop's skills and weapon mastery when the session began, for
+    /// the summary at the end (checkpoints change the troop on the way).
+    skills_before: Skills,
+    mastery_before: u8,
+    /// When progress was last written to the troop's file.
+    saved_at: f64,
 }
+
+/// How often a running session is saved, in seconds, so closing the game or
+/// a crash loses at most this much training.
+pub const CHECKPOINT_SECS: f64 = 120.0;
 
 struct Preview {
     world: World,
@@ -138,6 +148,9 @@ fn spawn(t: &Troop, target: u64, pool: Option<Opponents>) -> Job {
         stop,
         target,
         start,
+        skills_before: t.skills,
+        mastery_before: t.spec.mastery,
+        saved_at: get_time(),
     }
 }
 
@@ -154,20 +167,40 @@ impl Game {
         (!v.is_empty()).then(|| Arc::new(v))
     }
 
-    fn finish_training(&mut self, s: &mut TrainState) {
-        let Some(job) = s.job.take() else { return };
+    /// Copy the newest brain and step count from a running session onto the
+    /// troop and save it. Safe to call any number of times.
+    fn checkpoint_training(&mut self, idx: usize, job: &Job) {
         let sh = job.shared.lock().unwrap();
-        let t = &mut self.troops[s.idx];
-        let before = t.skills;
-        let mut mastery_up = None;
+        let t = &mut self.troops[idx];
         if let (Some(a), Some(c)) = (&sh.actor, &sh.critic) {
             t.actor = a.clone();
             t.critic = c.clone();
-            mastery_up = t.add_training(sh.steps - t.steps);
+            t.add_training(sh.steps.saturating_sub(t.steps));
             t.curve = thin(&sh.curve);
             t.skills = sh.skills;
+        }
+        drop(sh);
+        self.store.save_troop(&self.troops[idx]);
+    }
+
+    /// The game is closing: stop the session and keep what it learned.
+    pub fn quit_training(&mut self, s: &mut TrainState) {
+        if let Some(job) = &s.job {
+            job.stop.store(true, Ordering::Relaxed);
+        }
+        self.finish_training(s);
+    }
+
+    fn finish_training(&mut self, s: &mut TrainState) {
+        let Some(job) = s.job.take() else { return };
+        self.checkpoint_training(s.idx, &job);
+        let sh = job.shared.lock().unwrap();
+        let t = &mut self.troops[s.idx];
+        let before = job.skills_before;
+        if sh.actor.is_some() {
             t.sessions += 1;
         }
+        let mastery_up = (t.spec.mastery > job.mastery_before).then_some(t.spec.mastery);
         let gained = sh.steps - job.start;
         let mut msg = format!(
             "{} trained {} steps. Drill wins {:.0}% -> {:.0}%",
@@ -543,6 +576,11 @@ impl Game {
             }
             if done {
                 self.finish_training(&mut s);
+            } else if let Some(j) = &mut s.job {
+                if get_time() - j.saved_at >= CHECKPOINT_SECS {
+                    j.saved_at = get_time();
+                    self.checkpoint_training(s.idx, j);
+                }
             }
         }
         if s.plan.is_some() && s.job.is_none() {

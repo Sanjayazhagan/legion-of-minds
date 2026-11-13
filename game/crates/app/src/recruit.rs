@@ -250,8 +250,10 @@ impl Game {
         if self.ui.button_ex(br, &format!("Recruit ({RECRUIT_COST}g) and train"), ok, false) {
             let spec = spec.unwrap();
             self.profile.gold -= RECRUIT_COST;
-            let id = self.profile.next_id;
-            self.profile.next_id += 1;
+            // Never reuse a number a troop file has: a reset profile
+            // starts counting at 1 again.
+            let id = self.store.free_troop_id(self.profile.next_id);
+            self.profile.next_id = id + 1;
             let seed = self.rng.next_u64();
             let mut t = Troop::new(id, s.name.trim().to_string(), spec, seed);
             t.set_brain(s.brain);

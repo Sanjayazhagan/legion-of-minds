@@ -323,6 +323,8 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
     let mut frame = 0u32;
+    // Closing the window saves first (see the end of the loop).
+    prevent_quit();
     loop {
         game.ui.begin();
         if std::env::var("BAG_SCREEN").as_deref() == Ok("gallery") {
@@ -374,7 +376,20 @@ async fn main() {
             };
         }
         game.tour_frame(&screen, click);
+        if let Some(n) = save::take_notice() {
+            game.toast = Some((n, 6.0));
+        }
         game.draw_toast();
+        if is_quit_requested() {
+            // Keep a running training session's progress, then everything else.
+            match &mut screen {
+                Screen::Train(s) => game.quit_training(s),
+                Screen::Team(s) => game.quit_team(s),
+                _ => {}
+            }
+            game.save_all();
+            break;
+        }
         if is_key_pressed(KeyCode::M) {
             let m = sfx::toggle_mute();
             game.settings.muted = m;
