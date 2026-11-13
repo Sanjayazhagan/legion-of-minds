@@ -1,0 +1,16 @@
+# "See what it's thinking": pick a troop, pause, pick another.
+wait 2.5
+move 1000 240 0.8
+wait 0.3
+click
+wait 5
+move 795 741 0.8
+wait 0.2
+click
+wait 2.5
+click
+wait 1
+move 1000 352 0.8
+wait 0.3
+click
+wait 6

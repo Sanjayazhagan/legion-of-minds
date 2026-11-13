@@ -76,6 +76,8 @@ enum PKind {
     Smoke,
     /// Glowing bits from fire and magic.
     Ember,
+    /// Gold spilling from a fallen building: bounces and spins.
+    Coin,
 }
 
 #[derive(Clone, Copy)]
@@ -381,11 +383,26 @@ impl Effects {
                     let size = self.rnd(0.14, 0.34);
                     self.add(PKind::Chip, u.x + vx * 0.1 * r, u.y + vy * 0.1 * r, h, (vx, vy, vh), 2.2, size, Color::new(g, g * 0.95, g * 0.9, 1.0));
                 }
-                for _ in 0..18 {
-                    let (vx, vy) = (self.rnd(-1.6, 1.6), self.rnd(-1.6, 1.6));
-                    let h = self.rnd(0.2, 1.8);
-                    let size = self.rnd(0.6, 1.2) * r;
-                    self.add(PKind::Dust, u.x, u.y, h, (vx, vy, 0.25), 2.0, size, Color::new(0.62, 0.58, 0.5, 1.0));
+                // Loot spills out: a fountain of gold coins.
+                for _ in 0..22 {
+                    let (vx, vy, vh) = (self.rnd(-2.2, 2.2), self.rnd(-2.2, 2.2), self.rnd(5.0, 9.0));
+                    let g = self.rnd(0.0, 0.25);
+                    self.add(PKind::Coin, u.x, u.y, 1.0 + r, (vx, vy, vh), 1.6, 0.16, Color::new(1.0, 0.78 + g * 0.6, 0.18 + g, 1.0));
+                }
+                // A short, puffy ring of dust rolling outwards, not a fog bank.
+                for k in 0..12 {
+                    let ang = k as f32 / 12.0 * std::f32::consts::TAU + self.rnd(-0.2, 0.2);
+                    let sp = self.rnd(2.2, 3.4);
+                    let h = self.rnd(0.1, 0.9);
+                    let size = self.rnd(0.35, 0.6) * r;
+                    let g = self.rnd(0.48, 0.6);
+                    self.add(PKind::Dust, u.x, u.y, h, (ang.cos() * sp, ang.sin() * sp, 0.4), 1.1, size, Color::new(g, g * 0.92, g * 0.8, 1.0));
+                }
+                for _ in 0..4 {
+                    let (vx, vy) = (self.rnd(-0.6, 0.6), self.rnd(-0.6, 0.6));
+                    let size = self.rnd(0.5, 0.8) * r;
+                    let h = self.rnd(0.8, 1.8);
+                    self.add(PKind::Dust, u.x, u.y, h, (vx, vy, 0.9), 1.4, size, Color::new(0.5, 0.47, 0.42, 1.0));
                 }
             } else {
                 sfx::play(Sfx::Fall, pan(u.x), 0.9, 0.25);
@@ -590,12 +607,12 @@ impl Effects {
             p.y += p.vy * dt;
             p.h += p.vh * dt;
             match p.kind {
-                PKind::Spark | PKind::Chip | PKind::Ember => {
+                PKind::Spark | PKind::Chip | PKind::Ember | PKind::Coin => {
                     p.vh -= if p.kind == PKind::Ember { 4.0 } else { 14.0 } * dt;
                     if p.h < 0.0 {
-                        // Bounce and skid to a stop.
+                        // Bounce and skid to a stop (coins bounce higher).
                         p.h = 0.0;
-                        p.vh = -p.vh * 0.3;
+                        p.vh = -p.vh * if p.kind == PKind::Coin { 0.45 } else { 0.3 };
                         p.vx *= 0.5;
                         p.vy *= 0.5;
                     }
@@ -657,6 +674,11 @@ fn handle_zoom(r: Rect) {
     }
 }
 
+/// The UI letterbox: offset and scale from UI units to window points.
+pub fn screen() -> (f32, f32, f32) {
+    SCREEN.with(|c| c.get())
+}
+
 /// Called by the UI each frame with its letterbox.
 pub fn set_screen(vx: f32, vy: f32, s: f32, cam: &Camera2D) {
     SCREEN.with(|c| c.set((vx, vy, s)));
@@ -700,6 +722,7 @@ fn begin_3d(r: Rect, mut cam: Camera3D, clear_depth: bool) {
         cam.z_far = 100.0;
     }
     cam.viewport = Some(viewport_px(r));
+    crate::scene::set_view(cam.position, cam.fovy, viewport_px(r).3 as f32);
     cam.aspect = Some(r.w / r.h);
     let rt = target();
     cam.render_target = rt.clone();
@@ -748,7 +771,7 @@ impl View {
 
     pub fn camera(&self) -> Camera3D {
         Camera3D {
-            position: vec3(0.0, 1.5, 0.0) + vec3(0.0, 50.0, 43.0) * ZOOM.with(|z| z.get()) + SHAKE.with(|c| c.get()),
+            position: vec3(0.0, 1.5, 0.0) + vec3(0.0, 44.0, 47.0) * ZOOM.with(|z| z.get()) + SHAKE.with(|c| c.get()),
             target: vec3(0.0, 0.0, 1.5) + SHAKE.with(|c| c.get()),
             up: Vec3::Y,
             fovy: 0.45,
@@ -834,21 +857,97 @@ pub struct Look {
 
 // ------------------------------------------------------------- Ground
 
-fn ground_mesh(lib: Option<&Library>) {
-    let _ = lib;
-    // Wide meadow, with the arena a little lighter and a faint build grid.
-    let quad = |x0: f32, z0: f32, x1: f32, z1: f32, h: f32, c: Color| {
-        let v = |x, z| Vertex { position: vec3(x, h, z), uv: Vec2::ZERO, color: c.into(), normal: Vec4::ZERO };
-        draw_mesh(&Mesh { vertices: vec![v(x0, z0), v(x1, z0), v(x1, z1), v(x0, z1)], indices: vec![0, 1, 2, 0, 2, 3], texture: None });
+/// Smooth value noise in 0..1, for grass colour.
+fn grass_noise(x: f32, z: f32) -> f32 {
+    let h = |i: i32, j: i32| {
+        let mut n = (i as u32).wrapping_mul(0x9E37_79B1) ^ (j as u32).wrapping_mul(0x85EB_CA77);
+        n ^= n >> 15;
+        n = n.wrapping_mul(0x2C1B_3C6D);
+        n ^= n >> 12;
+        (n & 0xffff) as f32 / 65535.0
     };
-    quad(-60.0, -60.0, 60.0, 60.0, -0.02, Color::new(0.30, 0.52, 0.22, 1.0));
-    for i in 0..16 {
-        for j in 0..16 {
-            let (x0, z0) = (-C + i as f32 * 2.0, -C + j as f32 * 2.0);
-            let c = if (i + j) % 2 == 0 { Color::new(0.42, 0.66, 0.28, 1.0) } else { Color::new(0.39, 0.62, 0.26, 1.0) };
-            quad(x0, z0, x0 + 2.0, z0 + 2.0, -0.01, c);
+    let (fx, fz) = (x.floor(), z.floor());
+    let (tx, tz) = (x - fx, z - fz);
+    let (sx, sz) = (tx * tx * (3.0 - 2.0 * tx), tz * tz * (3.0 - 2.0 * tz));
+    let (i, j) = (fx as i32, fz as i32);
+    let a = h(i, j) + (h(i + 1, j) - h(i, j)) * sx;
+    let b = h(i, j + 1) + (h(i + 1, j + 1) - h(i, j + 1)) * sx;
+    a + (b - a) * sz
+}
+
+/// The meadow as one mesh, built once: rolling patches of lighter and darker
+/// grass, a trodden lighter arena and only a whisper of the build grid.
+fn build_ground() -> Mesh {
+    let (lo, hi, n) = (-48.0f32, 48.0f32, 64usize);
+    let step = (hi - lo) / n as f32;
+    let col = |x: f32, z: f32, cell: bool| -> [u8; 4] {
+        let big = grass_noise(x * 0.09 + 3.1, z * 0.09 - 7.4);
+        let small = grass_noise(x * 0.45 - 11.0, z * 0.45 + 5.0);
+        let g = 0.78 * big + 0.22 * small;
+        // Lighter, warmer grass inside the arena, darker meadow outside.
+        let edge = ((x.abs().max(z.abs()) - C) / 3.0).clamp(0.0, 1.0);
+        let inside = 1.0 - edge;
+        let mut r = 0.30 + 0.10 * g + 0.06 * inside;
+        let mut gg = 0.50 + 0.14 * g + 0.10 * inside;
+        let mut b = 0.18 + 0.06 * g + 0.03 * inside;
+        if cell && inside > 0.5 {
+            r += 0.012;
+            gg += 0.018;
+            b += 0.006;
+        }
+        [(r * 255.0) as u8, (gg * 255.0) as u8, (b * 255.0) as u8, 255]
+    };
+    let mut vertices = Vec::with_capacity(n * n * 4);
+    let mut indices: Vec<u16> = Vec::with_capacity(n * n * 6);
+    for i in 0..n {
+        for j in 0..n {
+            let (x0, z0) = (lo + i as f32 * step, lo + j as f32 * step);
+            let (x1, z1) = (x0 + step, z0 + step);
+            let (cx, cz) = ((x0 + x1) * 0.5, (z0 + z1) * 0.5);
+            let cell = (((cx + C) / 2.0).floor() as i32 + ((cz + C) / 2.0).floor() as i32) % 2 == 0;
+            let base = vertices.len() as u16;
+            for (x, z) in [(x0, z0), (x1, z0), (x1, z1), (x0, z1)] {
+                vertices.push(Vertex { position: vec3(x, -0.01, z), uv: Vec2::ZERO, color: col(x, z, cell), normal: Vec4::ZERO });
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
+    Mesh { vertices, indices, texture: None }
+}
+
+fn ground_mesh(lib: Option<&Library>) {
+    let _ = lib;
+    thread_local! {
+        static GROUND: std::cell::RefCell<Option<Mesh>> = const { std::cell::RefCell::new(None) };
+    }
+    GROUND.with(|g| {
+        let mut g = g.borrow_mut();
+        draw_mesh(g.get_or_insert_with(build_ground));
+    });
+}
+
+/// A soft round shadow on the ground, dark in the middle and fading out.
+fn blob_shadow(at: Vec3, r: f32, alpha: f32) {
+    let n = 20;
+    let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
+    let mid = [12, 22, 8, a];
+    let rim = [12, 22, 8, 0];
+    let p = |k: usize, f: f32| {
+        let t = k as f32 / n as f32 * std::f32::consts::TAU;
+        vec3(at.x + t.cos() * r * f, 0.012, at.z + t.sin() * r * f * 0.85)
+    };
+    let mut vs = vec![Vertex { position: vec3(at.x, 0.012, at.z), uv: Vec2::ZERO, color: mid, normal: Vec4::ZERO }];
+    for k in 0..n {
+        vs.push(Vertex { position: p(k, 0.55), uv: Vec2::ZERO, color: [12, 22, 8, (a as f32 * 0.8) as u8], normal: Vec4::ZERO });
+        vs.push(Vertex { position: p(k, 1.0), uv: Vec2::ZERO, color: rim, normal: Vec4::ZERO });
+    }
+    let mut ix: Vec<u16> = Vec::new();
+    for k in 0..n {
+        let (i0, o0) = (1 + 2 * k as u16, 2 + 2 * k as u16);
+        let (i1, o1) = (1 + 2 * ((k + 1) % n) as u16, 2 + 2 * ((k + 1) % n) as u16);
+        ix.extend_from_slice(&[0, i0, i1, i0, o0, o1, i0, o1, i1]);
+    }
+    draw_mesh(&Mesh { vertices: vs, indices: ix, texture: None });
 }
 
 /// Fixed scenery around the arena edge.
@@ -1123,7 +1222,38 @@ fn back_prop(c: godcore::classes::BaseClass) -> Option<&'static str> {
     }
 }
 
-const CHAR_SCALE: f32 = 1.0;
+/// Troops on the battlefield are drawn bigger than life next to buildings,
+/// so their faces, gear and class colours read from the battle camera.
+/// Drawing only: the sim's sizes and ranges are untouched.
+const CHAR_SCALE: f32 = 1.15;
+
+/// Body build per class: heavies a bit broader, sneaks a bit slighter.
+fn build_of(fig: &Figure) -> Vec3 {
+    use godcore::classes::BaseClass::*;
+    if fig.raider {
+        return Vec3::ONE;
+    }
+    match fig.main {
+        Fighter | Hunter => vec3(1.1, 1.04, 1.1),
+        Guard | Paladin => vec3(1.08, 1.06, 1.08),
+        Assassin => vec3(0.94, 0.97, 0.94),
+        Archer | Sentry => vec3(0.98, 1.0, 0.98),
+        _ => Vec3::ONE,
+    }
+}
+
+/// How much of a mesh part is painted in the class colour (0 to 1): capes
+/// and wizard hats fully, robes, tunics and armour partly, so classes that
+/// share a model (the four casters, the two hooded rogues) still stand apart.
+fn class_paint(name: &str) -> f32 {
+    match name {
+        "Mage_Hat" => 0.85,
+        "Mage_Body" | "Rogue_Body" => 0.6,
+        "Knight_Body" => 0.45,
+        n if n.ends_with("_Cape") => 0.85,
+        _ => 0.0,
+    }
+}
 
 #[derive(Clone, Copy)]
 struct CharPose {
@@ -1168,14 +1298,28 @@ fn first_clip<'a>(m: &crate::scene::Model, names: &[&'a str]) -> Option<&'a str>
 struct Extra {
     /// 0 to 1: the red flash of a hit just taken.
     hurt: f32,
+    /// Whose side it is on, for the outline colour: Some(true) enemy,
+    /// Some(false) the player's, None in menus.
+    hostile: Option<bool>,
 }
 
+/// The cartoon look for a character: dark outline (tinted by side) and rim light.
+fn toon_for(hostile: Option<bool>) -> crate::scene::Toon {
+    let outline = match hostile {
+        Some(true) => Color::new(0.30, 0.04, 0.05, 1.0),
+        Some(false) => Color::new(0.04, 0.09, 0.26, 1.0),
+        None => Color::new(0.07, 0.06, 0.1, 1.0),
+    };
+    crate::scene::Toon { outline_px: if hostile.is_some() { 2.2 } else { 2.6 }, outline, rim: 0.55 }
+}
+
+/// The class colour, as worn on capes and hats.
 fn tint_of(fig: &Figure) -> Color {
     if fig.raider {
         return WHITE;
     }
     let c = fig.outfit;
-    Color::new(0.7 + 0.3 * c.r, 0.7 + 0.3 * c.g, 0.7 + 0.3 * c.b, 1.0)
+    Color::new(0.15 + 0.85 * c.r, 0.15 + 0.85 * c.g, 0.15 + 0.85 * c.b, 1.0)
 }
 
 /// What this character wears, holds and plays.
@@ -1270,16 +1414,36 @@ fn draw_character_ex(
         }
         None => m.pose(Some(clip), now_clip.1, looped),
     };
-    let world = Mat4::from_scale_rotation_translation(Vec3::splat(scale), Quat::from_rotation_y(heading), pos);
-    let mut tint = if npc_guard { WHITE } else { tint_of(fig) };
-    if extra.hurt > 0.0 {
+    let build = if npc_guard { Vec3::ONE } else { build_of(fig) };
+    let world = Mat4::from_scale_rotation_translation(build * scale, Quat::from_rotation_y(heading), pos);
+    let hurt = |c: Color| {
         let h = extra.hurt;
-        tint = Color::new(tint.r, tint.g * (1.0 - 0.55 * h), tint.b * (1.0 - 0.6 * h), tint.a);
-    }
-    m.draw(world, &g, &|n| !is_accessory(m, n) || show.contains(&n), tint);
-    for &(prop, bone) in lo.props {
-        attach(lib, m, &g, world, prop, bone, Mat4::IDENTITY);
-    }
+        Color::new(c.r, c.g * (1.0 - 0.55 * h), c.b * (1.0 - 0.6 * h), c.a)
+    };
+    let plain = !npc_guard && !fig.raider;
+    let class_col = tint_of(fig);
+    // Skeletons' pale bone is toned down a little so it doesn't glare.
+    let body = if plain { WHITE } else { Color::new(0.84, 0.8, 0.78, 1.0) };
+    let paint = |n: &str| {
+        let k = if plain { class_paint(n) } else { 0.0 };
+        if k > 0.0 {
+            (hurt(class_col), k)
+        } else {
+            (hurt(body), 0.0)
+        }
+    };
+    crate::scene::toon_style(toon_for(extra.hostile), || {
+        m.draw_ex(world, &g, &|n| !is_accessory(m, n) || show.contains(&n), &paint);
+        for &(prop, bone) in lo.props {
+            attach(lib, m, &g, world, prop, bone, Mat4::IDENTITY);
+        }
+        draw_blend_gear(lib, m, &g, world, fig, npc_guard);
+    });
+    true
+}
+
+/// Blend parts beyond the first show as gear on the character.
+fn draw_blend_gear(lib: &Library, m: &Model, g: &[Mat4], world: Mat4, fig: &Figure, npc_guard: bool) {
     if !npc_guard && !fig.raider {
         // Blend parts beyond the first show as gear: the second slung across the
         // back over the right shoulder, the third over the left.
@@ -1300,7 +1464,6 @@ fn draw_character_ex(
             }
         }
     }
-    true
 }
 
 /// Named accessory meshes that are off unless a loadout turns them on.
@@ -1531,12 +1694,43 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         .enumerate()
         .map(|(i, u)| if u.kind.is_building() { (u.x, u.y, 0.0) } else { fx.smooth(i, u) })
         .collect();
+    // Troops standing on the same spot are drawn a little apart, so a crowd
+    // reads as a crowd and not as one blob. Drawing only: the sim is untouched.
+    let mut sp = sp;
+    let movers: Vec<usize> = (0..w.units.len()).filter(|&i| w.units[i].alive && !w.units[i].kind.is_building()).collect();
+    for _ in 0..2 {
+        for (a, &i) in movers.iter().enumerate() {
+            for &j in &movers[a + 1..] {
+                let (dx, dy) = (sp[j].0 - sp[i].0, sp[j].1 - sp[i].1);
+                let d = (dx * dx + dy * dy).sqrt();
+                const GAP: f32 = 0.8 * CHAR_SCALE;
+                if d < GAP {
+                    let (nx, ny) = if d > 1e-3 { (dx / d, dy / d) } else { let t = (i * 7 + j * 13) as f32; (t.cos(), t.sin()) };
+                    let push = (GAP - d) * 0.35;
+                    sp[i].0 -= nx * push;
+                    sp[i].1 -= ny * push;
+                    sp[j].0 += nx * push;
+                    sp[j].1 += ny * push;
+                }
+            }
+        }
+    }
 
     // ---- 3D pass
     let mut flat: Vec<usize> = Vec::new(); // units without a model: 2D fallback
     // Melee fighters mid-swing: how far through it (0 to 1) and what they hit.
     let mut swings: Vec<Option<(f32, (f32, f32))>> = vec![None; w.units.len()];
     begin_3d(v.r, v.camera(), false);
+    // Soft shadows first, so everything stands on the ground.
+    for (i, u) in w.units.iter().enumerate() {
+        let (sx, sy, _) = sp[i];
+        if u.kind.is_building() {
+            let r = u.radius * if u.alive { 1.35 } else { 1.2 };
+            blob_shadow(w3(sx + 0.3, sy - 0.25, 0.0), r, if u.alive { 0.6 } else { 0.3 });
+        } else if u.alive {
+            blob_shadow(w3(sx + 0.1, sy - 0.08, 0.0), 0.6, 0.7);
+        }
+    }
     for (i, u) in w.units.iter().enumerate() {
         let a = fx.anim.get(i).copied();
         let (sx, sy, heading) = sp[i];
@@ -1657,7 +1851,10 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         if u.cloak > 0 && looks[i].as_ref().map_or(true, |l| l.hostile) {
             continue; // an enemy in cloak is invisible (a shimmer is drawn later)
         }
-        let extra = Extra { hurt: (1.0 - (now - a.hurt) as f32 / 0.15).clamp(0.0, 1.0) * u.alive as u8 as f32 };
+        let extra = Extra {
+            hurt: (1.0 - (now - a.hurt) as f32 / 0.15).clamp(0.0, 1.0) * u.alive as u8 as f32,
+            hostile: Some(looks[i].as_ref().map_or(true, |l| l.hostile)),
+        };
         let mut blends = fx.blends.borrow_mut();
         if blends.len() < w.units.len() {
             blends.resize(w.units.len(), Blend::default());
@@ -1671,7 +1868,14 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         } else {
             blends[i].swing = -1;
         }
-        if !draw_character_ex(lib, &fig, npc, pos, heading, pose, CHAR_SCALE, extra, Some(&mut blends[i])) {
+        // Fresh troops pop onto the field with a little bounce.
+        let pop = if rising || u.team != Team::Attack {
+            1.0
+        } else {
+            let k = ((now - a.born) as f32 / 0.45).clamp(0.0, 1.0);
+            1.0 - (-6.0 * k).exp() * (11.0 * k).cos() * (1.0 - k)
+        };
+        if !draw_character_ex(lib, &fig, npc, pos, heading, pose, CHAR_SCALE * pop.max(0.05), extra, Some(&mut blends[i])) {
             flat.push(i);
         }
     }
@@ -1786,7 +1990,7 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             draw_circle(c.x, c.y, 0.55 * s, Color::new(0.45, 0.7, 1.0, 0.18));
             draw_circle_lines(c.x, c.y, 0.55 * s, 2.5, Color::new(0.6, 0.85, 1.0, 0.85));
         }
-        if u.hp < u.max_hp || u.kind == Kind::Troop {
+        if u.hp < u.max_hp {
             let bw = if u.kind.is_building() { u.radius * 1.6 * s } else { s * 1.1 };
             let col = if u.team == friendly { GOOD } else { BAD };
             draw_rectangle(top.x - bw / 2.0 - 1.0, top.y - 7.0, bw + 2.0, 6.0, Color::new(0.0, 0.0, 0.0, 0.6));
@@ -1810,6 +2014,13 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             }
             PKind::Ember => {
                 draw_circle(q.x, q.y, px * 0.8, Color::new(p.col.r, p.col.g, p.col.b, fade));
+            }
+            PKind::Coin => {
+                // A spinning disc: its width follows the spin, with a bright rim.
+                let spin = ((p.age * 14.0 + p.x * 3.0).sin()).abs().max(0.2);
+                let a = (fade * 3.0).min(1.0);
+                draw_ellipse(q.x, q.y, px * spin, px, 0.0, Color::new(p.col.r * 0.75, p.col.g * 0.6, p.col.b * 0.4, a));
+                draw_ellipse(q.x, q.y, px * spin * 0.7, px * 0.7, 0.0, Color::new(p.col.r, p.col.g, p.col.b, a));
             }
             PKind::Dust | PKind::Smoke => {
                 let r = px * (0.6 + 1.6 * k.sqrt());

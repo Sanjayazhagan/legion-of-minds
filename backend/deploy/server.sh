@@ -105,9 +105,12 @@ if [ -n "$DOMAIN" ]; then
   # Behind the HTTPS proxy: only reachable through it.
   set_value BIND_ADDR "127.0.0.1:$PORT"
   set_value PUBLIC_URL "https://$DOMAIN"
+  # Rate limits read the client's address from the proxy's X-Forwarded-For.
+  set_value TRUST_PROXY true
 else
   set_default BIND_ADDR "0.0.0.0:$PORT"
   set_default PUBLIC_URL "http://$HOST:$PORT"
+  set_value TRUST_PROXY false
 fi
 set_default RUST_LOG "info,sqlx=warn"
 

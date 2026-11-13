@@ -8,7 +8,8 @@ use crate::{Game, Screen};
 use godcore::battle::{fingerprint, Battle};
 use godcore::classes::Role;
 use godcore::scenario::{build_base, can_deploy, BASES, DEPLOY_RADIUS, HOME_NAME, WAVES};
-use godcore::sim::{Kind, Outcome, Team, World, ARENA};
+use godcore::mind::think;
+use godcore::sim::{Control, Kind, Outcome, Team, World, ARENA};
 use macroquad::prelude::*;
 
 pub const MAX_SQUAD: usize = 5;
@@ -69,19 +70,30 @@ pub struct BattleState {
     replay_ok: Option<bool>,
     /// The map fills the window, with a small overlay instead of the side panel.
     full: bool,
+    /// The troop whose thoughts are shown (unit index), if any.
+    focus: Option<usize>,
+    paused: bool,
 }
 
 impl BattleState {
     pub fn start(mode: Mode, remake: Box<dyn Fn() -> Battle>) -> Self {
+        let battle = remake();
+        // Test hook: BAG_THINK=k shows the k-th trained troop's thoughts.
+        let focus = std::env::var("BAG_THINK")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .and_then(|k| (0..battle.world.units.len()).filter(|&i| thinker(&battle, i)).nth(k));
         BattleState {
             mode,
-            battle: remake(),
+            battle,
             remake: remake.into(),
             acc: 0.0,
             speed: 1.0,
             result: None,
             replay_ok: None,
             full: false,
+            focus,
+            paused: false,
         }
     }
 
@@ -436,7 +448,18 @@ impl Game {
             s.full = !s.full;
         }
         let dt = crate::record::dt().min(0.1);
-        if s.result.is_none() {
+        if is_key_pressed(KeyCode::Space) && s.result.is_none() {
+            s.paused = !s.paused;
+        }
+        if is_key_pressed(KeyCode::Tab) {
+            let n = s.battle.world.units.len();
+            let from = s.focus.map_or(0, |f| f + 1);
+            s.focus = (0..n).map(|k| (from + k) % n).find(|&i| thinker(&s.battle, i));
+        }
+        if s.focus.is_some_and(|f| !s.battle.world.units[f].alive) {
+            s.focus = None;
+        }
+        if s.result.is_none() && !s.paused {
             s.acc += dt * WATCH_TPS * s.speed;
             while s.acc >= 1.0 && s.battle.outcome() == Outcome::Running {
                 s.acc -= 1.0;
@@ -473,12 +496,42 @@ impl Game {
             }
         });
 
+        // Click a trained troop on the map to see what it's thinking.
+        if self.ui.clicked && v.r.contains(self.ui.mouse) {
+            let (mx, my) = v.to_world(self.ui.mouse);
+            s.focus = (0..w.units.len())
+                .filter(|&i| thinker(&s.battle, i))
+                .map(|i| (i, (w.units[i].x - mx).hypot(w.units[i].y - my)))
+                .filter(|&(_, d)| d < 1.6)
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                .map(|(i, _)| i);
+        }
+        let who = |k: usize| {
+            let u = &w.units[k];
+            match u.kind {
+                Kind::Troop if u.tag < troops.len() && u.control == Control::External && (u.team == Team::Defend) == defending => troops[u.tag].name.clone(),
+                Kind::Troop => if defending { "a raider" } else { "an enemy troop" }.to_string(),
+                Kind::Guard => "the guard".to_string(),
+                Kind::Tower => "the tower".to_string(),
+                Kind::Core => "the Town Hall".to_string(),
+            }
+        };
+        let thought = s.focus.map(|f| think(w, f, &troops[w.units[f].tag].actor));
+        if let Some(t) = &thought {
+            crate::mind_view::draw_on_map(v, w, t, &who);
+        }
+
         // HUD
         let rx = 754.0;
         let rw = W - rx - 20.0;
         let secs_left = (w.max_ticks - w.tick) as f32 / WATCH_TPS;
         if s.full {
             full_hud(w, secs_left, defending);
+            if let (Some(t), Some(f)) = (&thought, s.focus) {
+                let r = Rect::new(16.0, H - 236.0, 700.0, 210.0);
+                draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.05, 0.05, 0.08, 0.85));
+                crate::mind_view::draw_panel(r, w, t, &troops[w.units[f].tag].name, &who);
+            }
         } else {
         text(
             &format!("Time left {:.0}s", secs_left),
@@ -533,12 +586,18 @@ impl Game {
             .enumerate()
             .filter(|(_, u)| u.kind == Kind::Troop && u.tag < troops.len())
         {
-            if y > H - 130.0 {
+            if y > if thought.is_some() { H - 340.0 } else { H - 130.0 } {
                 break;
             }
             let t = &troops[u.tag];
             let r = Rect::new(rx, y, rw, 50.0);
             panel(r);
+            if s.focus == Some(i) {
+                draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, ACCENT);
+            }
+            if u.alive && thinker(&s.battle, i) && self.ui.hover(r) && self.ui.clicked {
+                s.focus = if s.focus == Some(i) { None } else { Some(i) };
+            }
             if u.alive {
                 crate::art::draw_portrait(vec2(r.x + 22.0, r.y + 25.0), 16.0, &t.spec);
             } else {
@@ -571,22 +630,19 @@ impl Game {
             );
             y += 56.0;
         }
+        if let (Some(t), Some(f)) = (&thought, s.focus) {
+            // The focused troop's thoughts in words.
+            let r = Rect::new(rx, y + 4.0, rw, (H - 96.0 - y - 4.0).min(210.0));
+            crate::mind_view::draw_panel(r, w, t, &troops[w.units[f].tag].name, &who);
+        } else if s.result.is_none() {
+            text("Click a troop to see what it's thinking  (Space pauses)", rx, y + 14.0, 16.0, MUTED);
+            y += 22.0;
+        }
         // What the team has been telling each other, newest first.
-        if !self.fx.calls.is_empty() && y < H - 200.0 {
+        if thought.is_none() && !self.fx.calls.is_empty() && y < H - 200.0 {
             y += 6.0;
             text("Team talk", rx, y + 14.0, 18.0, TEXT);
             y += 24.0;
-            let who = |k: usize| {
-                let u = &w.units[k];
-                match u.kind {
-                    Kind::Troop if u.team == Team::Attack && u.tag < troops.len() && !defending => troops[u.tag].name.clone(),
-                    Kind::Troop if u.team == Team::Defend && u.tag < troops.len() && defending => troops[u.tag].name.clone(),
-                    Kind::Troop => if defending { "a raider" } else { "an enemy troop" }.to_string(),
-                    Kind::Guard => "the guard".to_string(),
-                    Kind::Tower => "the tower".to_string(),
-                    Kind::Core => "the Town Hall".to_string(),
-                }
-            };
             for c in self.fx.calls.iter().rev().take(((H - 110.0 - y) / 22.0).max(0.0) as usize) {
                 let line = match c.target {
                     Some(t) => format!("{}: {} ({})", who(c.from), crate::render::call_words(c.kind), who(t)),
@@ -599,14 +655,18 @@ impl Game {
         }
         if s.result.is_none() {
             let by = H - 80.0;
-            for (k, sp) in [1.0f32, 2.0, 4.0].into_iter().enumerate() {
+            if self.ui.button_ex(Rect::new(rx, by, 82.0, 44.0), if s.paused { "Play" } else { "Pause" }, true, s.paused) {
+                s.paused = !s.paused;
+            }
+            for (k, sp) in [1.0f32, 2.0].into_iter().enumerate() {
                 if self.ui.button_ex(
-                    Rect::new(rx + k as f32 * 90.0, by, 82.0, 44.0),
+                    Rect::new(rx + (k + 1) as f32 * 90.0, by, 82.0, 44.0),
                     &format!("{sp:.0}x"),
                     true,
-                    s.speed == sp,
+                    s.speed == sp && !s.paused,
                 ) {
                     s.speed = sp;
+                    s.paused = false;
                 }
             }
             if self
@@ -614,6 +674,7 @@ impl Game {
                 .button(Rect::new(rx + 280.0, by, rw - 280.0, 44.0), "Skip to end")
             {
                 s.speed = 1000.0;
+                s.paused = false;
             }
         } else {
             let (stars, gold, new_best) = s.result.unwrap();
@@ -767,4 +828,10 @@ pub fn action_name(a: u8) -> &'static str {
         11 => "healing",
         _ => "",
     }
+}
+
+/// Whether unit `i` has a brain to look into: one of the trained troops.
+fn thinker(b: &Battle, i: usize) -> bool {
+    let u = &b.world.units[i];
+    u.alive && u.kind == Kind::Troop && u.control == Control::External && u.tag < b.troops.len()
 }

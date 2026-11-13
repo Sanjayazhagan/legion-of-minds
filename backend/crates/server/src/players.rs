@@ -6,7 +6,7 @@ use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use bag_protocol::{
-    canonical_snapshot, BaseSnapshot, Invalid, PublicPlayer, Published, RenameRequest, Upgrades,
+    canonical_snapshot, BaseSnapshot, ClanRole, ClanTag, Invalid, PublicPlayer, Published, RenameRequest, Upgrades,
     User, SIM_VERSION,
 };
 use chrono::{DateTime, Utc};
@@ -73,6 +73,13 @@ pub async fn load_user_in(db: &mut PgConnection, id: Uuid) -> ApiResult<User> {
         .await?
         .ok_or_else(|| ApiError::not_found("player"))?;
     let upgrades = load_upgrades(db, id, r.town_hall_level).await?;
+    let clan: Option<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT c.id, c.name, m.role FROM clan_members m JOIN clans c ON c.id = m.clan_id
+         WHERE m.user_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *db)
+    .await?;
     Ok(User {
         id: r.id,
         display_name: r.display_name,
@@ -85,6 +92,11 @@ pub async fn load_user_in(db: &mut PgConnection, id: Uuid) -> ApiResult<User> {
             .filter(|t| *t > Utc::now())
             .map(|t| t.to_rfc3339()),
         upgrades,
+        clan: clan.map(|(id, name, role)| ClanTag {
+            id,
+            name,
+            role: ClanRole::parse(&role),
+        }),
     })
 }
 

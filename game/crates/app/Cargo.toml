@@ -23,3 +23,6 @@ tinyaudio = "2"
 openh264 = "0.9"
 # Online play: the server's own client library (backend/crates/client).
 bag-client = { path = "../../../backend/crates/client" }
+
+[build-dependencies]
+winresource = "0.1"
