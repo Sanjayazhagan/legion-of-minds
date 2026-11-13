@@ -42,14 +42,13 @@ pub fn sight_on() -> bool {
 
 impl Settings {
     pub fn load(dir: &std::path::Path) -> Settings {
-        std::fs::read_to_string(dir.join("settings.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+        crate::save::load_file(&dir.join("settings.json"), |s| serde_json::from_str(s).ok())
+            .map(|(s, _)| s)
             .unwrap_or_default()
     }
 
     pub fn save(&self, dir: &std::path::Path) {
-        let _ = std::fs::write(dir.join("settings.json"), serde_json::to_string_pretty(self).unwrap());
+        crate::save::save_file(&dir.join("settings.json"), serde_json::to_string_pretty(self).unwrap().as_bytes());
     }
 
     /// Make the game follow these settings.

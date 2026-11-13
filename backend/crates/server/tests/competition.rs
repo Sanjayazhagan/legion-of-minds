@@ -45,7 +45,8 @@ fn config(db: String, public_url: String) -> Config {
         shield: Duration::from_secs(3600),
         start_gold: 500,
         match_range: 200,
-        max_body_bytes: 4 << 20,
+        max_body_bytes: 8 << 20,
+        max_json_bytes: 16 << 20,
         season: Duration::from_secs(28 * 86_400),
         // Attacks open as soon as a war is made.
         war_prep: Duration::ZERO,
