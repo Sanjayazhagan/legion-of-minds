@@ -60,12 +60,22 @@ impl From<Invalid> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Request bodies bigger than this are sent gzipped.
+const GZIP_OVER: usize = 64 << 10;
+
 /// Send a request; a non-success answer becomes `Error::Api`.
 fn checked(r: RequestBuilder) -> Result<reqwest::blocking::Response> {
     let resp = r.send().map_err(|e| Error::Network(e.to_string()))?;
     let status = resp.status();
     if status.is_success() {
         return Ok(resp);
+    }
+    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+        return Err(Error::Api {
+            status: status.as_u16(),
+            code: "too_large".into(),
+            message: "that's too much to send to the server at once: try fewer or smaller-brained troops".into(),
+        });
     }
     let body: Option<ApiErrorBody> = resp.json().ok();
     Err(Error::Api {
@@ -129,7 +139,24 @@ impl Client {
     }
 
     fn post<T: DeserializeOwned>(&self, path: &str, body: &impl serde::Serialize) -> Result<T> {
-        self.send(self.req(reqwest::Method::POST, path).json(body))
+        self.send(self.with_json(self.req(reqwest::Method::POST, path), body)?)
+    }
+
+    /// A JSON body, gzipped when it is big. Troop brains are long lists of
+    /// numbers: an army or base of 256-neuron brains is over 5 MB as plain
+    /// JSON and about half that compressed.
+    fn with_json(&self, r: RequestBuilder, body: &impl serde::Serialize) -> Result<RequestBuilder> {
+        let json = serde_json::to_vec(body).map_err(|e| Error::Invalid(e.to_string()))?;
+        let r = r.header(reqwest::header::CONTENT_TYPE, "application/json");
+        if json.len() < GZIP_OVER {
+            return Ok(r.body(json));
+        }
+        use std::io::Write;
+        let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(&json)
+            .and_then(|()| z.finish())
+            .map(|gz| r.header(reqwest::header::CONTENT_ENCODING, "gzip").body(gz))
+            .map_err(|e| Error::Invalid(e.to_string()))
     }
 
     // ------------------------------------------------------------ sign-in
@@ -227,7 +254,7 @@ impl Client {
     /// the defenders' actors are sent (about a third of a troop file).
     pub fn publish_base(&self, s: &BaseSnapshot) -> Result<Published> {
         let s = canonical_snapshot(s)?;
-        self.send(self.req(reqwest::Method::PUT, "/v1/me/base").json(&s))
+        self.send(self.with_json(self.req(reqwest::Method::PUT, "/v1/me/base"), &s)?)
     }
 
     // ------------------------------------------------------------ online upgrades
