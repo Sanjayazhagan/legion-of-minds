@@ -1,13 +1,18 @@
 //! Legion of Minds: desktop app. Recruit troops, train their tiny brains on your
 //! own CPU, then send them against AI-built bases.
 
+// Windows release builds open no console window next to the game.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod armoury;
 mod art;
 mod plan;
 mod record;
 mod barracks;
 mod battle_screen;
+mod clan;
 mod home;
+mod mind_view;
 mod online;
 mod recruit;
 mod render;
@@ -43,6 +48,7 @@ pub enum Screen {
     SignIn(online::SignInState),
     Online(online::OnlineState),
     OnlineWatch(online::WatchState),
+    Clan(clan::ClanState),
 }
 
 pub struct Game {
@@ -146,6 +152,10 @@ fn demo_screen(g: &mut Game) -> Option<Screen> {
         "team" => Screen::Team(teamtrain::TeamState::demo(g)),
         "signin" => Screen::SignIn(online::SignInState::from_game(&g.account)),
         "online" => online::OnlineState::demo(g),
+        "clan" => {
+            g.account.user = g.account.client().me().ok();
+            Screen::Clan(clan::ClanState::new(g))
+        }
         _ => return None,
     })
 }
@@ -204,6 +214,11 @@ fn window_conf() -> macroquad::conf::Conf {
             high_dpi: true,
             window_resizable: true,
             sample_count: 4,
+            icon: Some(macroquad::miniquad::conf::Icon {
+                small: *include_bytes!("../icon/16.rgba"),
+                medium: *include_bytes!("../icon/32.rgba"),
+                big: *include_bytes!("../icon/64.rgba"),
+            }),
             ..Default::default()
         },
         // 3D characters are sent as one mesh per body part.
@@ -333,7 +348,7 @@ async fn main() {
                 screen = Screen::Barracks;
             }
             // Cheated troops never meet other players.
-            if game.store.is_test() && matches!(screen, Screen::Online(_) | Screen::OnlineWatch(_)) {
+            if game.store.is_test() && matches!(screen, Screen::Online(_) | Screen::OnlineWatch(_) | Screen::Clan(_)) {
                 game.toast("Online play is off in test mode. Turn it off in Settings.");
                 screen = Screen::Barracks;
             }
@@ -355,6 +370,7 @@ async fn main() {
                 Screen::SignIn(s) => game.sign_in(s),
                 Screen::Online(s) => game.online(s),
                 Screen::OnlineWatch(s) => game.online_watch(s),
+                Screen::Clan(s) => game.clan(s),
             };
         }
         game.tour_frame(&screen, click);

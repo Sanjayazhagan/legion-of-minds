@@ -1,4 +1,5 @@
 /target
 *.troop.json
-/videos
 !/assets/starters/*.troop.json
+/videos
+/dist

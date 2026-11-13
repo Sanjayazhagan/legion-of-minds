@@ -24,7 +24,7 @@ move 1000 748 0.8
 wait 0.5
 click
 wait 3
-move 885 742 0.8
+move 975 742 0.8
 wait 0.4
 click
 wait 21

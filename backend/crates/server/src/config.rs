@@ -67,6 +67,21 @@ pub struct Config {
     /// Matchmaking looks this many trophies either side first.
     pub match_range: i32,
     pub max_body_bytes: usize,
+    /// How long a season lasts.
+    pub season: Duration,
+    /// Time between a war being matched and attacks opening.
+    pub war_prep: Duration,
+    /// How long war attacks stay open.
+    pub war_battle: Duration,
+    /// Members with a published base a clan needs to start a war.
+    pub war_min_size: usize,
+    /// Requests a minute per client address, and for raids, publishing and
+    /// sign-ins (which cost the server more).
+    pub requests_per_min: u32,
+    pub heavy_per_min: u32,
+    /// Behind our own HTTPS proxy: take the client address from the last
+    /// X-Forwarded-For entry.
+    pub trust_proxy: bool,
 }
 
 fn var(k: &str) -> Option<String> {
@@ -123,6 +138,13 @@ impl Config {
             start_gold: num("START_GOLD", 500i64)?,
             match_range: num("MATCH_TROPHY_RANGE", 200i32)?,
             max_body_bytes: 4 << 20,
+            season: Duration::from_secs(num("SEASON_DAYS", 28u64)? * 86_400),
+            war_prep: mins(num("WAR_PREP_MINUTES", 360u64)?),
+            war_battle: mins(num("WAR_BATTLE_MINUTES", 1440u64)?),
+            war_min_size: num("WAR_MIN_SIZE", 3usize)?.max(1),
+            requests_per_min: num("REQUESTS_PER_MINUTE", 240u32)?,
+            heavy_per_min: num("RAIDS_PER_MINUTE", 20u32)?,
+            trust_proxy: matches!(var("TRUST_PROXY").as_deref(), Some("1" | "true" | "yes" | "on")),
         })
     }
 

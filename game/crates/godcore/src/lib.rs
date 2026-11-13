@@ -10,6 +10,7 @@
 pub mod battle;
 pub mod classes;
 pub mod env;
+pub mod mind;
 pub mod moves;
 pub mod nn;
 pub mod ppo;

@@ -129,7 +129,7 @@ fn step(k: usize, g: &Game, screen: &Screen) -> Option<Step> {
         3 if first => s(Setup, "Pick a base and a squad", "Outpost, the easiest base, is already picked, and all three of your troops are in the squad (the green cards). Press Deploy troops.", Some("deploy"), Reach(Deploy), At(20.0, 560.0), true),
         3 => s(Setup, "Pick a base and a squad", "Click a base at the top, and click troops to add them to your squad (up to 5). Then press Deploy troops.", Some("deploy"), Reach(Deploy), At(20.0, 560.0), false),
         4 => s(Deploy, "Place your troops", "Click the grass outside the red zone to drop each troop, or press Auto-place rest to put them all down. Then press FIGHT!", Some("deploy_next"), Reach(Battle), Near, false),
-        5 => s(Battle, "Now just watch", "Nobody is steering. Every moment, each troop decides what to do using what it learned in practice. Press 2x or 4x to speed it up.", Some("speed"), BattleOver, At(30.0, 640.0), false),
+        5 => s(Battle, "Now just watch", "Nobody is steering. Every moment, each troop decides what to do using what it learned in practice. Press 2x to speed it up, or click a troop to see what it is thinking.", Some("speed"), BattleOver, At(30.0, 640.0), false),
         6 => {
             let stars = match screen {
                 Screen::Battle(b) => b.stars(),
