@@ -14,6 +14,10 @@
 //!   find                                matchmaking only
 //!   raid army1.troop.json ...           find a match and raid it
 //!   log [defense|attack|all]
+//!   revenge ATTACK_ID army1.troop.json  raid back whoever raided you
+//!   raid-of-the-day                     the best raid of the last 24 hours
+//!   cup                                 this week's standings
+//!   cup-enter TROOP.json                enter (or replace) your troop
 //!   replay ATTACK_ID [--out DIR]        re-run locally; --out writes the raiders
 //!   season | seasons                    the current season | your past results
 //!   clans [SEARCH] | clan               list clans | your clan
@@ -42,6 +46,10 @@ const USAGE: &str = "bagctl [--server URL] [--token-file F] <command>
   find                                matchmaking only
   raid army1.troop.json ...           find a match and raid it
   log [defense|attack|all]
+  revenge ATTACK_ID army1.troop.json  raid back whoever raided you
+  raid-of-the-day                     the best raid of the last 24 hours
+  cup                                 this week's standings
+  cup-enter TROOP.json                enter (or replace) your troop
   replay ATTACK_ID [--out DIR]        re-run locally; --out writes the raiders
   season | seasons                    the current season | your past results
   clans [SEARCH] | clan               list clans | your clan
@@ -149,15 +157,22 @@ fn main() {
                 m.expires_at
             );
         }
-        "raid" => {
+        "raid" | "revenge" => {
+            let avenge: Option<Uuid> = (cmd == "revenge").then(|| {
+                let id = if args.is_empty() { None } else { args.remove(0).parse().ok() };
+                id.unwrap_or_else(|| die("revenge ATTACK_ID army1.troop.json ..."))
+            });
             if args.is_empty() {
                 die("raid army1.troop.json ...");
             }
             let army: Vec<Troop> = args.iter().map(|p| load(p)).collect();
             let spots = army_spots(army.len());
             let army: Vec<_> = army.into_iter().zip(spots).collect();
-            let m = ok(c.find_match());
-            println!("raiding {} ...", m.defender.display_name);
+            let m = ok(match avenge {
+                Some(id) => c.revenge(id),
+                None => c.find_match(),
+            });
+            println!("{}: {} ...", m.kind, m.defender.display_name);
             let (local, out) = ok(c.attack(&m, army_from(&army)));
             println!(
                 "local:  {} stars, {:.0}% destroyed, fingerprint {}",
@@ -172,7 +187,38 @@ fn main() {
                 out.result.fingerprint,
                 out.client_matched
             );
-            println!("trophies {:+}, gold looted {}", out.trophies, out.gold_looted);
+            println!(
+                "trophies {:+}, gold looted {}, bonus gold {}",
+                out.trophies, out.gold_looted, out.bonus_gold
+            );
+        }
+        "raid-of-the-day" => {
+            let r = ok(c.raid_of_the_day());
+            println!(
+                "{} raided {}: {} stars, {:.0}% destroyed  [{}]",
+                r.log.attacker.display_name,
+                r.log.defender.display_name,
+                r.log.result.stars,
+                r.log.result.destruction * 100.0,
+                r.log.attack_id
+            );
+        }
+        "cup" | "cup-enter" => {
+            let s = if cmd == "cup" {
+                ok(c.cup())
+            } else {
+                ok(c.enter_cup(&load(args.first().unwrap_or_else(|| die(USAGE)))))
+            };
+            println!("week {}, {} entered, ends {}", s.week, s.entries, s.ends_at);
+            for r in &s.top {
+                println!(
+                    "{:>3}. {:<20} {:<16} {:<18} {:.1}",
+                    r.rank, r.player.display_name, r.troop_name, r.class_name, r.score
+                );
+            }
+            if let Some(m) = s.mine {
+                println!("you: rank {} with {} ({:.1})", m.rank, m.troop_name, m.score);
+            }
         }
         "season" => json(&ok(c.season())),
         "seasons" => json(&ok(c.my_seasons())),
@@ -233,15 +279,17 @@ fn main() {
             let role = args.first().map(String::as_str).unwrap_or("all");
             for l in ok(c.log(role)) {
                 println!(
-                    "{}  {} -> {}: {} stars, {:.0}%, trophies {:+}, gold {}  [{}]",
+                    "{}  {} {} -> {}: {} stars, {:.0}%, trophies {:+}, gold {}  [{}]{}",
                     l.finished_at,
+                    l.kind,
                     l.attacker.display_name,
                     l.defender.display_name,
                     l.result.stars,
                     l.result.destruction * 100.0,
                     l.trophies,
                     l.gold_looted,
-                    l.attack_id
+                    l.attack_id,
+                    if l.can_revenge { "  (revenge open)" } else { "" }
                 );
             }
         }
