@@ -52,6 +52,22 @@ struct Rec {
 
 thread_local! {
     static REC: RefCell<Option<Rec>> = const { RefCell::new(None) };
+    /// Frames drawn into a battle clip being saved (see clip.rs): while set,
+    /// the clock runs one 1/30 s step per clip frame, however fast the
+    /// machine draws.
+    static CLIP: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs the clock on clip frames (`Some(0)` starts at zero, `None` goes back
+/// to the real clock).
+pub fn set_clip_clock(frame: Option<u64>) {
+    CLIP.with(|c| c.set(frame));
+}
+
+/// A clip is being drawn: its sounds are logged for the soundtrack instead of
+/// played.
+pub fn clip_active() -> bool {
+    CLIP.with(|c| c.get().is_some())
 }
 
 /// Starts recording when BAG_RECORD is set.
@@ -109,6 +125,9 @@ pub fn active() -> bool {
 
 /// Seconds since start: frame-locked while recording.
 pub fn now() -> f64 {
+    if let Some(f) = CLIP.with(|c| c.get()) {
+        return f as f64 / FPS;
+    }
     REC.with(|r| match &*r.borrow() {
         Some(rec) => rec.frame as f64 / FPS,
         None => get_time(),
@@ -117,7 +136,7 @@ pub fn now() -> f64 {
 
 /// Frame time: a fixed step while recording.
 pub fn dt() -> f32 {
-    if active() {
+    if active() || clip_active() {
         (1.0 / FPS) as f32
     } else {
         get_frame_time()

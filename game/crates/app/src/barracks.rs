@@ -272,6 +272,13 @@ impl Game {
 
         // Skill badges
         text("Skills seen in drills", x, y, 20.0, TEXT);
+        // A video of this troop raiding with a blank brain, then its own.
+        if t.spec.role == godcore::classes::Role::Attack && t.steps > 0 {
+            let rb = Rect::new(d.x + d.w - 254.0, y - 22.0, 230.0, 30.0);
+            if self.ui.button(rb, "Before/after video") {
+                return Screen::Clip(crate::clip::ClipState::reel(t, Screen::Barracks));
+            }
+        }
         y += 10.0;
         let mut bx = x;
         if t.skills.episodes == 0 {
