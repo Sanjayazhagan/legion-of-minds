@@ -7,6 +7,7 @@
 
 use crate::auth::AuthUser;
 use crate::error::ApiResult;
+use crate::liveops::Live;
 use crate::AppState;
 use axum::extract::State;
 use axum::Json;
@@ -19,9 +20,10 @@ use std::time::Duration;
 /// the same season twice.
 const SEASON_LOCK: i64 = 0x5ea5_0001;
 
-fn season(number: i32, started: DateTime<Utc>, ends: DateTime<Utc>) -> Season {
+fn season(number: i32, name: String, started: DateTime<Utc>, ends: DateTime<Utc>) -> Season {
     Season {
         number,
+        name,
         started_at: started.to_rfc3339(),
         ends_at: ends.to_rfc3339(),
     }
@@ -29,14 +31,14 @@ fn season(number: i32, started: DateTime<Utc>, ends: DateTime<Utc>) -> Season {
 
 /// The season running now, opening the first one if there is none.
 pub async fn current(db: &PgPool, length: Duration) -> ApiResult<Season> {
-    let row: Option<(i32, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT number, started_at, ends_at FROM seasons WHERE closed_at IS NULL
+    let row: Option<(i32, String, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT number, name, started_at, ends_at FROM seasons WHERE closed_at IS NULL
          ORDER BY number DESC LIMIT 1",
     )
     .fetch_optional(db)
     .await?;
-    if let Some((n, s, e)) = row {
-        return Ok(season(n, s, e));
+    if let Some((n, name, s, e)) = row {
+        return Ok(season(n, name, s, e));
     }
     let now = Utc::now();
     let ends = now + chrono::Duration::from_std(length).expect("fits");
@@ -49,19 +51,21 @@ pub async fn current(db: &PgPool, length: Duration) -> ApiResult<Season> {
     .bind(ends)
     .execute(db)
     .await?;
-    let (n, s, e): (i32, DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
-        "SELECT number, started_at, ends_at FROM seasons WHERE closed_at IS NULL
+    let (n, name, s, e): (i32, String, DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
+        "SELECT number, name, started_at, ends_at FROM seasons WHERE closed_at IS NULL
          ORDER BY number DESC LIMIT 1",
     )
     .fetch_one(db)
     .await?;
-    Ok(season(n, s, e))
+    Ok(season(n, name, s, e))
 }
 
 /// Close the season if it has ended: record results, pay rewards, reset
 /// trophies and open the next one. Returns the number of the season it
-/// closed, if any. Safe to call from several servers at once.
-pub async fn roll(db: &PgPool, length: Duration) -> Result<Option<i32>, sqlx::Error> {
+/// closed, if any. Safe to call from several servers at once. Rewards and
+/// the next season's length come from the operator's settings.
+pub async fn roll(db: &PgPool, live: &Live) -> Result<Option<i32>, sqlx::Error> {
+    let length = live.season_length();
     let mut tx = db.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(SEASON_LOCK)
@@ -89,7 +93,7 @@ pub async fn roll(db: &PgPool, length: Duration) -> Result<Option<i32>, sqlx::Er
     .await?;
     for (k, (id, trophies)) in players.iter().enumerate() {
         let league = League::of(*trophies);
-        let reward = league.season_reward();
+        let reward = live.season_reward(league);
         sqlx::query(
             "INSERT INTO season_results (season, user_id, trophies, league, rank, reward)
              VALUES ($1, $2, $3, $4, $5, $6)",
@@ -143,7 +147,8 @@ fn parse_league(s: &str) -> League {
 }
 
 pub async fn get_season(State(st): State<AppState>) -> ApiResult<Json<Season>> {
-    Ok(Json(current(&st.db, st.cfg.season).await?))
+    let live = Live::load(&st.db, &st.cfg).await?;
+    Ok(Json(current(&st.db, live.season_length()).await?))
 }
 
 /// Your results from past seasons, newest first.

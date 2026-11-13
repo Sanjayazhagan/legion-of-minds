@@ -27,6 +27,8 @@ use uuid::Uuid;
 
 pub mod competition;
 pub use competition::*;
+pub mod liveops;
+pub use liveops::*;
 
 pub const MAX_DEFENDERS: usize = 4;
 pub const MAX_ARMY: usize = 5;
@@ -280,6 +282,10 @@ pub struct AttackOutcome {
     /// Extra gold for a win, from the attacker's league.
     #[serde(default)]
     pub league_bonus: i64,
+    /// Extra gold from events running on the server (double gold weekends
+    /// and the like).
+    #[serde(default)]
+    pub event_bonus: i64,
     pub attacker: User,
 }
 

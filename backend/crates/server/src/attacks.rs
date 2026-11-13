@@ -145,6 +145,8 @@ pub async fn submit(
         tracing::warn!(%attack_id, attacker = %user.id, "client raid result differs from server");
     }
 
+    // Rewards the operator tuned and events running now.
+    let live = crate::liveops::Live::load(&st.db, &st.cfg).await?;
     let mut tx = st.db.begin().await?;
     let still_pending: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM attacks WHERE id = $1 AND status = 'pending' FOR UPDATE",
@@ -178,13 +180,17 @@ pub async fn submit(
     let def_new = (def_trophies - swing).max(0);
     let gold = loot(def_gold, result.destruction);
     // Winning pays more the higher your league. It's new gold, not loot.
-    let bonus = League::of(att_trophies).win_bonus(result.stars);
+    let bonus = live.win_bonus(League::of(att_trophies), result.stars);
+    // Events (double gold and the like) add new gold on top; the defender
+    // only ever loses the normal loot.
+    let event_bonus = live.gold(gold + bonus) - (gold + bonus)
+        + if result.stars > 0 { live.win_gold() } else { 0 };
     let shield = (result.stars > 0)
-        .then(|| Utc::now() + chrono::Duration::from_std(st.cfg.shield).expect("fits"));
+        .then(|| Utc::now() + chrono::Duration::from_std(live.shield()).expect("fits"));
 
     sqlx::query("UPDATE users SET trophies = $1, gold = gold + $2 WHERE id = $3")
         .bind(att_new)
-        .bind(gold + bonus)
+        .bind(gold + bonus + event_bonus)
         .bind(user.id)
         .execute(&mut *tx)
         .await?;
@@ -224,6 +230,7 @@ pub async fn submit(
         trophies: att_new - att_trophies,
         gold_looted: gold,
         league_bonus: bonus,
+        event_bonus,
         client_matched,
         result,
         attacker: load_user(&st.db, user.id).await?,

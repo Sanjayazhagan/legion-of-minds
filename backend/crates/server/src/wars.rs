@@ -333,7 +333,7 @@ pub async fn cancel_search(State(st): State<AppState>, user: AuthUser) -> ApiRes
 
 /// Your clan's current war, or the last one.
 pub async fn current(State(st): State<AppState>, user: AuthUser) -> ApiResult<Json<WarView>> {
-    settle(&st.db).await?;
+    settle(&st.db, &crate::liveops::Live::load(&st.db, &st.cfg).await?).await?;
     let (clan, _) = require_clan(&st.db, user.id).await?;
     let mut conn = st.db.acquire().await?;
     let war = latest_war(&mut conn, clan).await?.ok_or_else(no_war)?;
@@ -528,7 +528,7 @@ pub async fn submit(
 
 /// Score every war whose battle day is over and pay the members who were
 /// in it. Safe to call often and from several servers.
-pub async fn settle(db: &PgPool) -> ApiResult<()> {
+pub async fn settle(db: &PgPool, live: &crate::liveops::Live) -> ApiResult<()> {
     let due: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM wars WHERE settled_at IS NULL AND ends_at <= now()",
     )
@@ -567,8 +567,9 @@ pub async fn settle(db: &PgPool) -> ApiResult<()> {
                 .execute(&mut *tx)
                 .await?;
             let ids: Vec<Uuid> = side.bases.iter().map(|b| b.player.id).collect();
+            let reward = live.gold(live.war_reward(r));
             sqlx::query("UPDATE users SET gold = gold + $1 WHERE id = ANY($2)")
-                .bind(r.reward())
+                .bind(reward)
                 .bind(&ids[..])
                 .execute(&mut *tx)
                 .await?;
@@ -578,7 +579,7 @@ pub async fn settle(db: &PgPool) -> ApiResult<()> {
                 WarResult::Lost => format!("War lost, {ours} stars to {theirs}."),
                 WarResult::Draw => format!("War drawn, {ours} stars each."),
             };
-            let line = format!("{line} Everyone who fought gets {} gold.", r.reward());
+            let line = format!("{line} Everyone who fought gets {reward} gold.");
             sqlx::query(
                 "INSERT INTO clan_messages (clan_id, user_id, author, body) VALUES ($1, NULL, '', $2)",
             )
