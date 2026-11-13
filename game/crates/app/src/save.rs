@@ -25,6 +25,14 @@ pub struct Profile {
     /// Set on the test-mode save: gold never runs out and cheats are open.
     #[serde(default)]
     pub test: bool,
+    /// The new player tour has been finished or skipped. Saves from before
+    /// the tour count as done, so existing players aren't shown it.
+    #[serde(default = "yes")]
+    pub tour_done: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Profile {
@@ -39,6 +47,7 @@ impl Default for Profile {
             base: Default::default(),
             weapons: Vec::new(),
             test: false,
+            tour_done: false,
         }
     }
 }
@@ -161,6 +170,12 @@ impl Store {
     /// The player's real save.
     pub fn real_store(&self) -> Store {
         Store { dir: self.home.clone(), home: self.home.clone() }
+    }
+
+    /// No profile saved yet: the game is running for the first time.
+    pub fn is_new(&self) -> bool {
+        let p = self.dir.join("profile.json");
+        !p.exists() && !backup_of(&p).exists()
     }
 
     pub fn load_profile(&self) -> Profile {

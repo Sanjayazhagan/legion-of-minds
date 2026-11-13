@@ -20,6 +20,7 @@ mod scene;
 mod settings;
 mod sfx;
 mod teamtrain;
+mod tour;
 mod save;
 mod tournament;
 mod training;
@@ -70,6 +71,8 @@ pub struct Game {
     pub open_sign_in: bool,
     /// Set when the save changes under the screens (test mode switched).
     pub go_barracks: bool,
+    /// The new player tour's current step, while it is running.
+    pub tour: Option<usize>,
 }
 
 impl Game {
@@ -106,6 +109,7 @@ impl Game {
             draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.55, 0.2, 0.12, 1.0));
             text_centered("TEST MODE", r.x + r.w / 2.0, r.y + 19.0, 16.0, TEXT);
         }
+        tour::mark("settings", Rect::new(W - 440.0, 10.0, 130.0, 32.0));
         if !self.settings_open && settings::gear_button(self, Rect::new(W - 440.0, 10.0, 130.0, 32.0)) {
             self.settings_open = true;
             return false;
@@ -250,8 +254,19 @@ async fn main() {
     record::start();
     sfx::init();
     let store = Store::open();
-    let profile = store.load_profile();
-    let troops = store.load_troops();
+    let new_player = store.is_new();
+    let mut profile = store.load_profile();
+    let mut troops = store.load_troops();
+    // New players start with three ready-trained troops, so their first raid
+    // can be won straight away.
+    if new_player && troops.is_empty() {
+        troops = tour::starter_troops(profile.next_id);
+        profile.next_id += troops.len() as u64;
+        store.save_profile(&profile);
+        for t in &troops {
+            store.save_troop(t);
+        }
+    }
     let account = online::Account::load(&store.home);
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -273,6 +288,7 @@ async fn main() {
         account,
         open_sign_in: false,
         go_barracks: false,
+        tour: None,
     };
     game.settings = settings::Settings::load(&game.store.home);
     game.settings.apply();
@@ -288,8 +304,14 @@ async fn main() {
     let scripted = ["BAG_SCREEN", "BAG_RECORD", "BAG_SCREENSHOT"]
         .iter()
         .any(|v| std::env::var_os(v).is_some());
+    // The tour starts by itself until it is finished or skipped (a player who
+    // quits halfway sees it again). Scripted runs only get it when asked for.
+    if !game.profile.tour_done && (!scripted || std::env::var_os("BAG_NEW_PLAYER").is_some()) {
+        game.start_tour();
+    }
     let mut screen = demo_screen(&mut game).unwrap_or_else(|| {
-        if scripted {
+        // New players go straight to their troops; sign-in is in the tour.
+        if scripted || new_player {
             Screen::Barracks
         } else {
             Screen::SignIn(online::SignInState::startup(&game.account))
@@ -320,6 +342,7 @@ async fn main() {
         if game.store.is_test() {
             game.profile.gold = save::TEST_GOLD;
         }
+        let click = game.tour_input(&screen);
         if game.settings_open {
             game.settings_screen();
         } else {
@@ -352,6 +375,7 @@ async fn main() {
                 Screen::Clan(s) => game.clan(s),
             };
         }
+        game.tour_frame(&screen, click);
         if let Some(n) = save::take_notice() {
             game.toast = Some((n, 6.0));
         }

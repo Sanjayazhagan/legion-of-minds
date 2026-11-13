@@ -197,6 +197,13 @@ impl Game {
         panel(s);
         text("Saved games", s.x + 24.0, s.y + 32.0, 20.0, TEXT);
         text(&format!("{}", self.store.dir.display()), s.x + 24.0, s.y + 58.0, 16.0, MUTED);
+        // The new player tour, again.
+        if self.ui.button(Rect::new(s.x + s.w - 720.0, s.y + 20.0, 210.0, 40.0), "Replay the tour") {
+            self.settings_open = false;
+            self.go_barracks = true;
+            self.start_tour();
+            return;
+        }
         #[cfg(feature = "cheats")]
         {
             let test = self.store.is_test();
