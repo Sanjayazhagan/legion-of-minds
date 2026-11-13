@@ -46,7 +46,6 @@ fn config(db: String, public_url: String) -> Config {
         shield: Duration::from_secs(3600),
         start_gold: 500,
         match_range: 200,
-        max_body_bytes: 4 << 20,
         keep_raids: Duration::from_secs(14 * 86_400),
         // These tests count league and season gold, so the other rewards are off.
         defence_reward: 0,
@@ -54,6 +53,8 @@ fn config(db: String, public_url: String) -> Config {
         daily_win_bonus: 0,
         practice_gold: 0,
         practice_paid_per_day: 5,
+        max_body_bytes: 8 << 20,
+        max_json_bytes: 16 << 20,
         season: Duration::from_secs(28 * 86_400),
         // Attacks open as soon as a war is made.
         war_prep: Duration::ZERO,

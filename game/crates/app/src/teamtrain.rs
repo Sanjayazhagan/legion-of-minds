@@ -24,6 +24,7 @@ struct Shared {
     /// Training steps each member has taken this session.
     steps: Vec<u64>,
     actors: Vec<Mlp>,
+    critics: Vec<Mlp>,
     trainer: Option<TeamTrainer>,
     recent: Vec<EpisodeInfo>,
     rate: f32,
@@ -38,6 +39,10 @@ struct Job {
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     target: u64,
+    /// Steps per member already written to the troops by checkpoints.
+    saved: Vec<u64>,
+    /// When progress was last written to the troops' files.
+    saved_at: f64,
 }
 
 struct Preview {
@@ -86,6 +91,7 @@ fn spawn(troops: &[Troop], budget: u64, pool: Option<Opponents>, hardness: u8) -
     let (sh, st) = (shared.clone(), stop.clone());
     let seed = troops.iter().fold(17u64, |a, t| a.wrapping_mul(31).wrapping_add(t.seed ^ t.steps));
     let troops = troops.to_vec();
+    let troops_len = troops.len();
     std::thread::spawn(move || {
         let mut tr = TeamTrainer::for_troops(&troops, seed, PpoConfig::default(), pool);
         tr.set_hardness(hardness);
@@ -100,6 +106,7 @@ fn spawn(troops: &[Troop], budget: u64, pool: Option<Opponents>, hardness: u8) -
             let mut s = sh.lock().unwrap();
             s.steps = tr.members.iter().map(|m| m.steps).collect();
             s.actors = tr.members.iter().map(|m| m.actor.clone()).collect();
+            s.critics = tr.members.iter().map(|m| m.critic.clone()).collect();
             s.recent = recent.clone();
             s.rate = s.steps.iter().sum::<u64>() as f32 / t0.elapsed().as_secs_f32();
             s.level = rep.hardness;
@@ -114,7 +121,7 @@ fn spawn(troops: &[Troop], budget: u64, pool: Option<Opponents>, hardness: u8) -
         s.recent = recent;
         s.done = true;
     });
-    Job { shared, stop, target: budget }
+    Job { shared, stop, target: budget, saved: vec![0; troops_len], saved_at: get_time() }
 }
 
 impl Game {
@@ -129,15 +136,49 @@ impl Game {
         (!v.is_empty()).then(|| Arc::new(v))
     }
 
+    /// Copy the newest brains and steps from a running session onto the
+    /// team's troops and save them. Safe to call any number of times.
+    fn checkpoint_team(&mut self, members: &[usize], job: &mut Job) {
+        let sh = job.shared.lock().unwrap();
+        if sh.actors.len() != members.len() || sh.critics.len() != members.len() {
+            return;
+        }
+        for (k, &i) in members.iter().enumerate() {
+            let t = &mut self.troops[i];
+            let new = sh.steps[k].saturating_sub(job.saved[k]);
+            t.actor = sh.actors[k].clone();
+            t.critic = sh.critics[k].clone();
+            t.team_steps += new;
+            t.add_training(new);
+            job.saved[k] += new;
+        }
+        drop(sh);
+        for &i in members {
+            self.store.save_troop(&self.troops[i]);
+        }
+    }
+
+    /// The game is closing: stop the session and keep what it learned so far.
+    pub fn quit_team(&mut self, s: &mut TeamState) {
+        if let Some(mut job) = s.job.take() {
+            job.stop.store(true, Ordering::Relaxed);
+            self.checkpoint_team(&s.members, &mut job);
+        }
+    }
+
     fn finish_team(&mut self, s: &mut TeamState) {
         let Some(job) = s.job.take() else { return };
         let mut sh = job.shared.lock().unwrap();
-        let Some(tr) = sh.trainer.take() else { return };
+        let Some(mut tr) = sh.trainer.take() else { return };
         let recent = std::mem::take(&mut sh.recent);
         s.reactions = sh.reactions.take();
         drop(sh);
         let mut team: Vec<Troop> = s.members.iter().map(|&i| self.troops[i].clone()).collect();
         let steps: Vec<u64> = tr.members.iter().map(|m| m.steps).collect();
+        // Checkpoints already counted part of the training.
+        for (m, saved) in tr.members.iter_mut().zip(&job.saved) {
+            m.steps = m.steps.saturating_sub(*saved);
+        }
         tr.finish(&mut team, &recent);
         for (k, &i) in s.members.iter().enumerate() {
             self.troops[i] = team[k].clone();
@@ -325,6 +366,11 @@ impl Game {
             }
             if done {
                 self.finish_team(&mut s);
+            } else if let Some(j) = &mut s.job {
+                if get_time() - j.saved_at >= crate::training::CHECKPOINT_SECS {
+                    j.saved_at = get_time();
+                    self.checkpoint_team(&s.members, j);
+                }
             }
         } else {
             if let Some(msg) = &s.finished {

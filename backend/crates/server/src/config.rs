@@ -66,6 +66,7 @@ pub struct Config {
     pub start_gold: i64,
     /// Matchmaking looks this many trophies either side first.
     pub match_range: i32,
+    /// Largest request body as sent (gzipped bodies count compressed).
     pub max_body_bytes: usize,
     /// How long finished raids (battle log and replays) are kept.
     pub keep_raids: Duration,
@@ -79,6 +80,9 @@ pub struct Config {
     /// how many practice raids pay in 24 hours.
     pub practice_gold: i64,
     pub practice_paid_per_day: i64,
+    /// Largest JSON body once unzipped. A full army of 256-neuron brains is
+    /// about 6 MB.
+    pub max_json_bytes: usize,
     /// How long a season lasts.
     pub season: Duration,
     /// Time between a war being matched and attacks opening.
@@ -149,13 +153,14 @@ impl Config {
             shield: mins(num("SHIELD_MINUTES", 60u64)?),
             start_gold: num("START_GOLD", 500i64)?,
             match_range: num("MATCH_TROPHY_RANGE", 200i32)?,
-            max_body_bytes: 4 << 20,
             keep_raids: Duration::from_secs(num("KEEP_RAIDS_DAYS", 14u64)? * 86_400),
             defence_reward: num("DEFENCE_REWARD", 30i64)?.max(0),
             defence_rewards_per_day: num("DEFENCE_REWARDS_PER_DAY", 5i64)?,
             daily_win_bonus: num("DAILY_WIN_BONUS", 100i64)?.max(0),
             practice_gold: num("PRACTICE_GOLD", 20i64)?.max(0),
             practice_paid_per_day: num("PRACTICE_PAID_PER_DAY", 5i64)?,
+            max_body_bytes: 8 << 20,
+            max_json_bytes: 16 << 20,
             season: Duration::from_secs(num("SEASON_DAYS", 28u64)? * 86_400),
             war_prep: mins(num("WAR_PREP_MINUTES", 360u64)?),
             war_battle: mins(num("WAR_BATTLE_MINUTES", 1440u64)?),

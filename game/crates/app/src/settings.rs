@@ -42,14 +42,13 @@ pub fn sight_on() -> bool {
 
 impl Settings {
     pub fn load(dir: &std::path::Path) -> Settings {
-        std::fs::read_to_string(dir.join("settings.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+        crate::save::load_file(&dir.join("settings.json"), |s| serde_json::from_str(s).ok())
+            .map(|(s, _)| s)
             .unwrap_or_default()
     }
 
     pub fn save(&self, dir: &std::path::Path) {
-        let _ = std::fs::write(dir.join("settings.json"), serde_json::to_string_pretty(self).unwrap());
+        crate::save::save_file(&dir.join("settings.json"), serde_json::to_string_pretty(self).unwrap().as_bytes());
     }
 
     /// Make the game follow these settings.
@@ -198,6 +197,13 @@ impl Game {
         panel(s);
         text("Saved games", s.x + 24.0, s.y + 32.0, 20.0, TEXT);
         text(&format!("{}", self.store.dir.display()), s.x + 24.0, s.y + 58.0, 16.0, MUTED);
+        // The new player tour, again.
+        if self.ui.button(Rect::new(s.x + s.w - 720.0, s.y + 20.0, 210.0, 40.0), "Replay the tour") {
+            self.settings_open = false;
+            self.go_barracks = true;
+            self.start_tour();
+            return;
+        }
         #[cfg(feature = "cheats")]
         {
             let test = self.store.is_test();
