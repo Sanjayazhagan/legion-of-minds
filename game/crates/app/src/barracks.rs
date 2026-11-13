@@ -22,6 +22,11 @@ impl Game {
             text(&t, W - 20.0 - w, H - 4.0, 14.0, MUTED);
         }
         let ui_y = 66.0;
+        crate::tour::mark("recruit", Rect::new(20.0, ui_y, 180.0, 44.0));
+        crate::tour::mark("battle", Rect::new(210.0, ui_y, 180.0, 44.0));
+        crate::tour::mark("home", Rect::new(590.0, ui_y, 220.0, 44.0));
+        crate::tour::mark("more", Rect::new(400.0, ui_y, 620.0, 44.0));
+        crate::tour::mark("online", Rect::new(1030.0, ui_y, 230.0, 44.0));
         // Top actions
         if self
             .ui
@@ -76,6 +81,7 @@ impl Game {
         // Roster list
         let list = Rect::new(20.0, 124.0, 400.0, H - 144.0);
         panel(list);
+        crate::tour::mark("roster", Rect::new(list.x, list.y, list.w, 40.0 + 3.0 * 86.0));
         text(
             &format!("Roster ({})", self.troops.len()),
             list.x + 12.0,
@@ -342,6 +348,7 @@ impl Game {
         // Actions
         let can_train = t.steps_left() > 0;
         let train_label = if can_train { "Train" } else { "At level cap" };
+        crate::tour::mark("train", Rect::new(x, y, 170.0, 44.0));
         let id = t.id;
         let level = t.level;
         if self

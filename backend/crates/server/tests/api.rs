@@ -53,7 +53,8 @@ fn test_config(db: String, public_url: String, providers: Vec<OAuthProvider>) ->
         shield: Duration::from_secs(3600),
         start_gold: 500,
         match_range: 200,
-        max_body_bytes: 4 << 20,
+        max_body_bytes: 8 << 20,
+        max_json_bytes: 16 << 20,
         season: Duration::from_secs(28 * 86_400),
         war_prep: Duration::from_secs(3600),
         war_battle: Duration::from_secs(86_400),
@@ -129,6 +130,65 @@ fn army() -> Vec<Placement> {
     let troops = vec![troop("fighter", 1), troop("fighter", 2), troop("healer", 3)];
     let spots = army_spots(troops.len());
     bag_client::army_from(&troops.into_iter().zip(spots).collect::<Vec<_>>())
+}
+
+/// A fresh troop with the biggest brain a player can pick.
+fn big(class: BaseClass, id: u64) -> Troop {
+    let mut t = Troop::new(id, format!("big{id}"), class.spec(), 1000 + id);
+    assert!(t.set_brain(256));
+    t
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn full_armies_of_the_biggest_brains_fit() {
+    let db = fresh_db().await;
+    let url = serve(|u| test_config(db, u, vec![])).await;
+    blocking(move || {
+        let mut alice = Client::new(&url);
+        alice.dev_login("Alice").unwrap();
+        let defs: Vec<_> = (1..=4)
+            .map(|i| big(BaseClass::Guard, i))
+            .zip(defender_spots(4))
+            .collect();
+        let snap = snapshot_from(&HomeBase::default(), &defs);
+        let plain = serde_json::to_vec(&snap).unwrap().len();
+        assert!(plain > 4 << 20, "this base is {plain} bytes as plain JSON");
+        let p = alice.publish_base(&snap).unwrap();
+        assert_eq!(p.defenders, 4);
+
+        let mut bob = Client::new(&url);
+        bob.dev_login("Bob").unwrap();
+        let m = bob.find_match().unwrap();
+        assert_eq!(m.snapshot.defenders.len(), 4);
+        let troops: Vec<_> = (1..=5).map(|i| big(BaseClass::Fighter, i)).collect();
+        let army = bag_client::army_from(&troops.into_iter().zip(army_spots(5)).collect::<Vec<_>>());
+        let (local, out) = bob.attack(&m, army).unwrap();
+        assert_eq!(out.client_matched, Some(true));
+        assert_eq!(out.result.fingerprint, local.fingerprint);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn too_big_after_unzipping_is_refused() {
+    let db = fresh_db().await;
+    let url = serve(|u| {
+        let mut c = test_config(db, u, vec![]);
+        c.max_json_bytes = 1 << 20;
+        c
+    })
+    .await;
+    blocking(move || {
+        let mut alice = Client::new(&url);
+        alice.dev_login("Alice").unwrap();
+        let defs: Vec<_> = (1..=4)
+            .map(|i| big(BaseClass::Guard, i))
+            .zip(defender_spots(4))
+            .collect();
+        let r = alice.publish_base(&snapshot_from(&HomeBase::default(), &defs));
+        assert_eq!(api_code(r), "too_large");
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -76,6 +76,16 @@ pub struct BattleState {
 }
 
 impl BattleState {
+    /// The battle has ended and its result is showing.
+    pub fn finished(&self) -> bool {
+        self.result.is_some()
+    }
+
+    /// Stars won so far.
+    pub fn stars(&self) -> u32 {
+        self.battle.world.stars()
+    }
+
     pub fn start(mode: Mode, remake: Box<dyn Fn() -> Battle>) -> Self {
         let battle = remake();
         // Test hook: BAG_THINK=k shows the k-th trained troop's thoughts.
@@ -263,6 +273,7 @@ impl Game {
         if full {
             self.toast(format!("A squad holds at most {MAX_SQUAD} troops"));
         }
+        crate::tour::mark("deploy", Rect::new(W - 320.0, H - 80.0, 300.0, 56.0));
         if self.ui.button_ex(
             Rect::new(W - 320.0, H - 80.0, 300.0, 56.0),
             "Deploy troops >",
@@ -386,28 +397,17 @@ impl Game {
             );
         }
         let by = 170.0 + s.squad.len() as f32 * 56.0 + 20.0;
+        // The tour points at Auto-place, then at FIGHT once all are placed.
+        let fight = Rect::new(rx, H - 80.0, rw, 56.0);
+        crate::tour::mark("deploy_next", if next < s.squad.len() { Rect::new(rx, by, rw / 2.0 - 5.0, 44.0) } else { fight });
         if self.ui.button_ex(
             Rect::new(rx, by, rw / 2.0 - 5.0, 44.0),
             "Auto-place rest",
             next < s.squad.len(),
             false,
         ) {
-            // Line up the rest on one side, next to the first troop if any.
-            let (cx, cy) = (ARENA / 2.0, ARENA / 2.0);
-            let (mut ux, mut uy) = match s.spots.first() {
-                Some(&(x, y)) => (x - cx, y - cy),
-                None => (-1.0, -1.0),
-            };
-            let d = (ux * ux + uy * uy).sqrt();
-            ux /= d;
-            uy /= d;
-            let r = DEPLOY_RADIUS + 2.0;
-            for k in next..s.squad.len() {
-                let off = (k as f32 - (s.squad.len() as f32 - 1.0) / 2.0) * 1.4;
-                let (x, y) = (cx + ux * r - uy * off, cy + uy * r + ux * off);
-                s.spots
-                    .push((x.clamp(1.0, ARENA - 1.0), y.clamp(1.0, ARENA - 1.0)));
-            }
+            let rest = auto_place(&s.spots, s.squad.len());
+            s.spots.extend(rest);
         }
         if self.ui.button_ex(
             Rect::new(rx + rw / 2.0 + 5.0, by, rw / 2.0 - 5.0, 44.0),
@@ -420,7 +420,7 @@ impl Game {
         let ready = s.spots.len() == s.squad.len();
         if self
             .ui
-            .button_ex(Rect::new(rx, H - 80.0, rw, 56.0), "FIGHT!", ready, false)
+            .button_ex(fight, "FIGHT!", ready, false)
         {
             let deploy: Vec<_> = s
                 .squad
@@ -655,6 +655,7 @@ impl Game {
         }
         if s.result.is_none() {
             let by = H - 80.0;
+            crate::tour::mark("speed", Rect::new(rx + 180.0, by, 82.0, 44.0));
             if self.ui.button_ex(Rect::new(rx, by, 82.0, 44.0), if s.paused { "Play" } else { "Pause" }, true, s.paused) {
                 s.paused = !s.paused;
             }
@@ -737,6 +738,7 @@ impl Game {
                     if ok { MUTED } else { BAD },
                 );
             }
+            crate::tour::mark("to_barracks", Rect::new(r.x + 20.0, r.y + 196.0, r.w / 2.0 - 30.0, 50.0));
             if self.ui.button(
                 Rect::new(r.x + 20.0, r.y + 196.0, r.w / 2.0 - 30.0, 50.0),
                 "Barracks",
@@ -817,6 +819,27 @@ fn full_hud(w: &World, secs_left: f32, defending: bool) {
     for k in 0..3 {
         star(r.x + 30.0 + k as f32 * 40.0, r.y + 70.0, 14.0, k < w.stars());
     }
+}
+
+/// Spots for the troops not placed yet: lined up on one side, next to the
+/// first troop if any.
+pub fn auto_place(placed: &[(f32, f32)], squad: usize) -> Vec<(f32, f32)> {
+    let (cx, cy) = (ARENA / 2.0, ARENA / 2.0);
+    let (mut ux, mut uy) = match placed.first() {
+        Some(&(x, y)) => (x - cx, y - cy),
+        None => (-1.0, -1.0),
+    };
+    let d = (ux * ux + uy * uy).sqrt();
+    ux /= d;
+    uy /= d;
+    let r = DEPLOY_RADIUS + 2.0;
+    (placed.len()..squad)
+        .map(|k| {
+            let off = (k as f32 - (squad as f32 - 1.0) / 2.0) * 1.4;
+            let (x, y) = (cx + ux * r - uy * off, cy + uy * r + ux * off);
+            (x.clamp(1.0, ARENA - 1.0), y.clamp(1.0, ARENA - 1.0))
+        })
+        .collect()
 }
 
 pub fn action_name(a: u8) -> &'static str {
