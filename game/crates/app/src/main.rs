@@ -19,6 +19,7 @@ mod render;
 mod scene;
 mod settings;
 mod sfx;
+mod stat_panel;
 mod teamtrain;
 mod tour;
 mod save;
