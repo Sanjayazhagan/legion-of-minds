@@ -640,6 +640,27 @@ thread_local! {
     static ZOOM: Cell<f32> = const { Cell::new(0.8) };
     /// Camera jolt for this frame (impacts, collapses).
     static SHAKE: Cell<Vec3> = const { Cell::new(Vec3::ZERO) };
+    /// Off-screen picture being drawn instead of the window (battle clips).
+    static TARGET: std::cell::RefCell<Option<RenderTarget>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Draw into `rt` instead of the window until called with `None`. The 2D
+/// camera passed to `set_screen` must draw into the same target.
+pub fn set_target(rt: Option<RenderTarget>) {
+    TARGET.with(|t| *t.borrow_mut() = rt);
+}
+
+fn target() -> Option<RenderTarget> {
+    TARGET.with(|t| t.borrow().clone())
+}
+
+/// Map camera distance (the mouse wheel's zoom), for clips to pick their own.
+pub fn zoom() -> f32 {
+    ZOOM.with(|z| z.get())
+}
+
+pub fn set_zoom(z: f32) {
+    ZOOM.with(|c| c.set(z));
 }
 
 /// Mouse wheel over the map zooms the camera in and out.
@@ -667,7 +688,7 @@ pub fn set_screen(vx: f32, vy: f32, s: f32, cam: &Camera2D) {
             zoom: cam.zoom,
             target: cam.target,
             offset: cam.offset,
-            render_target: None,
+            render_target: cam.render_target.clone(),
             viewport: cam.viewport,
         })
     });
@@ -684,7 +705,10 @@ fn restore_ui_camera() {
 /// Pixel viewport (GL origin bottom-left) for a rect in UI coordinates.
 fn viewport_px(r: Rect) -> (i32, i32, i32, i32) {
     let (vx, vy, s) = SCREEN.with(|c| c.get());
-    let (sh, d) = (screen_height(), screen_dpi_scale());
+    let (sh, d) = match target() {
+        Some(rt) => (rt.texture.height(), 1.0),
+        None => (screen_height(), screen_dpi_scale()),
+    };
     let x = vx + r.x * s;
     let y = sh - (vy + (r.y + r.h) * s);
     // In real pixels (see Ui::begin).
@@ -700,10 +724,19 @@ fn begin_3d(r: Rect, mut cam: Camera3D, clear_depth: bool) {
     cam.viewport = Some(viewport_px(r));
     crate::scene::set_view(cam.position, cam.fovy, viewport_px(r).3 as f32);
     cam.aspect = Some(r.w / r.h);
+    let rt = target();
+    cam.render_target = rt.clone();
     let mut gl = unsafe { get_internal_gl() };
     gl.flush();
     if clear_depth {
-        gl.quad_context.clear(None, Some(1.0), None);
+        match rt {
+            Some(rt) => {
+                let pass = rt.render_pass.raw_miniquad_id();
+                gl.quad_context.begin_pass(Some(pass), miniquad::PassAction::Clear { color: None, depth: Some(1.0), stencil: None });
+                gl.quad_context.end_render_pass();
+            }
+            None => gl.quad_context.clear(None, Some(1.0), None),
+        }
     }
     set_camera(&cam);
 }
@@ -1041,77 +1074,86 @@ fn loadout(c: godcore::classes::BaseClass, raider: bool) -> Loadout {
     match c {
         Fighter => Loadout {
             model: "Barbarian",
-            show: &["2H_Axe", "Barbarian_Hat", "Barbarian_Cape"],
+            show: &[
+                "2H_Axe", "Barbarian_Hat", "Barbarian_Cape", "Fighter_Horns", "Fighter_Pauldron_L", "Fighter_Pauldron_R",
+                "Fighter_Belt",
+            ],
             idle: "2H_Melee_Idle",
             attack: "2H_Melee_Attack_Chop",
             props: &[],
         },
         Archer => Loadout {
             model: "Rogue_Hooded",
-            show: &["2H_Crossbow", "Rogue_Cape"],
+            show: &["2H_Crossbow", "Rogue_Cape", "Archer_Quiver", "Archer_Feather"],
             idle: "Idle",
             attack: "2H_Ranged_Shoot",
             props: &[],
         },
         Healer => Loadout {
             model: "Mage",
-            show: &["2H_Staff", "Mage_Hat", "Mage_Cape"],
+            show: &["2H_Staff", "Mage_Hat", "Mage_Cape", "Healer_Charm"],
             idle: "Idle",
             attack: "Spellcast_Shoot",
             props: &[],
         },
         Guard => Loadout {
             model: "Knight",
-            show: &["1H_Sword", "Badge_Shield", "Knight_Helmet", "Knight_Cape"],
+            show: &[
+                "1H_Sword", "Badge_Shield", "Knight_Helmet", "Knight_Cape", "Guard_Plume", "Guard_Pauldron_L", "Guard_Pauldron_R",
+            ],
             idle: "Idle",
             attack: "1H_Melee_Attack_Chop",
             props: &[],
         },
         Sentry => Loadout {
             model: "Rogue",
-            show: &["1H_Crossbow", "Knife_Offhand", "Rogue_Cape"],
+            show: &[
+                "1H_Crossbow", "Knife_Offhand", "Rogue_Cape", "Sentry_Goggles", "Sentry_Pauldron_L", "Sentry_Pauldron_R",
+            ],
             idle: "Idle",
             attack: "1H_Ranged_Shoot",
             props: &[],
         },
         Keeper => Loadout {
             model: "Mage",
-            show: &["Spellbook_open", "1H_Wand", "Mage_Cape"],
+            show: &["Spellbook_open", "1H_Wand", "Mage_Cape", "Keeper_Lantern", "Keeper_Collar"],
             idle: "Idle",
             attack: "Spellcast_Raise",
             props: &[],
         },
         Mage => Loadout {
             model: "Mage",
-            show: &["1H_Wand", "Spellbook", "Mage_Hat"],
+            show: &["1H_Wand", "Spellbook", "Mage_Hat", "Mage_Orbs"],
             idle: "Idle",
             attack: "Spellcast_Shoot",
             props: &[],
         },
         Assassin => Loadout {
             model: "Rogue_Hooded",
-            show: &["Knife", "Knife_Offhand"],
+            show: &["Knife", "Knife_Offhand", "Assassin_Mask", "Assassin_Sash"],
             idle: "Idle",
             attack: "1H_Melee_Attack_Stab",
             props: &[],
         },
         Paladin => Loadout {
             model: "Knight",
-            show: &["2H_Sword", "Knight_Helmet", "Knight_Cape"],
+            show: &[
+                "2H_Sword", "Knight_Helmet", "Knight_Cape", "Paladin_Wings", "Paladin_Pauldron_L", "Paladin_Pauldron_R",
+            ],
             idle: "2H_Melee_Idle",
             attack: "2H_Melee_Attack_Chop",
             props: &[],
         },
         Warlock => Loadout {
             model: "Mage",
-            show: &["2H_Staff", "Mage_Cape"],
+            show: &["2H_Staff", "Mage_Cape", "Warlock_Horns", "Warlock_Collar"],
             idle: "Idle",
             attack: "Spellcast_Shoot",
             props: &[],
         },
         Hunter => Loadout {
             model: "Barbarian",
-            show: &["1H_Axe", "1H_Axe_Offhand", "Barbarian_Cape"],
+            show: &["1H_Axe", "1H_Axe_Offhand", "Barbarian_Cape", "Hunter_Pelt", "Hunter_Necklace"],
             idle: "Idle",
             attack: "1H_Melee_Attack_Chop",
             props: &[],
@@ -1149,6 +1191,25 @@ fn skill_clip(s: Skill) -> &'static str {
         Skill::Volley => "2H_Ranged_Shoot",
         Skill::Fireball => "Spellcast_Long",
         Skill::HealingNova => "Spellcast_Raise",
+    }
+}
+
+/// Each class's own special-move clip (made in Blender, see
+/// tools/blender/troops.py). Models without it fall back to `skill_clip`.
+fn special_clip(c: godcore::classes::BaseClass) -> &'static str {
+    use godcore::classes::BaseClass::*;
+    match c {
+        Fighter => "Special_Fighter",
+        Archer => "Special_Archer",
+        Healer => "Special_Healer",
+        Guard => "Special_Guard",
+        Sentry => "Special_Sentry",
+        Keeper => "Special_Keeper",
+        Mage => "Special_Mage",
+        Assassin => "Special_Assassin",
+        Paladin => "Special_Paladin",
+        Warlock => "Special_Warlock",
+        Hunter => "Special_Hunter",
     }
 }
 
@@ -1335,6 +1396,9 @@ fn draw_character_ex(
         3 => first_clip(m, &[pick(&["Death_A", "Death_B"]), "Death_A"]).unwrap_or("Death_A"),
         4 => "Dodge_Backward",
         5 => "Blocking",
+        6 if !skeleton && pose.skill.is_some() => {
+            first_clip(m, &[special_clip(fig.main)]).unwrap_or_else(|| pose.skill.map_or(lo.attack, skill_clip))
+        }
         6 => pose.skill.map_or(lo.attack, skill_clip),
         7 => "Hit_A",
         9 => first_clip(m, &[pick(&["Hit_A", "Hit_B"]), "Hit_A"]).unwrap_or("Hit_A"),

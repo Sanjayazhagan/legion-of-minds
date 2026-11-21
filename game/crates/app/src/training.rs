@@ -178,6 +178,7 @@ impl Game {
             t.add_training(sh.steps.saturating_sub(t.steps));
             t.curve = thin(&sh.curve);
             t.skills = sh.skills;
+            t.note_plateau();
         }
         drop(sh);
         self.store.save_troop(&self.troops[idx]);

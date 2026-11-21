@@ -84,6 +84,7 @@ fn class_of(method: &Method, path: &str) -> Class {
         Class::SignIn
     } else if (method == Method::POST
         && (path == "/v1/matchmaking"
+            || path == "/v1/cup/entry"
             || path.starts_with("/v1/attacks/")
             || path.starts_with("/v1/war-attacks/")))
         || (method == Method::PUT && path == "/v1/me/base")
@@ -248,6 +249,8 @@ mod tests {
     fn route_classes() {
         assert_eq!(class_of(&Method::POST, "/v1/matchmaking"), Class::Heavy);
         assert_eq!(class_of(&Method::POST, "/v1/attacks/123"), Class::Heavy);
+        assert_eq!(class_of(&Method::POST, "/v1/attacks/123/revenge"), Class::Heavy);
+        assert_eq!(class_of(&Method::POST, "/v1/cup/entry"), Class::Heavy);
         assert_eq!(class_of(&Method::PUT, "/v1/me/base"), Class::Heavy);
         assert_eq!(class_of(&Method::POST, "/v1/war-attacks/7"), Class::Heavy);
         assert_eq!(class_of(&Method::POST, "/v1/auth/login"), Class::SignIn);

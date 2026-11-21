@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Legion of Minds admin</title>
+<style>
+  :root {
+    --bg: #12131c; --panel: #1b1d2a; --line: #2c2f42; --text: #e9e6dc; --muted: #9a9cae;
+    --accent: #f2b544; --good: #6ccf7f; --bad: #ef6b5b; --sky: #7cc4f2;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: #171925; position: sticky; top: 0; z-index: 2; }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: .08em; color: var(--accent); }
+  header .stats { color: var(--muted); font-size: 14px; flex: 1; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; display: grid; gap: 18px; grid-template-columns: 1fr 1fr; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; min-width: 0; }
+  section.wide { grid-column: 1 / -1; }
+  h2 { margin: 0 0 4px; font-size: 17px; }
+  p.lead { margin: 0 0 12px; color: var(--muted); font-size: 14px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input, select, textarea { width: 100%; background: #11121a; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font: inherit; }
+  textarea { resize: vertical; min-height: 54px; }
+  .row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+  .row > div { min-width: 0; }
+  button { background: var(--accent); color: #1a1406; border: 0; border-radius: 6px; padding: 9px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 500; }
+  button.danger { background: transparent; color: var(--bad); border: 1px solid var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 4px; }
+  .presets button { padding: 5px 10px; font-size: 13px; }
+  .list { display: grid; gap: 8px; margin-top: 10px; }
+  .item { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; align-items: flex-start; }
+  .item .body { flex: 1; min-width: 0; }
+  .item .title { font-weight: 600; }
+  .item .meta { color: var(--muted); font-size: 13px; }
+  .tag { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .05em; padding: 1px 7px; border-radius: 99px; margin-right: 6px; vertical-align: 1px; }
+  .tag.live { background: var(--good); color: #0c1a0f; }
+  .tag.soon { background: var(--sky); color: #0b1620; }
+  .tag.over { background: var(--line); color: var(--muted); }
+  .empty { color: var(--muted); font-size: 14px; margin-top: 10px; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 6px 4px; border-top: 1px solid var(--line); vertical-align: middle; }
+  td.group { color: var(--accent); font-weight: 600; padding-top: 14px; border-top: 0; }
+  td.num { width: 140px; }
+  td .help { color: var(--muted); font-size: 12px; }
+  td .def { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  tr.changed input { border-color: var(--accent); }
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: #0b0c12; border: 1px solid var(--accent); padding: 10px 16px; border-radius: 8px; display: none; max-width: calc(100% - 32px); z-index: 5; }
+  #toast.bad { border-color: var(--bad); }
+  #gate { max-width: 420px; margin: 12vh auto; }
+  .log { font-size: 13px; color: var(--muted); }
+  .log div { padding: 4px 0; border-top: 1px solid var(--line); }
+  .log b { color: var(--text); font-weight: 600; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } .row { grid-template-columns: 1fr; } header .stats { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>LEGION OF MINDS · ADMIN</h1>
+  <div class="stats" id="stats"></div>
+  <button class="ghost" id="refresh" hidden>Refresh</button>
+  <button class="ghost" id="lock" hidden>Lock</button>
+</header>
+
+<div id="gate">
+  <section>
+    <h2>Admin key</h2>
+    <p class="lead">Paste the ADMIN_KEY from your server's deploy.env. It stays in this browser tab only and is forgotten when you close it.</p>
+    <input id="key" type="password" autocomplete="off" placeholder="Admin key">
+    <div class="actions"><button id="unlock">Open admin</button></div>
+  </section>
+</div>
+
+<main id="app" hidden>
+  <section>
+    <h2>Events</h2>
+    <p class="lead">Time-limited boosts every player sees in the game, like a double gold weekend. They change gold only, never how battles play.</p>
+    <div class="presets">
+      <button class="ghost" data-preset="weekend">Double gold weekend</button>
+      <button class="ghost" data-preset="rush">24h gold rush</button>
+      <button class="ghost" data-preset="news">Announcement only</button>
+    </div>
+    <label for="ev-title">Name</label>
+    <input id="ev-title" maxlength="60" placeholder="Double gold weekend">
+    <label for="ev-msg">Message players see</label>
+    <textarea id="ev-msg" maxlength="240" placeholder="All raid gold is doubled until Monday!"></textarea>
+    <div class="row">
+      <div><label for="ev-start">Starts (empty = now)</label><input id="ev-start" type="datetime-local"></div>
+      <div><label for="ev-end">Ends</label><input id="ev-end" type="datetime-local"></div>
+    </div>
+    <div class="row">
+      <div><label for="ev-pct">Gold earned</label>
+        <select id="ev-pct">
+          <option value="100">Normal (no boost)</option>
+          <option value="125">+25%</option>
+          <option value="150">+50%</option>
+          <option value="200">Double (2x)</option>
+          <option value="300">Triple (3x)</option>
+        </select></div>
+      <div><label for="ev-win">Extra gold per raid won</label><input id="ev-win" type="number" min="0" max="10000" value="0"></div>
+    </div>
+    <div class="actions"><button id="ev-go">Start event</button></div>
+    <div class="list" id="events"></div>
+  </section>
+
+  <section>
+    <h2>Give gold</h2>
+    <p class="lead">Players get a gift they claim on the Online screen. Good for apologies after downtime, or a prize.</p>
+    <div class="row">
+      <div><label for="g-gold">Gold</label><input id="g-gold" type="number" min="1" max="100000" value="500"></div>
+      <div><label for="g-days">Days to claim it</label><input id="g-days" type="number" min="1" max="90" value="14"></div>
+    </div>
+    <label for="g-who">To (empty = every player; or a player's name or id)</label>
+    <input id="g-who" placeholder="Everyone">
+    <label for="g-msg">Message</label>
+    <textarea id="g-msg" maxlength="240" placeholder="Thanks for playing!"></textarea>
+    <div class="actions"><button id="g-go">Send gift</button></div>
+    <div class="list" id="gifts"></div>
+  </section>
+
+  <section>
+    <h2>Season</h2>
+    <p class="lead" id="season-line"></p>
+    <label for="s-name">Season name (optional)</label>
+    <input id="s-name" maxlength="40" placeholder="Season of Frost">
+    <label for="s-end">Ends</label>
+    <input id="s-end" type="datetime-local">
+    <div class="actions">
+      <button id="s-save">Save season</button>
+      <button class="danger" id="s-end-now">End season now</button>
+    </div>
+    <p class="lead" style="margin-top:12px">Ending a season pays every player the end of season gold for their league, halves trophies above 800 and starts the next season. Length and gold per league are under Rewards and timings.</p>
+  </section>
+
+  <section>
+    <h2>Recent changes</h2>
+    <div class="log" id="log"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Rewards and timings</h2>
+    <p class="lead">Changes apply straight away, without a game update. Set a value back to its default to undo.</p>
+    <table id="settings"></table>
+    <div class="actions"><button id="set-save" disabled>Save changes</button><button class="ghost" id="set-undo" disabled>Undo edits</button></div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let KEY = "";
+try { KEY = sessionStorage.getItem("bagAdminKey") || ""; } catch (e) {}
+
+function toast(msg, bad) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = bad ? "bad" : "";
+  t.style.display = "block";
+  clearTimeout(toast.h);
+  toast.h = setTimeout(() => (t.style.display = "none"), 4000);
+}
+
+async function api(method, path, body) {
+  const r = await fetch(path, {
+    method,
+    headers: Object.assign({ "x-admin-key": KEY }, body ? { "content-type": "application/json" } : {}),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (r.status === 204) return null;
+  let data = null;
+  try { data = await r.json(); } catch (e) {}
+  if (!r.ok) {
+    if (r.status === 401) lock();
+    throw new Error((data && data.message) || ("server said " + r.status));
+  }
+  return data;
+}
+
+function el(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") e.className = v; else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null) e.append(k);
+  return e;
+}
+
+const when = (iso) => new Date(iso).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+function localInput(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const fromInput = (v) => (v ? new Date(v).toISOString() : null);
+function perks(e) {
+  const p = [];
+  if (e.gold_pct !== 100) p.push(e.gold_pct % 100 === 0 ? `${e.gold_pct / 100}x gold` : `${e.gold_pct}% gold`);
+  if (e.win_gold > 0) p.push(`+${e.win_gold} gold per win`);
+  return p.join(", ") || "announcement";
+}
+
+async function busy(btn, f) {
+  btn.disabled = true;
+  try { await f(); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
+}
+
+// ------------------------------------------------------------- presets
+function preset(name) {
+  const now = new Date();
+  if (name === "weekend") {
+    const start = new Date(now);
+    start.setDate(now.getDate() + ((5 - now.getDay() + 7) % 7));
+    start.setHours(18, 0, 0, 0);
+    if (start < now) start.setTime(now.getTime());
+    const end = new Date(start);
+    end.setDate(start.getDate() + ((1 - start.getDay() + 7) % 7 || 7));
+    end.setHours(0, 0, 0, 0);
+    $("ev-title").value = "Double gold weekend";
+    $("ev-msg").value = "Every raid pays double gold until Monday!";
+    $("ev-start").value = start > now ? localInput(start) : "";
+    $("ev-end").value = localInput(end);
+    $("ev-pct").value = "200"; $("ev-win").value = "0";
+  } else if (name === "rush") {
+    $("ev-title").value = "Gold rush";
+    $("ev-msg").value = "For 24 hours: +50% gold and 50 extra gold for every raid you win.";
+    $("ev-start").value = "";
+    $("ev-end").value = localInput(new Date(now.getTime() + 24 * 3600e3));
+    $("ev-pct").value = "150"; $("ev-win").value = "50";
+  } else {
+    $("ev-title").value = "";
+    $("ev-msg").value = "";
+    $("ev-start").value = "";
+    $("ev-end").value = localInput(new Date(now.getTime() + 3 * 24 * 3600e3));
+    $("ev-pct").value = "100"; $("ev-win").value = "0";
+    $("ev-title").focus();
+  }
+}
+document.querySelectorAll("[data-preset]").forEach((b) => b.addEventListener("click", () => preset(b.dataset.preset)));
+
+// -------------------------------------------------------------- render
+let SETTINGS = [];
+
+function renderOverview(o) {
+  $("stats").textContent = `${o.players} players · ${o.active_today} raided in the last day · Season ${o.season.number}${o.season.name ? " (" + o.season.name + ")" : ""} ends ${when(o.season.ends_at)}`;
+
+  const evs = $("events");
+  evs.replaceChildren();
+  const now = Date.now();
+  for (const e of o.events) {
+    const over = new Date(e.ends_at).getTime() <= now;
+    const tag = over ? el("span", { class: "tag over" }, "OVER") : e.active ? el("span", { class: "tag live" }, "LIVE") : el("span", { class: "tag soon" }, "SOON");
+    const stop = over ? null : el("button", { class: "ghost", onclick: (ev) => busy(ev.target, async () => {
+      if (!confirm(`${e.active ? "End" : "Cancel"} "${e.title}" now?`)) return;
+      await api("POST", `/v1/admin/events/${e.id}/stop`);
+      toast("Event stopped"); await load();
+    }) }, e.active ? "End now" : "Cancel");
+    evs.append(el("div", { class: "item" },
+      el("div", { class: "body" },
+        el("div", { class: "title" }, tag, e.title),
+        el("div", { class: "meta" }, `${perks(e)} · ${when(e.starts_at)} to ${when(e.ends_at)}`),
+        e.message ? el("div", { class: "meta" }, e.message) : null),
+      stop));
+  }
+  if (!o.events.length) evs.append(el("div", { class: "empty" }, "No events running or planned."));
+
+  const gs = $("gifts");
+  gs.replaceChildren();
+  for (const g of o.gifts) {
+    const open = new Date(g.expires_at).getTime() > now;
+    gs.append(el("div", { class: "item" },
+      el("div", { class: "body" },
+        el("div", { class: "title" }, `${g.gold} gold to ${g.player || "everyone"}`),
+        el("div", { class: "meta" }, `${g.claims} claimed · sent ${when(g.created_at)} · ${open ? "open until " + when(g.expires_at) : "closed"}`),
+        g.message ? el("div", { class: "meta" }, g.message) : null),
+      open ? el("button", { class: "ghost", onclick: (ev) => busy(ev.target, async () => {
+        if (!confirm("Stop this gift being claimed? Gold already claimed stays.")) return;
+        await api("POST", `/v1/admin/gifts/${g.id}/cancel`);
+        toast("Gift closed"); await load();
+      }) }, "Close") : null));
+  }
+  if (!o.gifts.length) gs.append(el("div", { class: "empty" }, "No gifts in the last 30 days."));
+
+  const s = o.season;
+  $("season-line").textContent = `Season ${s.number}${s.name ? ": " + s.name : ""}, started ${when(s.started_at)}, ends ${when(s.ends_at)}.`;
+  $("s-name").value = s.name || "";
+  $("s-end").value = localInput(new Date(s.ends_at));
+
+  const log = $("log");
+  log.replaceChildren();
+  for (const l of o.log) log.append(el("div", {}, el("b", {}, l.action), ` · ${when(l.at)} · ${l.detail}`));
+  if (!o.log.length) log.append(el("div", {}, "Nothing changed yet."));
+}
+
+function renderSettings(list) {
+  SETTINGS = list;
+  const t = $("settings");
+  t.replaceChildren();
+  let group = "";
+  for (const s of list) {
+    if (s.group !== group) {
+      group = s.group;
+      t.append(el("tr", {}, el("td", { class: "group", colspan: "3" }, group)));
+    }
+    const input = el("input", { type: "number", min: String(s.min), max: String(s.max), value: String(s.value), "data-key": s.key });
+    const tr = el("tr", {},
+      el("td", {}, s.label, s.help ? el("div", { class: "help" }, s.help) : null),
+      el("td", { class: "num" }, input),
+      el("td", {}, el("span", { class: "def" }, `default ${s.default}`)));
+    input.addEventListener("input", () => { tr.classList.toggle("changed", Number(input.value) !== s.value); edits(); });
+    t.append(tr);
+  }
+  edits();
+}
+
+function edits() {
+  const n = document.querySelectorAll("#settings tr.changed").length;
+  $("set-save").disabled = n === 0;
+  $("set-undo").disabled = n === 0;
+  $("set-save").textContent = n ? `Save ${n} change${n > 1 ? "s" : ""}` : "Save changes";
+}
+
+// ------------------------------------------------------------- actions
+$("ev-go").addEventListener("click", (ev) => busy(ev.target, async () => {
+  const end = fromInput($("ev-end").value);
+  if (!end) throw new Error("Pick when the event ends");
+  const body = {
+    title: $("ev-title").value, message: $("ev-msg").value,
+    starts_at: fromInput($("ev-start").value), ends_at: end,
+    gold_pct: Number($("ev-pct").value), win_gold: Number($("ev-win").value || 0),
+  };
+  const e = await api("POST", "/v1/admin/events", body);
+  toast(e.active ? `"${e.title}" is live` : `"${e.title}" starts ${when(e.starts_at)}`);
+  await load();
+}));
+
+$("g-go").addEventListener("click", (ev) => busy(ev.target, async () => {
+  const gold = Number($("g-gold").value);
+  const who = $("g-who").value.trim();
+  if (!confirm(`Give ${gold} gold to ${who || "every player"}?`)) return;
+  await api("POST", "/v1/admin/gifts", { gold, player: who || null, message: $("g-msg").value, days: Number($("g-days").value || 14) });
+  toast("Gift sent"); $("g-msg").value = ""; await load();
+}));
+
+$("s-save").addEventListener("click", (ev) => busy(ev.target, async () => {
+  await api("PATCH", "/v1/admin/season", { name: $("s-name").value, ends_at: fromInput($("s-end").value) });
+  toast("Season saved"); await load();
+}));
+
+$("s-end-now").addEventListener("click", (ev) => busy(ev.target, async () => {
+  if (!confirm("End the season now? Every player is paid by league and trophies above 800 are halved. This can't be undone.")) return;
+  const s = await api("POST", "/v1/admin/season/end");
+  toast(`Season ${s.number} has started`); await load();
+}));
+
+$("set-save").addEventListener("click", (ev) => busy(ev.target, async () => {
+  const body = {};
+  document.querySelectorAll("#settings tr.changed input").forEach((i) => (body[i.dataset.key] = Number(i.value)));
+  renderSettings(await api("PUT", "/v1/admin/settings", body));
+  toast("Saved"); await load(true);
+}));
+$("set-undo").addEventListener("click", () => renderSettings(SETTINGS));
+
+// --------------------------------------------------------------- setup
+async function load(overviewOnly) {
+  renderOverview(await api("GET", "/v1/admin/overview"));
+  if (!overviewOnly) renderSettings(await api("GET", "/v1/admin/settings"));
+}
+
+function lock() {
+  KEY = "";
+  try { sessionStorage.removeItem("bagAdminKey"); } catch (e) {}
+  $("app").hidden = true; $("gate").hidden = false;
+  $("lock").hidden = true; $("refresh").hidden = true; $("stats").textContent = "";
+}
+
+async function unlock() {
+  try {
+    await load();
+    try { sessionStorage.setItem("bagAdminKey", KEY); } catch (e) {}
+    $("gate").hidden = true; $("app").hidden = false;
+    $("lock").hidden = false; $("refresh").hidden = false;
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+$("unlock").addEventListener("click", () => { KEY = $("key").value.trim(); unlock(); });
+$("key").addEventListener("keydown", (e) => { if (e.key === "Enter") $("unlock").click(); });
+$("lock").addEventListener("click", lock);
+$("refresh").addEventListener("click", (ev) => busy(ev.target, () => load()));
+preset("weekend");
+if (KEY) unlock();
+</script>
+</body>
+</html>

@@ -16,13 +16,14 @@
 
 use bag_protocol::*;
 use godcore::battle::Battle;
-use godcore::scenario::{home_spots, BuildKind, HomeBase, Placed, RAID_ENTRY};
+use godcore::scenario::{home_spots, HomeBase, RAID_ENTRY};
 use godcore::troop::Troop;
 use reqwest::blocking::{Client as Http, RequestBuilder};
 use serde::de::DeserializeOwned;
 use std::time::{Duration, Instant};
 
 pub use bag_protocol;
+pub use bag_protocol::starter_layout;
 pub use uuid::Uuid;
 
 #[derive(Debug)]
@@ -62,6 +63,28 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Request bodies bigger than this are sent gzipped.
 const GZIP_OVER: usize = 64 << 10;
+
+/// Send a request; a non-success answer becomes `Error::Api`.
+fn checked(r: RequestBuilder) -> Result<reqwest::blocking::Response> {
+    let resp = r.send().map_err(|e| Error::Network(e.to_string()))?;
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
+        return Err(Error::Api {
+            status: status.as_u16(),
+            code: "too_large".into(),
+            message: "that's too much to send to the server at once: try fewer or smaller-brained troops".into(),
+        });
+    }
+    let body: Option<ApiErrorBody> = resp.json().ok();
+    Err(Error::Api {
+        status: status.as_u16(),
+        code: body.as_ref().map_or("http".into(), |b| b.error.clone()),
+        message: body.map_or(format!("server returned {status}"), |b| b.message),
+    })
+}
 
 pub struct Client {
     base: String,
@@ -103,28 +126,17 @@ impl Client {
     }
 
     fn send<T: DeserializeOwned>(&self, r: RequestBuilder) -> Result<T> {
-        let resp = r.send().map_err(|e| Error::Network(e.to_string()))?;
-        let status = resp.status();
-        if status.is_success() {
-            return resp.json().map_err(|e| Error::Network(e.to_string()));
-        }
-        if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE {
-            return Err(Error::Api {
-                status: status.as_u16(),
-                code: "too_large".into(),
-                message: "that's too much to send to the server at once: try fewer or smaller-brained troops".into(),
-            });
-        }
-        let body: Option<ApiErrorBody> = resp.json().ok();
-        Err(Error::Api {
-            status: status.as_u16(),
-            code: body.as_ref().map_or("http".into(), |b| b.error.clone()),
-            message: body.map_or(format!("server returned {status}"), |b| b.message),
-        })
+        let resp = checked(r)?;
+        resp.json().map_err(|e| Error::Network(e.to_string()))
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.send(self.req(reqwest::Method::GET, path))
+    }
+
+    /// Like `send` for calls that answer with no body.
+    fn send_empty(&self, r: RequestBuilder) -> Result<()> {
+        checked(r).map(drop)
     }
 
     fn post<T: DeserializeOwned>(&self, path: &str, body: &impl serde::Serialize) -> Result<T> {
@@ -350,6 +362,37 @@ impl Client {
         self.get(&format!("/v1/attacks/{attack_id}/replay"))
     }
 
+    /// Raid back the player who raided you in `attack_id` (from the battle
+    /// log, `can_revenge`). Their shield doesn't protect them.
+    pub fn revenge(&self, attack_id: Uuid) -> Result<Match> {
+        self.post(&format!("/v1/attacks/{attack_id}/revenge"), &serde_json::json!({}))
+    }
+
+    /// The best raid of the last 24 hours, to watch.
+    pub fn raid_of_the_day(&self) -> Result<Replay> {
+        self.get("/v1/raid-of-the-day")
+    }
+
+    // ------------------------------------------------------------ the cup
+
+    pub fn cup(&self) -> Result<CupStandings> {
+        self.get("/v1/cup")
+    }
+
+    /// Enter (or replace) this week's troop. Checked locally first.
+    pub fn enter_cup(&self, troop: &Troop) -> Result<CupStandings> {
+        let paid = self.me()?.upgrades;
+        let t = canonical_troop(troop, godcore::classes::Role::Attack, godcore::scenario::max_troop_level(paid.town_hall))?;
+        if let Some(why) = paid.blocker(&t) {
+            return Err(Error::Invalid(why));
+        }
+        self.post("/v1/cup/entry", &CupEntry { troop: t })
+    }
+
+    pub fn cup_replay(&self, week: i64, player: Uuid) -> Result<CupReplay> {
+        self.get(&format!("/v1/cup/{week}/{player}"))
+    }
+
     // ------------------------------------------------------------ seasons
 
     pub fn season(&self) -> Result<Season> {
@@ -358,6 +401,23 @@ impl Client {
 
     pub fn my_seasons(&self) -> Result<Vec<SeasonResult>> {
         self.get("/v1/me/seasons")
+    }
+
+    // ------------------------------------------------------------ live ops
+
+    /// Running and upcoming events, the season and unclaimed gifts.
+    pub fn live(&self) -> Result<LiveView> {
+        self.get("/v1/live")
+    }
+
+    pub fn claim_gift(&self, id: Uuid) -> Result<GiftClaimed> {
+        self.post(&format!("/v1/me/gifts/{id}/claim"), &serde_json::json!({}))
+    }
+
+    /// The operator's controls, for scripts and tests. People normally use
+    /// the admin page at `<server>/admin`.
+    pub fn admin(&self, key: &str) -> Admin<'_> {
+        Admin { c: self, key: key.to_string() }
     }
 
     // ------------------------------------------------------------ clans
@@ -497,25 +557,6 @@ fn placements(v: &[(Troop, (f32, f32))]) -> Vec<Placement> {
         .collect()
 }
 
-/// A valid layout with every building a Town Hall level allows: towers on
-/// an outer ring, cannons inside. For tests and bagctl; players build their
-/// own in the game.
-pub fn starter_layout(town_hall: u32) -> HomeBase {
-    let mut base = HomeBase {
-        town_hall,
-        buildings: Vec::new(),
-    };
-    for (kind, r, phase) in [(BuildKind::Tower, 5.4f32, 0.0f32), (BuildKind::Cannon, 3.2, 0.5)] {
-        for k in 0..24 {
-            let a = (k as f32 + phase) / 24.0 * std::f32::consts::TAU;
-            let (x, y) = (r * a.cos(), r * a.sin());
-            if base.can_add(kind) && base.fits(x, y) {
-                base.buildings.push(Placed { kind, x, y });
-            }
-        }
-    }
-    base
-}
 
 /// Default defender spots (the game's auto-place).
 pub fn defender_spots(n: usize) -> Vec<(f32, f32)> {
@@ -543,4 +584,61 @@ pub fn replay_battle(r: &Replay) -> Battle {
 /// self-play pool, `--vs` in godctl).
 pub fn raiders(r: &Replay) -> Vec<Troop> {
     r.army.iter().map(|p| p.troop.clone()).collect()
+}
+
+/// The admin API (`/v1/admin`), authorised by the server's ADMIN_KEY.
+pub struct Admin<'a> {
+    c: &'a Client,
+    key: String,
+}
+
+impl Admin<'_> {
+    fn req(&self, method: reqwest::Method, path: &str) -> RequestBuilder {
+        self.c
+            .http
+            .request(method, format!("{}{path}", self.c.base))
+            .header("x-admin-key", &self.key)
+    }
+
+    pub fn overview(&self) -> Result<AdminOverview> {
+        self.c.send(self.req(reqwest::Method::GET, "/v1/admin/overview"))
+    }
+
+    pub fn start_event(&self, e: &NewEvent) -> Result<LiveEvent> {
+        self.c.send(self.req(reqwest::Method::POST, "/v1/admin/events").json(e))
+    }
+
+    pub fn stop_event(&self, id: Uuid) -> Result<()> {
+        self.c.send_empty(self.req(reqwest::Method::POST, &format!("/v1/admin/events/{id}/stop")))
+    }
+
+    pub fn give(&self, g: &NewGift) -> Result<AdminGift> {
+        self.c.send(self.req(reqwest::Method::POST, "/v1/admin/gifts").json(g))
+    }
+
+    pub fn cancel_gift(&self, id: Uuid) -> Result<()> {
+        self.c.send_empty(self.req(reqwest::Method::POST, &format!("/v1/admin/gifts/{id}/cancel")))
+    }
+
+    pub fn season(&self) -> Result<Season> {
+        self.c.send(self.req(reqwest::Method::GET, "/v1/admin/season"))
+    }
+
+    pub fn edit_season(&self, e: &SeasonEdit) -> Result<Season> {
+        self.c.send(self.req(reqwest::Method::PATCH, "/v1/admin/season").json(e))
+    }
+
+    /// End the season now: pays rewards and starts the next one.
+    pub fn end_season(&self) -> Result<Season> {
+        self.c.send(self.req(reqwest::Method::POST, "/v1/admin/season/end"))
+    }
+
+    pub fn settings(&self) -> Result<Vec<SettingView>> {
+        self.c.send(self.req(reqwest::Method::GET, "/v1/admin/settings"))
+    }
+
+    pub fn change_settings(&self, values: &[(&str, i64)]) -> Result<Vec<SettingView>> {
+        let m: std::collections::BTreeMap<&str, i64> = values.iter().copied().collect();
+        self.c.send(self.req(reqwest::Method::PUT, "/v1/admin/settings").json(&m))
+    }
 }

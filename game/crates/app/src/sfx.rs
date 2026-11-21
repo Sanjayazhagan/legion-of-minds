@@ -237,7 +237,7 @@ pub fn play(s: Sfx, pan: f32, vol: f32, delay: f32) {
     // Equal-power pan.
     let a = (pan + 1.0) * PI / 4.0;
     let (gl, gr) = (a.cos() * g * 1.41, a.sin() * g * 1.41);
-    if crate::record::active() {
+    if crate::record::active() || crate::record::clip_active() {
         st.log.lock().unwrap().push((now, s, variant, gl, gr, 0.0));
         return;
     }
@@ -255,9 +255,14 @@ pub fn play_ui(s: Sfx) {
     play(s, 0.0, 1.0, 0.0);
 }
 
-/// After a recording: mix every logged sound into a soundtrack and add it to
-/// the video at `out`.
-pub fn finish_recording(out: &str, seconds: f64) {
+/// Forgets logged sounds (a battle clip starts a fresh soundtrack).
+pub fn clear_log() {
+    state().log.lock().unwrap().clear();
+}
+
+/// Every logged sound mixed into one stereo track of `seconds` (None when
+/// nothing was heard).
+pub fn soundtrack(seconds: f64) -> Option<Vec<f32>> {
     let st = state();
     // The bank is built in the background; wait for it if a tour was short.
     for _ in 0..200 {
@@ -266,10 +271,10 @@ pub fn finish_recording(out: &str, seconds: f64) {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let Some(bank) = st.bank.get() else { return };
+    let Some(bank) = st.bank.get() else { return None };
     let log = st.log.lock().unwrap();
     if log.is_empty() {
-        return;
+        return None;
     }
     let n = (seconds * SR as f64) as usize;
     let mut m = Mixer::default();
@@ -289,6 +294,13 @@ pub fn finish_recording(out: &str, seconds: f64) {
         let end = (start + block).min(n);
         m.render(&mut data[start * 2..end * 2]);
     }
+    Some(data)
+}
+
+/// After a recording: mix every logged sound into a soundtrack and add it to
+/// the video at `out`.
+pub fn finish_recording(out: &str, seconds: f64) {
+    let Some(data) = soundtrack(seconds) else { return };
     let wav = std::path::PathBuf::from(format!("{out}.sound.wav"));
     if write_wav(&wav, &data).is_err() {
         return;
@@ -306,7 +318,7 @@ pub fn finish_recording(out: &str, seconds: f64) {
     let _ = std::fs::remove_file(&wav);
 }
 
-fn write_wav(path: &std::path::Path, data: &[f32]) -> std::io::Result<()> {
+pub fn write_wav(path: &std::path::Path, data: &[f32]) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
     let bytes = (data.len() * 2) as u32;
