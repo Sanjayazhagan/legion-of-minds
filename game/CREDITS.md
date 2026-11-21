@@ -13,3 +13,7 @@ Each pack's license file is kept next to its models in `assets/`. Unused animati
 The troop models in `assets/troops/` are made from the KayKit Adventurers characters above (CC0) with Blender, by `tools/blender/troops.py`: chunkier builds, bigger weapons, new class gear (horns, pauldrons, plumes, quivers, masks and so on, built from simple shapes and coloured with each pack's own texture) and a new `Special_<Class>` animation per class, made from the pack's own clips. These changes are released as CC0 too. The originals in `assets/adventurers/` are kept as the script's source.
 
 Built in code for this game: the ground and arena grid, cannon barrels, the healer halo, team rings, HP bars and effects, and the 2D fallback art in `crates/app/src/art.rs`.
+
+## Code
+
+Battle clips are compressed with [OpenH264](https://github.com/cisco/openh264) (BSD 2-Clause, Copyright (c) 2013, Cisco Systems), built from source into the game through the `openh264` Rust crate (BSD 2-Clause, Ralf Biedert). The installer should ship this notice with the game.

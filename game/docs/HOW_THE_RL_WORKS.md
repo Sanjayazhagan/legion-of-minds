@@ -41,7 +41,7 @@ Class stats and the weapon decide what those actions achieve: speed, health, ran
 
 ## 3. The brain
 
-The brain is a small neural network: the 90 numbers go in, pass through two layers of "neurons", and come out as a score for each of the 21 actions. Those weights are what training changes. **The player picks the brain size** when recruiting (64, 96, 128, 160, 192 or 256 neurons per layer) and can grow it later in the barracks:
+The brain is a small neural network: the 90 numbers go in, pass through two layers of "neurons", and come out as a score for each of the 21 actions. Those weights are what training changes. **The brain grows with level**: 64, 96, 128, 192 and 256 neurons per layer at levels 1-5. A troop may only level up once its training has plateaued at its current size (its drill score stopped rising), so each bigger brain arrives when the smaller one is full. Sizes measured:
 
 | Neurons per layer | Numbers in the brain | Training speed (4-core test machine) |
 |---|---|---|
@@ -52,7 +52,7 @@ The brain is a small neural network: the 90 numbers go in, pass through two laye
 | 192 | 58,004 | not measured |
 | 256 | 93,716 | about 1,050 steps/s |
 
-Growing keeps everything the troop learned: the new neurons start with no say in its choices and are trained in from there. A brain never shrinks. Troops from before the choice existed keep growing with their level as they used to (64 at levels 1-2, then 96, 128, 160).
+Growing keeps everything the troop learned: the new neurons start with no say in its choices and are trained in from there. A brain never shrinks. Troops that picked a bigger brain back when players chose sizes keep it until their level's size passes it.
 
 What we measured comparing 160 and 256 at level 5 (Fighter, Mage and a Fighter/Archer/Assassin mix, 900k steps, half the drills against trained defenders, 2 seeds each):
 

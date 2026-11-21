@@ -27,6 +27,8 @@ use uuid::Uuid;
 
 pub mod competition;
 pub use competition::*;
+pub mod liveops;
+pub use liveops::*;
 
 pub const MAX_DEFENDERS: usize = 4;
 pub const MAX_ARMY: usize = 5;
@@ -296,6 +298,10 @@ pub struct AttackOutcome {
     /// Extra gold for a win, from the attacker's league.
     #[serde(default)]
     pub league_bonus: i64,
+    /// Extra gold from events running on the server (double gold weekends
+    /// and the like).
+    #[serde(default)]
+    pub event_bonus: i64,
     pub attacker: User,
 }
 
@@ -515,6 +521,10 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
         // Team training happens on the player's machine and changes nothing
         // in a battle, so it is kept as sent.
         team_steps: t.team_steps,
+        // The plateau gate is checked on the player's machine when levelling;
+        // battles don't read it.
+        level_from: t.level_from,
+        plateaued: t.plateaued,
     };
     // Move practice comes from the troop's own practice record, never from
     // the client's copy in the spec.

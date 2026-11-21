@@ -16,6 +16,7 @@ from mathutils import Vector
 args = sys.argv[sys.argv.index("--") + 1:]
 outdir = args[0]
 old = "old" in args
+PITCH = next((float(a[6:]) for a in args if a.startswith("pitch=")), 20.0)
 os.makedirs(outdir, exist_ok=True)
 
 CLASSES = [
@@ -99,7 +100,7 @@ for i, (cls, model, show, idle) in enumerate(CLASSES):
     rigs.append((cls, rig, acts))
 
 scene.frame_set(0)
-aim((0, 0, 1.0), scale=len(CLASSES) * gap + 0.6)
+aim((0, 0, 1.0), scale=len(CLASSES) * gap + 0.6, pitch=PITCH)
 scene.render.resolution_x, scene.render.resolution_y = 2400, 560
 scene.render.filepath = os.path.join(outdir, "lineup_old.png" if old else "lineup.png")
 bpy.ops.render.render(write_still=True)

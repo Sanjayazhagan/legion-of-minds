@@ -150,7 +150,7 @@ def cone(r1, r2, depth, segs=8, m=Matrix()):
     return transformed(bm, m)
 
 
-def sphere(r, m=Matrix(), segs=10, rings=6):
+def sphere(r, m=Matrix(), segs=8, rings=5):
     bm = bmesh.new()
     bmesh.ops.create_uvsphere(bm, u_segments=segs, v_segments=rings, radius=r)
     return transformed(bm, m)
@@ -163,7 +163,7 @@ def box(size, m=Matrix()):
     return transformed(bm, m)
 
 
-def torus(r_major, r_minor, m=Matrix(), segs=16, sides=6):
+def torus(r_major, r_minor, m=Matrix(), segs=12, sides=5):
     bm = bmesh.new()
     verts = []
     for i in range(segs):
@@ -181,7 +181,7 @@ def torus(r_major, r_minor, m=Matrix(), segs=16, sides=6):
     return transformed(bm, m)
 
 
-def horn(length, r, bend, segs=7, steps=6, m=Matrix()):
+def horn(length, r, bend, segs=6, steps=5, m=Matrix()):
     """A tapered horn that curls up and forward, base at the origin pointing +X."""
     bm = bmesh.new()
     rings = []
@@ -539,13 +539,17 @@ def gear_paladin(rig, pal, mat):
     lo, hi = bbox("Knight_Helmet")
     gold, white = (222, 176, 64), (240, 240, 240)
     parts = []
+    # A swept wing on each side of the helmet: feathers fanned up and back,
+    # big enough to read from the battle camera.
     for s in (1, -1):
-        for k in range(4):
-            a = 0.35 + 0.3 * k
-            base = Vector((s * hi.x * 0.95, 0.05, (lo.z + hi.z) / 2 + 0.05))
-            m = (Matrix.Translation(base) @ Matrix.Rotation(s * -a, 4, "Y") @ Matrix.Translation((0, 0.09 * k, 0.36 - 0.04 * k))
-                 @ Matrix.Diagonal((0.25, 1.0, 1.0, 1)))
-            parts.append((cone(0.13, 0.0, 0.8 - 0.1 * k, segs=6, m=m), white if k % 2 else gold))
+        base = Vector((s * hi.x * 0.88, 0.12, (lo.z + hi.z) / 2 + 0.1))
+        for k in range(5):
+            theta = math.radians(8 + 22 * k)
+            length = 1.05 - 0.12 * k
+            m = (Matrix.Translation(base) @ Matrix.Rotation(s * 0.6, 4, "Y") @ Matrix.Rotation(-theta, 4, "X")
+                 @ Matrix.Translation((0, 0, length / 2)) @ Matrix.Diagonal((0.55, 1.0, 1.0, 1)))
+            parts.append((cone(0.17, 0.02, length, segs=6, m=m), gold if k % 2 == 0 else white))
+        parts.append((sphere(0.12, Matrix.Translation(base)), gold))
     wings = colored(parts, mat, pal, "Paladin_Wings")
     on_bone(wings, rig, "head", Matrix())
     return ["Paladin_Wings"] + pauldrons(rig, pal, mat, "Paladin", gold, white, white, out=0.2, r=0.27)
@@ -619,16 +623,18 @@ def gear_healer(rig, pal, mat):
 
 def gear_keeper(rig, pal, mat):
     hips = bone_line(rig, "hips")[0]
-    metal, glow, dark = (70, 70, 80), (250, 210, 110), (90, 60, 110)
-    base = hips + Vector((0.52, -0.18, -0.1))
+    metal, glow, dark = (70, 70, 80), (255, 226, 90), (90, 60, 110)
+    # A big glowing lantern hung at the right hip (the book is in the left hand), out to the side so it shows from the battle camera.
+    base = hips + Vector((-0.62, -0.1, 0.0))
     parts = [
-        (box((0.17, 0.17, 0.04), Matrix.Translation(base + Vector((0, 0, 0.13)))), metal),
-        (box((0.17, 0.17, 0.04), Matrix.Translation(base - Vector((0, 0, 0.1)))), metal),
-        (sphere(0.08, Matrix.Translation(base)), glow),
-        (torus(0.05, 0.015, Matrix.Translation(base + Vector((0, 0, 0.2))) @ Matrix.Rotation(math.pi / 2, 4, "X")), metal),
+        (box((0.32, 0.32, 0.07), Matrix.Translation(base + Vector((0, 0, 0.24)))), metal),
+        (cone(0.2, 0.04, 0.14, segs=4, m=Matrix.Translation(base + Vector((0, 0, 0.34))) @ Matrix.Rotation(math.pi / 4, 4, "Z")), metal),
+        (box((0.32, 0.32, 0.07), Matrix.Translation(base - Vector((0, 0, 0.2)))), metal),
+        (sphere(0.17, Matrix.Translation(base)), glow),
+        (torus(0.08, 0.025, Matrix.Translation(base + Vector((0, 0, 0.47))) @ Matrix.Rotation(math.pi / 2, 4, "X")), metal),
     ]
-    for dx, dy in ((0.07, 0.07), (-0.07, 0.07), (0.07, -0.07), (-0.07, -0.07)):
-        parts.append((box((0.02, 0.02, 0.22), Matrix.Translation(base + Vector((dx, dy, 0.015)))), metal))
+    for dx, dy in ((0.13, 0.13), (-0.13, 0.13), (0.13, -0.13), (-0.13, -0.13)):
+        parts.append((box((0.04, 0.04, 0.42), Matrix.Translation(base + Vector((dx, dy, 0.02)))), metal))
     lan = colored(parts, mat, pal, "Keeper_Lantern")
     on_bone(lan, rig, "hips", Matrix())
     n = neck()
