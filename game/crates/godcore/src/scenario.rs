@@ -2,7 +2,7 @@
 
 use crate::classes::ClassSpec;
 use crate::rng::Rng;
-use crate::sim::{Control, World, ARENA};
+use crate::sim::{Control, Ground, Light, Patch, World, ARENA};
 use serde::{Deserialize, Serialize};
 
 pub const DRILL_TICKS: u32 = 500;
@@ -86,6 +86,7 @@ pub fn build_drill(spec: &ClassSpec, drill: Drill, rng: &mut Rng) -> World {
             }
         }
     }
+    lay_battlefield(&mut w, rng, None);
     w
 }
 
@@ -190,6 +191,9 @@ pub fn build_base(base: &BaseLayout) -> World {
         u.dmg *= base.strength;
     }
     w.recount_buildings();
+    // Every player raids the same base in the same light, on the same ground.
+    let light = [Light::Day, Light::Dusk, Light::Fog, Light::Night][base.id % 4];
+    lay_battlefield(&mut w, &mut Rng::new(0x6669_656c_64 + base.id as u64), Some(light));
     w
 }
 
@@ -236,6 +240,7 @@ pub fn build_defense_drill(spec: &ClassSpec, rng: &mut Rng) -> (World, (f32, f32
         (cx + ux * dist).clamp(1.0, ARENA - 1.0),
         (cy + uy * dist).clamp(1.0, ARENA - 1.0),
     );
+    lay_battlefield(&mut w, rng, None);
     (w, from)
 }
 
@@ -440,6 +445,26 @@ pub fn build_home_base(base: &HomeBase) -> World {
         u.dmg *= HOME_STRENGTH;
     }
     w.recount_buildings();
+    // The ground and light come from the base's own layout, so the player's
+    // game and the server agree on them.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ base.town_hall as u64;
+    for b in &base.buildings {
+        for v in [b.x.to_bits() as u64, b.y.to_bits() as u64, b.kind as u64] {
+            h = (h ^ v).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    let mut rng = Rng::new(h);
+    let r = rng.f32();
+    let light = if r < 0.5 {
+        Light::Day
+    } else if r < 0.7 {
+        Light::Dusk
+    } else if r < 0.85 {
+        Light::Night
+    } else {
+        Light::Fog
+    };
+    lay_battlefield(&mut w, &mut rng, Some(light));
     w
 }
 
@@ -572,6 +597,7 @@ pub fn build_team_drill(team: &[ClassSpec], hardness: u8, rng: &mut Rng) -> Worl
         }
         w.recount_buildings();
     }
+    lay_battlefield(&mut w, rng, None);
     w
 }
 
@@ -610,5 +636,43 @@ pub fn build_team_defense(team: &[ClassSpec], rng: &mut Rng) -> (World, (f32, f3
         (cx + ux * dist).clamp(1.0, ARENA - 1.0),
         (cy + uy * dist).clamp(1.0, ARENA - 1.0),
     );
+    lay_battlefield(&mut w, rng, None);
     (w, from)
+}
+
+/// Light and ground for a battle (sim version 10): two patches of mud and a
+/// hill between the deploy ring and the base, clear of buildings. `light`
+/// None picks one at random (training drills see every kind).
+pub fn lay_battlefield(w: &mut World, rng: &mut Rng, light: Option<Light>) {
+    w.light = light.unwrap_or_else(|| {
+        let r = rng.f32();
+        if r < 0.4 {
+            Light::Day
+        } else if r < 0.6 {
+            Light::Dusk
+        } else if r < 0.8 {
+            Light::Night
+        } else {
+            Light::Fog
+        }
+    });
+    w.terrain.clear();
+    for ground in [Ground::Mud, Ground::Mud, Ground::Hill] {
+        let r = if ground == Ground::Hill { 2.5 } else { 2.0 };
+        for _ in 0..20 {
+            let dist = rng.range(4.0, 10.0);
+            let (x, y) = around(rng, C, C, dist);
+            let clear = w.units.iter().all(|u| {
+                let (dx, dy) = (u.x - x, u.y - y);
+                !u.kind.is_building() || (dx * dx + dy * dy).sqrt() > r + u.radius + 0.5
+            }) && w.terrain.iter().all(|p| {
+                let (dx, dy) = (p.x - x, p.y - y);
+                (dx * dx + dy * dy).sqrt() > r + p.r
+            });
+            if clear && (r..=ARENA - r).contains(&x) && (r..=ARENA - r).contains(&y) {
+                w.terrain.push(Patch { ground, x, y, r });
+                break;
+            }
+        }
+    }
 }

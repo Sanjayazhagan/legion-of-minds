@@ -24,7 +24,7 @@ pub const SPLASH_BUILDING: f32 = 0.25;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
 pub const SIM_VERSION: u32 = 10;
-pub const OBS_DIM: usize = 132;
+pub const OBS_DIM: usize = 138;
 /// Where the teamwork part of the view starts (the two allies' roles,
 /// threats and actions, sim version 4).
 pub const OBS_TEAM: usize = 74;
@@ -218,6 +218,8 @@ pub struct UnitStats {
     pub winded: u32,
     /// Health lost to bleeding.
     pub bled: f32,
+    /// Hits taken from an attacker it hadn't noticed.
+    pub surprised: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -405,6 +407,73 @@ pub enum EventKind {
     Call(u8),
 }
 
+/// Light and weather (sim version 10): how far trained troops can see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Light {
+    #[default]
+    Day,
+    Dusk,
+    /// Dark, but buildings have torches and are seen from as far as by day.
+    Night,
+    /// Thick fog: short sight, and sound carries further.
+    Fog,
+}
+
+impl Light {
+    pub const ALL: [Light; 4] = [Light::Day, Light::Dusk, Light::Night, Light::Fog];
+
+    /// Share of normal sight range.
+    pub fn sight(self) -> f32 {
+        match self {
+            Light::Day => 1.0,
+            Light::Dusk => 11.0 / 14.0,
+            Light::Night => 8.0 / 14.0,
+            Light::Fog => 6.0 / 14.0,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Light::Day => "Day",
+            Light::Dusk => "Dusk",
+            Light::Night => "Night",
+            Light::Fog => "Fog",
+        }
+    }
+}
+
+/// Ground that isn't flat grass (sim version 10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ground {
+    /// Slow and tiring to cross.
+    Mud,
+    /// A rise: slower to climb, but troops on top see further and shoot harder.
+    Hill,
+}
+
+/// A round patch of mud or hill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Patch {
+    pub ground: Ground,
+    pub x: f32,
+    pub y: f32,
+    pub r: f32,
+}
+
+pub const MUD_SPEED: f32 = 0.65;
+pub const MUD_EFFORT: f32 = 1.5;
+pub const HILL_SPEED: f32 = 0.85;
+pub const HILL_SIGHT: f32 = 2.0;
+pub const HILL_SHOT: f32 = 1.1;
+/// How far a troop's footsteps carry (heavy armour carries further).
+pub const STEP_SOUND: f32 = 4.0;
+pub const HEAVY_STEP_SOUND: f32 = 6.0;
+/// Fog carries sound this much further.
+pub const FOG_HEARING: f32 = 1.25;
+/// A blow from an attacker the target hasn't noticed hits this much harder,
+/// and can't be dodged or blocked.
+pub const SURPRISE: f32 = 1.3;
+
 /// A hidden snare on the ground.
 #[derive(Clone, Copy, Debug)]
 pub struct Trap {
@@ -472,8 +541,14 @@ pub struct World {
     total_building_hp: f32,
     /// What each trained troop remembers of each unit, `n * n` entries.
     mem: Vec<Mem>,
-    /// Where fights could be heard last tick.
-    noise: Vec<(f32, f32)>,
+    /// What could be heard last tick: where, how far it carries, and whose
+    /// it is (None for a fight, which everyone hears).
+    noise: Vec<(f32, f32, f32, Option<Team>)>,
+    /// Footsteps and shouts made this tick (they join `noise`).
+    sounds: Vec<(f32, f32, f32, Option<Team>)>,
+    /// Light and weather, and mud and hills (sim version 10).
+    pub light: Light,
+    pub terrain: Vec<Patch>,
     /// Recent calls to teammates.
     calls: Vec<Call>,
 }
@@ -541,6 +616,9 @@ impl World {
             total_building_hp: 0.0,
             mem: Vec::new(),
             noise: Vec::new(),
+            sounds: Vec::new(),
+            light: Light::Day,
+            terrain: Vec::new(),
             calls: Vec::new(),
         }
     }
@@ -1127,7 +1205,12 @@ impl World {
         if c - edge <= TOUCH {
             return true;
         }
-        if c - edge > me.sight || me.facing.0 * dx + me.facing.1 * dy < SIGHT_COS * c - edge {
+        let mut sight = me.sight + if self.ground(me.x, me.y) == Some(Ground::Hill) { HILL_SIGHT } else { 0.0 };
+        // Torches keep buildings in view at night.
+        if !(self.light == Light::Night && u.kind.is_building()) {
+            sight *= self.light.sight();
+        }
+        if c - edge > sight || me.facing.0 * dx + me.facing.1 * dy < SIGHT_COS * c - edge {
             return false;
         }
         for (k, b) in self.units.iter().enumerate() {
@@ -1260,10 +1343,14 @@ impl World {
     fn heard(&self, i: usize) -> Option<((f32, f32), f32)> {
         let me = &self.units[i];
         let mut best: Option<((f32, f32), f32)> = None;
-        for &(x, y) in &self.noise {
+        let carry = if self.light == Light::Fog { FOG_HEARING } else { 1.0 };
+        for &(x, y, range, team) in &self.noise {
+            if team == Some(me.team) {
+                continue;
+            }
             let (dx, dy) = (x - me.x, y - me.y);
             let d = (dx * dx + dy * dy).sqrt();
-            if d > TOUCH && d <= HEAR_RANGE && best.map_or(true, |(_, bd)| d < bd) {
+            if d > TOUCH && d <= range * carry && best.map_or(true, |(_, bd)| d < bd) {
                 best = Some(((dx, dy), d));
             }
         }
@@ -1588,6 +1675,15 @@ impl World {
         put(&mut o, body::injury(me.arms));
         put(&mut o, me.bleed / body::BLEED_MAX);
         put(&mut o, me.supply());
+        // The battlefield: how far it can see in this light, fog, and the
+        // ground under it and two steps ahead.
+        put(&mut o, self.light.sight());
+        put(&mut o, (self.light == Light::Fog) as u8 as f32);
+        let (ax, ay) = (me.x + me.facing.0 * 2.0, me.y + me.facing.1 * 2.0);
+        for g in [self.ground(me.x, me.y), self.ground(ax, ay)] {
+            put(&mut o, (g == Some(Ground::Mud)) as u8 as f32);
+            put(&mut o, (g == Some(Ground::Hill)) as u8 as f32);
+        }
         debug_assert_eq!(k, OBS_DIM);
         o
     }
@@ -1685,11 +1781,20 @@ impl World {
         // What could be heard this tick, then what everyone saw.
         self.noise.clear();
         for e in &self.events {
-            if !matches!(e.kind, EventKind::Heal | EventKind::Cloak | EventKind::Ward | EventKind::TrapSet) {
-                self.noise.push(e.to);
+            if !matches!(e.kind, EventKind::Heal | EventKind::Cloak | EventKind::Ward | EventKind::TrapSet | EventKind::Call(_)) {
+                self.noise.push((e.to.0, e.to.1, HEAR_RANGE, None));
             }
         }
+        self.noise.append(&mut self.sounds);
         self.update_senses();
+    }
+
+    /// What the ground is like here (None for flat grass).
+    pub fn ground(&self, x: f32, y: f32) -> Option<Ground> {
+        self.terrain.iter().find(|p| {
+            let (dx, dy) = (x - p.x, y - p.y);
+            dx * dx + dy * dy <= p.r * p.r
+        }).map(|p| p.ground)
     }
 
     fn pos(&self, i: usize) -> (f32, f32) {
@@ -1715,7 +1820,20 @@ impl World {
     }
 
     fn damage(&mut self, from: usize, to: usize, amount: f32) {
-        if self.units[to].invuln > 0 {
+        // Caught from behind by someone it never noticed: no dodging or
+        // blocking that, and it hurts more.
+        let surprise = from != to
+            && self.human(to)
+            && !self.units[from].kind.is_building()
+            && self.units[from].team != self.units[to].team
+            && !self.noticed(to, from);
+        let amount = if surprise {
+            self.units[to].stats.surprised += 1;
+            amount * SURPRISE
+        } else {
+            amount
+        };
+        if self.units[to].invuln > 0 && !surprise {
             self.units[to].stats.evaded += 1;
             return;
         }
@@ -1731,7 +1849,7 @@ impl World {
         if self.units[to].splash > 0.0 && !self.units[from].kind.is_building() {
             amount *= 1.0 + CASTER_EXPOSED;
         }
-        if self.units[to].block_ticks > 0 {
+        if self.units[to].block_ticks > 0 && !surprise {
             let kept = amount * self.units[to].block_taken;
             self.units[to].stats.blocked += amount - kept;
             amount = kept;
@@ -1807,8 +1925,16 @@ impl World {
             1..=8 => {
                 let (dx, dy) = DIRS[(a - 1) as usize];
                 let u = &self.units[i];
-                let sp = if u.block_ticks > 0 { u.speed * 0.5 } else { u.speed } * self.vigour(i);
-                let cost = body::COST_WALK * u.load;
+                let g = self.ground(u.x, u.y);
+                let slow = match g {
+                    Some(Ground::Mud) => MUD_SPEED,
+                    Some(Ground::Hill) => HILL_SPEED,
+                    None => 1.0,
+                };
+                let sp = if u.block_ticks > 0 { u.speed * 0.5 } else { u.speed } * self.vigour(i) * slow;
+                let cost = body::COST_WALK * u.load * if g == Some(Ground::Mud) { MUD_EFFORT } else { 1.0 };
+                let sound = if u.load > 1.2 { HEAVY_STEP_SOUND } else { STEP_SOUND };
+                self.sounds.push((u.x, u.y, sound, Some(u.team)));
                 self.move_unit(i, dx * sp, dy * sp);
                 // Walking doesn't wear the body down, it just costs breath.
                 if self.human(i) {
@@ -1957,6 +2083,8 @@ impl World {
             _ => (cx, cy),
         };
         self.calls.push(Call { team, from: i, kind, cx, cy, x, y, tick: self.tick });
+        // The enemy can hear a shout too.
+        self.sounds.push((cx, cy, CALL_RANGE, Some(team)));
         self.units[i].cloak = 0;
         self.units[i].stats.calls += 1;
         self.events.push(Event { kind: EventKind::Call(kind), from: (cx, cy), to: (x, y) });
@@ -1996,7 +2124,8 @@ impl World {
             }
         }
         self.events.push(Event { kind, from, to });
-        let dmg = self.units[i].dmg * force;
+        let high = ranged && self.ground(from.0, from.1) == Some(Ground::Hill);
+        let dmg = self.units[i].dmg * force * if high { HILL_SHOT } else { 1.0 };
         self.damage(i, j, dmg);
         let splash = self.units[i].splash;
         if splash > 0.0 {
@@ -2205,6 +2334,12 @@ impl World {
         let target = self.nearest(i, |u| u.team != team && u.kind == Kind::Troop);
         let (gx, gy, (hx, hy)) = (self.units[i].x, self.units[i].y, self.units[i].home);
         let (range, cd, speed) = (self.units[i].range, self.units[i].cd, self.units[i].speed);
+        let speed = speed
+            * match self.ground(self.units[i].x, self.units[i].y) {
+                Some(Ground::Mud) => MUD_SPEED,
+                Some(Ground::Hill) => HILL_SPEED,
+                None => 1.0,
+            };
         let home = ((gx - hx) * (gx - hx) + (gy - hy) * (gy - hy)).sqrt();
         if let Some((j, d)) = target {
             if d <= range {
