@@ -234,12 +234,32 @@ impl Store {
                     if used_backup {
                         notice(format!("{}'s save was damaged, so the last good copy was loaded.", t.name.trim()));
                     }
+                    self.keep_before_growth(&t);
                     v.push(t);
                 }
                 None => notice(format!("Troop file {id}.troop.json couldn't be read and was skipped.")),
             }
         }
         v
+    }
+
+    /// Loading grew this troop's brain (a new size for its level, or new
+    /// inputs): keep the file as it was, once, as `<id>.troop.json.before-grow`,
+    /// so the old brain can be restored by hand if anything looks wrong.
+    fn keep_before_growth(&self, t: &Troop) {
+        let path = self.troop_path(t.id);
+        let Ok(raw) = std::fs::read_to_string(&path) else { return };
+        let dims = serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| serde_json::from_value::<Vec<usize>>(v["actor"]["dims"].clone()).ok());
+        if dims.is_some_and(|d| d != t.actor.dims) {
+            let mut keep = path.into_os_string();
+            keep.push(".before-grow");
+            let keep = PathBuf::from(keep);
+            if !keep.exists() {
+                let _ = std::fs::write(&keep, raw);
+            }
+        }
     }
 
     /// A troop id no troop file uses yet, at least `next`.
@@ -262,6 +282,9 @@ impl Store {
     pub fn delete_troop(&self, id: u64) {
         let p = self.troop_path(id);
         let _ = std::fs::remove_file(backup_of(&p));
+        let mut keep = p.clone().into_os_string();
+        keep.push(".before-grow");
+        let _ = std::fs::remove_file(keep);
         let _ = std::fs::remove_file(p);
     }
 
@@ -354,6 +377,31 @@ mod tests {
         assert_eq!(v[0].steps, 0, "last good copy");
         s.delete_troop(4);
         assert!(s.load_troops().is_empty());
+        let _ = std::fs::remove_dir_all(&s.home);
+    }
+
+    #[test]
+    fn a_brain_grown_on_load_keeps_the_old_file_and_plays_the_same() {
+        let s = scratch("troop-grow");
+        // A level 3 troop from before brains grew with level: still 64 wide.
+        let mut t = Troop::new(5, "Old".into(), godcore::classes::BaseClass::Archer.spec(), 9);
+        t.level = 3;
+        t.level_from = None;
+        let raw = t.save_json();
+        std::fs::write(s.dir.join("troops/5.troop.json"), &raw).unwrap();
+        let v = s.load_troops();
+        assert_eq!(v[0].hidden(), 128);
+        let kept = s.dir.join("troops/5.troop.json.before-grow");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), raw);
+        assert_eq!(s.load_troops().len(), 1, "the kept copy isn't a troop");
+        // Same choices as before growing.
+        let x: Vec<f32> = (0..godcore::sim::OBS_DIM).map(|k| (k as f32 * 0.37).sin()).collect();
+        let (mut c1, mut c2) = (godcore::nn::Cache::default(), godcore::nn::Cache::default());
+        t.actor.forward(&x, &mut c1);
+        v[0].actor.forward(&x, &mut c2);
+        for (a, b) in t.actor.output(&c1).iter().zip(v[0].actor.output(&c2)) {
+            assert!((a - b).abs() < 1e-4);
+        }
         let _ = std::fs::remove_dir_all(&s.home);
     }
 }

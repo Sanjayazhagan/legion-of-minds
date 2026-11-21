@@ -44,15 +44,16 @@ impl Default for PpoConfig {
     }
 }
 
-/// Neurons per hidden layer at each troop level, for troops whose player
-/// hasn't picked a brain size (troops from before the choice existed). Their
-/// brain grows when they level up, keeping what it learned.
+/// Neurons per hidden layer at each troop level. A troop levels up once its
+/// training has plateaued, and its brain grows to this size, keeping what it
+/// learned, so it has room to improve again.
 pub fn hidden_for_level(level: u32) -> usize {
     match level {
-        0..=2 => HIDDEN,
-        3 => 96,
-        4 => 128,
-        _ => 160,
+        0 | 1 => HIDDEN,
+        2 => 96,
+        3 => 128,
+        4 => 192,
+        _ => 256,
     }
 }
 

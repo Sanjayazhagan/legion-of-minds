@@ -521,6 +521,10 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
         // Team training happens on the player's machine and changes nothing
         // in a battle, so it is kept as sent.
         team_steps: t.team_steps,
+        // The plateau gate is checked on the player's machine when levelling;
+        // battles don't read it.
+        level_from: t.level_from,
+        plateaued: t.plateaued,
     };
     // Move practice comes from the troop's own practice record, never from
     // the client's copy in the spec.

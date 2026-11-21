@@ -35,6 +35,8 @@ pub fn starter_troops(first_id: u64) -> Vec<Troop> {
             let mut t = Troop::load_json(json).expect("starter troop file loads");
             t.id = first_id + k as u64;
             t.name = name.to_string();
+            // New players' troops get the plateau check from the start.
+            t.level_from = Some(0);
             t
         })
         .collect()
@@ -145,7 +147,7 @@ fn step(k: usize, g: &Game, screen: &Screen) -> Option<Step> {
         7 => {
             let at_cap = g.selected.and_then(|i| g.troops.get(i)).is_none_or(|t| t.steps_left() == 0);
             if at_cap {
-                s(Barracks, "Training", "Training is how a troop gets smarter. Pick a troop, press Train and choose how many practice steps to give it. More steps make a better brain. Levelling up with gold lets a troop train longer.", Some("train"), Next, Near, true)
+                s(Barracks, "Training", "Training is how a troop gets smarter. Pick a troop, press Train and choose how many practice steps to give it. More steps make a better brain, until its score stops rising. Then it has learned all its brain can hold, and levelling up with gold grows the brain so it can learn more.", Some("train"), Next, Near, true)
             } else {
                 s(Barracks, "Training", "Training is how a troop gets smarter. Let's give this troop a little more practice: press Train.", Some("train"), Reach(Train), Near, true)
             }
