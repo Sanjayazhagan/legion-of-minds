@@ -14,6 +14,6 @@ It writes to `game\dist\`:
 
 `-Server` is the online server's address. It is built into the exe, so set it to the hosted server for any build you hand out. Players' saves live in `%APPDATA%\legion-of-minds` and are not touched by installing, updating or uninstalling.
 
-The Release workflow (`.github/workflows/release.yml`) runs the same script on GitHub when a `v*` tag is pushed and attaches both files to the release. It reads the server address from the repository variable `BAG_SERVER` (Settings > Secrets and variables > Actions > Variables).
+The Release workflow (`.github/workflows/release.yml`) runs the same script on GitHub on every push to `main`: it picks the next version (latest `v*` tag with the last number + 1, or the `game/Cargo.toml` version when that is ahead), builds, then creates the tag and a release with both files and notes listing the merged pull requests. Pushing a `v*` tag by hand releases exactly that version. It reads the server address from the repository variable `BAG_SERVER` (Settings > Secrets and variables > Actions > Variables).
 
 Release builds open no console window and carry the icon in `icon.ico` (`icon.png` is the same picture).
