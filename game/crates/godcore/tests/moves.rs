@@ -232,17 +232,27 @@ fn specialists_master_their_moves_sooner_than_mixes() {
 }
 
 #[test]
-fn players_pick_the_brain_size() {
+fn brain_size_follows_level() {
     let mut t = Troop::new(1, "t".into(), BaseClass::Fighter.spec(), 5);
     assert_eq!(t.hidden(), 64);
+    assert_eq!(t.brain, None, "new troops grow with level");
     t.level_up();
-    assert_eq!(t.hidden(), 64, "picked brains don't grow on their own");
+    assert_eq!(t.hidden(), 96, "levelling grows the brain");
     let small = t.actor.clone();
-    assert!(t.set_brain(256));
+    while t.level < 5 {
+        t.level_up();
+    }
     assert_eq!(t.actor.dims, godcore::ppo::actor_dims_h(256));
-    assert!(!t.set_brain(128), "brains never shrink");
-    assert!(!t.set_brain(200), "only listed sizes");
-    assert_eq!(t.next_brain(), None);
+    // An old troop that picked a big brain keeps it until its level passes it.
+    let mut old = Troop::new(2, "o".into(), BaseClass::Fighter.spec(), 5);
+    assert!(old.set_brain(192));
+    old.level_up();
+    assert_eq!((old.hidden(), old.brain), (192, Some(192)));
+    old.level_up();
+    old.level_up();
+    assert_eq!((old.hidden(), old.brain), (192, None), "level 4 is 192 too");
+    old.level_up();
+    assert_eq!(old.hidden(), 256);
     // Growing keeps what it learned.
     let x: Vec<f32> = (0..OBS_DIM).map(|k| (k as f32 * 0.7).cos()).collect();
     let (mut c1, mut c2) = (Cache::default(), Cache::default());
@@ -251,7 +261,7 @@ fn players_pick_the_brain_size() {
     for a in 0..N_ACTIONS {
         assert!((small.output(&c1)[a] - t.actor.output(&c2)[a]).abs() < 1e-4);
     }
-    // The pick survives a save.
+    // The size survives a save.
     let back = Troop::load_json(&t.save_json()).unwrap();
     assert_eq!(back.hidden(), 256);
 }
