@@ -575,11 +575,13 @@ thread_local! {
 }
 
 const FILES: &[(&str, &str)] = &[
-    ("Barbarian", "adventurers/Barbarian.glb"),
-    ("Knight", "adventurers/Knight.glb"),
-    ("Mage", "adventurers/Mage.glb"),
-    ("Rogue", "adventurers/Rogue.glb"),
-    ("Rogue_Hooded", "adventurers/Rogue_Hooded.glb"),
+    // Troop models rebuilt in Blender from the KayKit originals
+    // (tools/blender/troops.py).
+    ("Barbarian", "troops/Barbarian.glb"),
+    ("Knight", "troops/Knight.glb"),
+    ("Mage", "troops/Mage.glb"),
+    ("Rogue", "troops/Rogue.glb"),
+    ("Rogue_Hooded", "troops/Rogue_Hooded.glb"),
     ("Skeleton_Minion", "skeletons/Skeleton_Minion.glb"),
     ("Skeleton_Warrior", "skeletons/Skeleton_Warrior.glb"),
     ("axe", "adventurers/axe_1handed.gltf"),

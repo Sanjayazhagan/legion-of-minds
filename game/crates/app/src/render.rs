@@ -1041,77 +1041,86 @@ fn loadout(c: godcore::classes::BaseClass, raider: bool) -> Loadout {
     match c {
         Fighter => Loadout {
             model: "Barbarian",
-            show: &["2H_Axe", "Barbarian_Hat", "Barbarian_Cape"],
+            show: &[
+                "2H_Axe", "Barbarian_Hat", "Barbarian_Cape", "Fighter_Horns", "Fighter_Pauldron_L", "Fighter_Pauldron_R",
+                "Fighter_Belt",
+            ],
             idle: "2H_Melee_Idle",
             attack: "2H_Melee_Attack_Chop",
             props: &[],
         },
         Archer => Loadout {
             model: "Rogue_Hooded",
-            show: &["2H_Crossbow", "Rogue_Cape"],
+            show: &["2H_Crossbow", "Rogue_Cape", "Archer_Quiver", "Archer_Feather"],
             idle: "Idle",
             attack: "2H_Ranged_Shoot",
             props: &[],
         },
         Healer => Loadout {
             model: "Mage",
-            show: &["2H_Staff", "Mage_Hat", "Mage_Cape"],
+            show: &["2H_Staff", "Mage_Hat", "Mage_Cape", "Healer_Charm"],
             idle: "Idle",
             attack: "Spellcast_Shoot",
             props: &[],
         },
         Guard => Loadout {
             model: "Knight",
-            show: &["1H_Sword", "Badge_Shield", "Knight_Helmet", "Knight_Cape"],
+            show: &[
+                "1H_Sword", "Badge_Shield", "Knight_Helmet", "Knight_Cape", "Guard_Plume", "Guard_Pauldron_L", "Guard_Pauldron_R",
+            ],
             idle: "Idle",
             attack: "1H_Melee_Attack_Chop",
             props: &[],
         },
         Sentry => Loadout {
             model: "Rogue",
-            show: &["1H_Crossbow", "Knife_Offhand", "Rogue_Cape"],
+            show: &[
+                "1H_Crossbow", "Knife_Offhand", "Rogue_Cape", "Sentry_Goggles", "Sentry_Pauldron_L", "Sentry_Pauldron_R",
+            ],
             idle: "Idle",
             attack: "1H_Ranged_Shoot",
             props: &[],
         },
         Keeper => Loadout {
             model: "Mage",
-            show: &["Spellbook_open", "1H_Wand", "Mage_Cape"],
+            show: &["Spellbook_open", "1H_Wand", "Mage_Cape", "Keeper_Lantern", "Keeper_Collar"],
             idle: "Idle",
             attack: "Spellcast_Raise",
             props: &[],
         },
         Mage => Loadout {
             model: "Mage",
-            show: &["1H_Wand", "Spellbook", "Mage_Hat"],
+            show: &["1H_Wand", "Spellbook", "Mage_Hat", "Mage_Orbs"],
             idle: "Idle",
             attack: "Spellcast_Shoot",
             props: &[],
         },
         Assassin => Loadout {
             model: "Rogue_Hooded",
-            show: &["Knife", "Knife_Offhand"],
+            show: &["Knife", "Knife_Offhand", "Assassin_Mask", "Assassin_Sash"],
             idle: "Idle",
             attack: "1H_Melee_Attack_Stab",
             props: &[],
         },
         Paladin => Loadout {
             model: "Knight",
-            show: &["2H_Sword", "Knight_Helmet", "Knight_Cape"],
+            show: &[
+                "2H_Sword", "Knight_Helmet", "Knight_Cape", "Paladin_Wings", "Paladin_Pauldron_L", "Paladin_Pauldron_R",
+            ],
             idle: "2H_Melee_Idle",
             attack: "2H_Melee_Attack_Chop",
             props: &[],
         },
         Warlock => Loadout {
             model: "Mage",
-            show: &["2H_Staff", "Mage_Cape"],
+            show: &["2H_Staff", "Mage_Cape", "Warlock_Horns", "Warlock_Collar"],
             idle: "Idle",
             attack: "Spellcast_Shoot",
             props: &[],
         },
         Hunter => Loadout {
             model: "Barbarian",
-            show: &["1H_Axe", "1H_Axe_Offhand", "Barbarian_Cape"],
+            show: &["1H_Axe", "1H_Axe_Offhand", "Barbarian_Cape", "Hunter_Pelt", "Hunter_Necklace"],
             idle: "Idle",
             attack: "1H_Melee_Attack_Chop",
             props: &[],
@@ -1149,6 +1158,25 @@ fn skill_clip(s: Skill) -> &'static str {
         Skill::Volley => "2H_Ranged_Shoot",
         Skill::Fireball => "Spellcast_Long",
         Skill::HealingNova => "Spellcast_Raise",
+    }
+}
+
+/// Each class's own special-move clip (made in Blender, see
+/// tools/blender/troops.py). Models without it fall back to `skill_clip`.
+fn special_clip(c: godcore::classes::BaseClass) -> &'static str {
+    use godcore::classes::BaseClass::*;
+    match c {
+        Fighter => "Special_Fighter",
+        Archer => "Special_Archer",
+        Healer => "Special_Healer",
+        Guard => "Special_Guard",
+        Sentry => "Special_Sentry",
+        Keeper => "Special_Keeper",
+        Mage => "Special_Mage",
+        Assassin => "Special_Assassin",
+        Paladin => "Special_Paladin",
+        Warlock => "Special_Warlock",
+        Hunter => "Special_Hunter",
     }
 }
 
@@ -1335,6 +1363,9 @@ fn draw_character_ex(
         3 => first_clip(m, &[pick(&["Death_A", "Death_B"]), "Death_A"]).unwrap_or("Death_A"),
         4 => "Dodge_Backward",
         5 => "Blocking",
+        6 if !skeleton && pose.skill.is_some() => {
+            first_clip(m, &[special_clip(fig.main)]).unwrap_or_else(|| pose.skill.map_or(lo.attack, skill_clip))
+        }
         6 => pose.skill.map_or(lo.attack, skill_clip),
         7 => "Hit_A",
         9 => first_clip(m, &[pick(&["Hit_A", "Hit_B"]), "Hit_A"]).unwrap_or("Hit_A"),
