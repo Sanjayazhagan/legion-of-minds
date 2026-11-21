@@ -18,7 +18,8 @@ fn trained(steps: u64, win: impl Fn(u64) -> f32) -> Troop {
 #[test]
 fn a_fresh_troop_must_train_before_it_can_level() {
     let t = Troop::new(1, "t".into(), BaseClass::Fighter.spec(), 5);
-    assert_eq!(t.plateau(), Plateau::Warming { done: 0, need: 2 * plateau_window(1) });
+    let w = plateau_window(1);
+    assert_eq!(t.plateau(), Plateau::Warming { done: 0, need: 2 * w + w / 4 });
     assert!(!t.plateau().ready());
 }
 
@@ -46,6 +47,21 @@ fn flat_before_learning_anything_is_not_a_plateau() {
     // A troop already near the top counts as full.
     let t = trained(200_000, |_| 1.0);
     assert!(t.plateau().ready());
+}
+
+#[test]
+fn once_plateaued_it_stays_ready_until_the_next_level() {
+    let mut t = trained(200_000, |s| (s as f32 / 60_000.0).min(0.7));
+    t.note_plateau();
+    assert!(t.plateaued);
+    // A lucky streak afterwards doesn't take it away.
+    for k in 1..=10u64 {
+        t.curve.push(CurvePoint { steps: 200_000 + k * 8192, win: 0.7 + k as f32 * 0.02, died: 0.5, timeout: 0.0, ret: 0.0 });
+    }
+    t.steps = 200_000 + 10 * 8192;
+    assert!(t.plateau().ready());
+    t.level_up();
+    assert!(!t.plateaued && !t.plateau().ready());
 }
 
 #[test]

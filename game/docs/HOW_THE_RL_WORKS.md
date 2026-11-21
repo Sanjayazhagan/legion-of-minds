@@ -52,7 +52,7 @@ The brain is a small neural network: the 90 numbers go in, pass through two laye
 | 192 | 58,004 | not measured |
 | 256 | 93,716 | about 1,050 steps/s |
 
-Growing keeps everything the troop learned: the new neurons start with no say in its choices and are trained in from there. A brain never shrinks. Troops from before the choice existed keep growing with their level as they used to (64 at levels 1-2, then 96, 128, 160).
+Growing keeps everything the troop learned: the new neurons start with no say in its choices and are trained in from there. A brain never shrinks. Troops that picked a bigger brain back when players chose sizes keep it until their level's size passes it.
 
 What we measured comparing 160 and 256 at level 5 (Fighter, Mage and a Fighter/Archer/Assassin mix, 900k steps, half the drills against trained defenders, 2 seeds each):
 

@@ -518,6 +518,7 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
         // The plateau gate is checked on the player's machine when levelling;
         // battles don't read it.
         level_from: t.level_from,
+        plateaued: t.plateaued,
     };
     // Move practice comes from the troop's own practice record, never from
     // the client's copy in the spec.

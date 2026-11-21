@@ -483,6 +483,7 @@ impl TeamTrainer {
                 t.team_steps += m.steps;
                 let up = t.add_training(m.steps);
                 t.curve.push(crate::troop::CurvePoint { steps: t.steps, win: skills.win, died: 1.0 - skills.survival, timeout: 0.0, ret: 0.0 });
+                t.note_plateau();
                 up
             })
             .collect()

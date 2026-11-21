@@ -174,6 +174,11 @@ pub struct Troop {
     /// the check existed: their next level-up skips it.
     #[serde(default)]
     pub level_from: Option<u64>,
+    /// The plateau check passed at some point during this level. It stays
+    /// passed until the next level-up, so a lucky stretch of drills afterwards
+    /// can't take "ready to level up" away again.
+    #[serde(default)]
+    pub plateaued: bool,
 }
 
 /// Starting score for actions a grown brain has never tried (dodge, block,
@@ -202,6 +207,7 @@ impl Troop {
             brain: None,
             team_steps: 0,
             level_from: Some(0),
+            plateaued: false,
         }
     }
 
@@ -223,9 +229,12 @@ impl Troop {
         }
         let Some(from) = self.level_from else { return Plateau::Grandfathered };
         let w = plateau_window(self.level);
+        // Two windows to compare, plus a quarter window so the check can be
+        // made twice in a row (see below).
+        let need = 2 * w + w / 4;
         let done = self.steps.saturating_sub(from);
-        if done < 2 * w || self.curve.is_empty() {
-            return Plateau::Warming { done: done.min(2 * w), need: 2 * w };
+        if done < need || self.curve.is_empty() {
+            return Plateau::Warming { done: done.min(need), need };
         }
         // The curve is thinned and team sessions add one point each, so
         // sample the score evenly through each half instead of counting points.
@@ -234,15 +243,29 @@ impl Troop {
             drill_score(p)
         };
         let mean = |a: u64| (1..=8).map(|k| score_at(a + w * k / 8)).sum::<f32>() / 8.0;
-        let (now, before) = (mean(self.steps - w), mean(self.steps - 2 * w));
-        let gain = now - before;
-        let rise = now.max(before) - mean(from);
-        if gain >= PLATEAU_GAIN {
-            Plateau::Improving { gain }
+        let gain_at = |end: u64| mean(end - w) - mean(end - 2 * w);
+        let now = mean(self.steps - w);
+        // Flat now and a quarter window ago, so one lucky stretch of drills
+        // doesn't flip the troop between "ready" and "still improving".
+        let gain = gain_at(self.steps);
+        let gain_then = gain_at(self.steps - w / 4);
+        let rise = now.max(mean(self.steps - 2 * w)) - mean(from);
+        if self.plateaued {
+            Plateau::Reached { gain }
+        } else if gain.max(gain_then) >= PLATEAU_GAIN {
+            Plateau::Improving { gain: gain.max(gain_then) }
         } else if rise < PLATEAU_RISE && now < 0.85 {
             Plateau::Starting { rise }
         } else {
             Plateau::Reached { gain }
+        }
+    }
+
+    /// Call after training adds to the curve: remembers a passed plateau
+    /// check for the rest of the level.
+    pub fn note_plateau(&mut self) {
+        if matches!(self.plateau(), Plateau::Reached { .. }) {
+            self.plateaued = true;
         }
     }
 
@@ -352,6 +375,7 @@ impl Troop {
     pub fn level_up(&mut self) {
         self.level += 1;
         self.level_from = Some(self.steps);
+        self.plateaued = false;
         self.sync_moves();
         self.upgrade_brain();
     }

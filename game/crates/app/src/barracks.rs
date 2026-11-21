@@ -509,8 +509,8 @@ pub fn plateau_line(t: &godcore::troop::Troop) -> (String, Option<f32>, Color) {
             None,
             ACCENT,
         ),
-        Plateau::Reached { gain } => (
-            format!("Plateaued: {:+.0} points over the last {w} steps. Brain is full, ready to level up", gain * 100.0),
+        Plateau::Reached { .. } => (
+            format!("Plateaued: its score stopped rising over the last {w} steps. Brain is full, ready to level up"),
             None,
             GOOD,
         ),
