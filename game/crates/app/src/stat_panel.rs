@@ -152,6 +152,7 @@ fn draw_troop_stats(t: &Troop, p: Rect) {
     if u.heal > 0.0 {
         rows.push(("Healing", u.heal, b.heal, top.heal, format!("{:.1} within {:.1}", u.heal, u.heal_range)));
     }
+    // Battle stats: add a row to `rows` above to show a new one.
     for (label, v, base, max, shown) in rows {
         ly += 30.0;
         stat_row(lx, ly, col, label, v / max, &shown, v / base.max(1e-6) - 1.0);
@@ -210,13 +211,6 @@ fn draw_troop_stats(t: &Troop, p: Rect) {
 
     text("Brain and training", rx, ry, 22.0, TEXT);
     ry += 26.0;
-    kv(rx, ry, rw, "Brain", &format!("{} neurons per layer, {} numbers", t.actor.dims[1], t.brain_params()));
-    ry += 24.0;
-    kv(rx, ry, rw, "Trained", &format!("{} of {} steps", fmt_steps(t.steps), fmt_steps(t.cap())));
-    bar(Rect::new(rx, ry + 6.0, rw, 6.0), t.steps as f32 / t.cap() as f32, SKY);
-    ry += 30.0;
-    kv(rx, ry, rw, "Sessions", &format!("{}  ·  team training {}", t.sessions, fmt_steps(t.team_steps)));
-    ry += 24.0;
     let ms = t.mastery_steps(w);
     let (_, mf) = crate::armoury::mastery_progress(ms);
     let next = if ml < godcore::weapons::MAX_MASTERY as usize {
@@ -224,8 +218,22 @@ fn draw_troop_stats(t: &Troop, p: Rect) {
     } else {
         String::new()
     };
-    kv(rx, ry, rw, "Weapon mastery", &format!("{}{next}", godcore::weapons::MASTERY_TITLES[ml]));
-    ry += 36.0;
+    // Add new troop stats here: (label, value, optional 0..1 progress bar).
+    let lines: Vec<(&str, String, Option<f32>)> = vec![
+        ("Brain", format!("{} neurons per layer, {} numbers", t.actor.dims[1], t.brain_params()), None),
+        ("Trained", format!("{} of {} steps", fmt_steps(t.steps), fmt_steps(t.cap())), Some(t.steps as f32 / t.cap() as f32)),
+        ("Sessions", format!("{}  ·  team training {}", t.sessions, fmt_steps(t.team_steps)), None),
+        ("Weapon mastery", format!("{}{next}", godcore::weapons::MASTERY_TITLES[ml]), None),
+    ];
+    for (k, v, progress) in lines {
+        kv(rx, ry, rw, k, &v);
+        if let Some(f) = progress {
+            bar(Rect::new(rx, ry + 6.0, rw, 6.0), f, SKY);
+            ry += 6.0;
+        }
+        ry += 24.0;
+    }
+    ry += 12.0;
 
     let sk = &t.skills;
     text("Drill record", rx, ry, 22.0, TEXT);
@@ -258,7 +266,7 @@ fn draw_troop_stats(t: &Troop, p: Rect) {
     if spec.can_heal() {
         tail.push(format!("heals {:.0} HP a drill", sk.healed));
     }
-    if let Some(best) = t.curve.iter().map(|c| c.win).reduce(f32::max) {
+    if let Some(best) = t.curve.iter().map(|c| c.win).chain([sk.win]).reduce(f32::max) {
         tail.push(format!("best win rate {:.0}%", best * 100.0));
     }
     if !tail.is_empty() {
