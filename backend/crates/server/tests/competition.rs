@@ -469,6 +469,7 @@ async fn events_boost_raid_gold_and_show_in_game() {
         let alice = login(&url, "Alice");
         publish(&db, &alice);
         let bob = login(&url, "Bob");
+        publish(&db, &bob); // raiders need a base of their own
         let admin = bob.admin(ADMIN_KEY);
         assert!(bob.live().unwrap().events.is_empty());
 
@@ -504,7 +505,8 @@ async fn events_boost_raid_gold_and_show_in_game() {
         let (_, out) = bob.attack(&m, army()).unwrap();
         let looted = loot(500, out.result.destruction);
         assert_eq!(out.gold_looted, looted);
-        let base = looted + out.league_bonus;
+        // bonus_gold holds the league bonus and the first win of the day.
+        let base = looted + out.bonus_gold;
         let win = if out.result.stars > 0 { 50 } else { 0 };
         assert_eq!(out.event_bonus, scale_gold(base, 200) - base + win);
         assert_eq!(out.attacker.gold, 500 + base + out.event_bonus);

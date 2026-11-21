@@ -14,7 +14,7 @@ use crate::{Game, Screen};
 use bag_client::bag_protocol::{
     AttackLog, CupReplay, CupStandings, LoginStart, Match, Providers, PublicPlayer, Published,
     Replay, Upgrades, User, KIND_PRACTICE, KIND_REVENGE, ClanSummary, League, Loan, Season,
-    MAX_BORROWED,
+    MAX_BORROWED, GiftClaimed, LiveView,
 };
 use bag_client::{
     army_from, army_spots, defender_spots, replay_battle, snapshot_from, Client, Uuid,
@@ -1223,7 +1223,7 @@ impl Game {
                     s.busy = Some(Busy::Raid(Task::spawn(move || {
                         let (_, out) = c.attack_with(&m, army, &borrowed).map_err(err)?;
                         let replay = c.replay(out.attack_id).map_err(err)?;
-                        Ok((out.attacker, replay, out.bonus_gold))
+                        Ok((out.attacker, replay, out.bonus_gold + out.event_bonus))
                     })));
                 }
                 if self.ui.button_ex(
