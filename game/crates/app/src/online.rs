@@ -640,6 +640,7 @@ struct Refreshed {
     season: Option<Season>,
     loans: Vec<Loan>,
     cup: Option<CupStandings>,
+    live: Option<LiveView>,
 }
 
 enum Busy {
@@ -654,6 +655,8 @@ enum Busy {
     CupWatch(Task<CupReplay>),
     /// An online upgrade, and what to say once it's paid.
     Buy(Task<User>, String),
+    /// Claiming a gift from the game's operator.
+    Claim(Task<GiftClaimed>, Uuid),
 }
 
 pub struct OnlineState {
@@ -665,6 +668,8 @@ pub struct OnlineState {
     season: Option<Season>,
     /// Troops clanmates lend, which fill empty army slots.
     loans: Vec<Loan>,
+    /// Events and gifts from the server.
+    live: Option<LiveView>,
     found: Option<Match>,
     busy: Option<Busy>,
     msg: Option<(String, Color)>,
@@ -692,6 +697,7 @@ impl OnlineState {
             show_clans: false,
             season: None,
             loans: Vec::new(),
+            live: None,
             found: None,
             busy: None,
             msg: None,
@@ -717,6 +723,8 @@ impl OnlineState {
                 // Older servers have no clans or seasons yet.
                 clans: c.clans("").unwrap_or_default(),
                 season: c.season().ok(),
+                // Older servers have no events either.
+                live: c.live().ok(),
                 loans,
                 user,
                 // An older server has no cup: the panel just stays empty.
@@ -854,6 +862,7 @@ impl Game {
                         s.season = f.season;
                         s.loans = f.loans;
                         s.cup = f.cup;
+                        s.live = f.live;
                     })
                 }),
                 Busy::Publish(t) => t.poll().map(|r| {
@@ -921,6 +930,16 @@ impl Game {
                         None
                     }
                 }
+                Busy::Claim(t, id) => t.poll().map(|r| {
+                    // Claimed now or before: either way it's gone.
+                    if let Some(l) = &mut s.live {
+                        l.gifts.retain(|x| x.id != *id);
+                    }
+                    r.map(|g| {
+                        self.account.user = Some(g.user);
+                        s.msg = Some((format!("Gift claimed: {} online gold", g.gold), GOOD));
+                    })
+                }),
                 Busy::Buy(t, what) => t.poll().map(|r| {
                     r.map(|u| {
                         self.account.user = Some(u);
@@ -978,7 +997,11 @@ impl Game {
         }
         if let Some(season) = &s.season {
             let left_s = time_left(&season.ends_at);
-            let t = format!("Season {} ends in {left_s}", season.number);
+            let t = if season.name.is_empty() {
+                format!("Season {} ends in {left_s}", season.number)
+            } else {
+                format!("{} ends in {left_s}", season.name)
+            };
             text(&t, left.x + left.w - 20.0 - text_width(&t, 15.0), left.y + 112.0, 15.0, SKY);
         }
         text(
@@ -1225,6 +1248,7 @@ impl Game {
             Some(Busy::Cup(_)) => Some("Entering the cup: the server is running its raids...".into()),
             Some(Busy::CupWatch(_)) => Some("Loading the cup entry...".into()),
             Some(Busy::Buy(..)) => Some("Paying with online gold...".into()),
+            Some(Busy::Claim(..)) => Some("Claiming your gift...".into()),
             None => None,
         };
         if let Some(t) = status {
@@ -1234,8 +1258,11 @@ impl Game {
             text(&short, 440.0, 392.0, 18.0, *c);
         }
 
+        // News from the server: running events and gifts to claim.
+        let news = self.online_news(&mut s, idle);
+
         // Battle log.
-        let logr = Rect::new(440.0, 410.0, 420.0, H - 430.0);
+        let logr = Rect::new(440.0, 410.0 + news, 420.0, H - 430.0 - news);
         panel(logr);
         text("Battle log", logr.x + 20.0, logr.y + 30.0, 22.0, TEXT);
         if self.ui.button_ex(
@@ -1838,4 +1865,61 @@ mod tests {
             assert!(!is_this_computer(s), "{s}");
         }
     }
+}
+
+/// Height of the news strip on the Online screen.
+const NEWS_H: f32 = 64.0;
+
+impl Game {
+    /// The strip above the battle log: the first gift to claim, else the
+    /// running (or next) event. Returns the height it took.
+    fn online_news(&mut self, s: &mut OnlineState, idle: bool) -> f32 {
+        let Some(live) = &s.live else { return 0.0 };
+        let r = Rect::new(440.0, 406.0, 420.0, NEWS_H - 6.0);
+        if let Some(g) = live.gifts.first().cloned() {
+            draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.2, 0.17, 0.07, 1.0));
+            draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, ACCENT);
+            let more = if live.gifts.len() > 1 {
+                format!("  (+{} more)", live.gifts.len() - 1)
+            } else {
+                String::new()
+            };
+            text(&format!("Gift: {} online gold{more}", g.gold), r.x + 14.0, r.y + 24.0, 19.0, ACCENT);
+            let msg = if g.message.is_empty() { "From the Legion of Minds team".to_string() } else { g.message.clone() };
+            text(&fit(&msg, r.w - 150.0, 15.0), r.x + 14.0, r.y + 46.0, 15.0, TEXT);
+            if self.ui.button_ex(Rect::new(r.x + r.w - 104.0, r.y + 12.0, 92.0, 34.0), "Claim", idle, false) {
+                let c = self.account.client();
+                let id = g.id;
+                s.busy = Some(Busy::Claim(Task::spawn(move || c.claim_gift(id).map_err(err)), id));
+            }
+            return NEWS_H;
+        }
+        let Some(e) = live.events.first() else { return 0.0 };
+        draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.08, 0.16, 0.12, 1.0));
+        draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, if e.active { GOOD } else { SKY });
+        let when = if e.active {
+            format!("ends in {}", time_left(&e.ends_at))
+        } else {
+            format!("starts in {}", time_left(&e.starts_at))
+        };
+        let head = if e.perks().is_empty() { e.title.clone() } else { format!("{}: {}", e.title, e.perks()) };
+        text(&fit(&head, r.w - 28.0 - text_width(&when, 15.0), 19.0), r.x + 14.0, r.y + 24.0, 19.0, if e.active { GOOD } else { SKY });
+        text(&when, r.x + r.w - 14.0 - text_width(&when, 15.0), r.y + 22.0, 15.0, MUTED);
+        if !e.message.is_empty() {
+            text(&fit(&e.message, r.w - 28.0, 15.0), r.x + 14.0, r.y + 46.0, 15.0, TEXT);
+        }
+        NEWS_H
+    }
+}
+
+/// `t` cut to fit `w` pixels at `size`, with "..." when cut.
+fn fit(t: &str, w: f32, size: f32) -> String {
+    if text_width(t, size) <= w {
+        return t.to_string();
+    }
+    let mut out: String = t.to_string();
+    while !out.is_empty() && text_width(&format!("{out}..."), size) > w {
+        out.pop();
+    }
+    format!("{}...", out.trim_end())
 }

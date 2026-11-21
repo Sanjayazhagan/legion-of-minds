@@ -280,6 +280,8 @@ pub async fn submit(
     }
     let practice = kind == KIND_PRACTICE;
 
+    // Rewards the operator tuned and events running now.
+    let live = crate::liveops::Live::load(&st.db, &st.cfg).await?;
     let mut tx = st.db.begin().await?;
     let still_pending: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM attacks WHERE id = $1 AND status = 'pending' FOR UPDATE",
@@ -331,13 +333,14 @@ pub async fn submit(
         let swing = trophy_swing(result.stars);
         // Nobody drops below zero, so the real change can differ per side.
         att_new = (att_trophies + swing).max(0);
-        league_bonus = League::of(att_trophies).win_bonus(result.stars);
+        // Winning pays more the higher your league. It's new gold, not loot.
+        league_bonus = live.win_bonus(League::of(att_trophies), result.stars);
         bonus += league_bonus;
         let def_new = (def_trophies - swing).max(0);
         gold = loot(def_gold, result.destruction);
         let shield = (result.stars > 0).then(|| {
             Utc::now()
-                + chrono::Duration::from_std(st.cfg.shield.mul_f32(shield_share(result.stars)))
+                + chrono::Duration::from_std(live.shield().mul_f32(shield_share(result.stars)))
                     .expect("fits")
         });
         if result.stars == 0 {
@@ -376,13 +379,21 @@ pub async fn submit(
     if first_win {
         bonus += st.cfg.daily_win_bonus;
     }
+    // Events (double gold and the like) add new gold on top; the defender
+    // only ever loses the normal loot. Practice raids against the server's
+    // bases are left out, so an event can't be farmed with endless practice.
+    let event_bonus = if practice {
+        0
+    } else {
+        live.gold(gold + bonus) - (gold + bonus) + if result.stars > 0 { live.win_gold() } else { 0 }
+    };
     sqlx::query(
         "UPDATE users SET trophies = $1, gold = gold + $2,
              last_win_bonus = CASE WHEN $3 THEN current_date ELSE last_win_bonus END
          WHERE id = $4",
     )
     .bind(att_new)
-    .bind(gold + bonus)
+    .bind(gold + bonus + event_bonus)
     .bind(first_win)
     .bind(user.id)
     .execute(&mut *tx)
@@ -417,6 +428,7 @@ pub async fn submit(
         gold_looted: gold,
         bonus_gold: bonus,
         league_bonus,
+        event_bonus,
         client_matched,
         result,
         attacker: load_user(&st.db, user.id).await?,
