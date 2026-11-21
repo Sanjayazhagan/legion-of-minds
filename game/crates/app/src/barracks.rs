@@ -8,6 +8,19 @@ use macroquad::prelude::*;
 
 impl Game {
     pub fn barracks(&mut self) -> Screen {
+        if crate::stat_panel::is_open() {
+            // The Barracks stays in view behind the stat panel, without input.
+            let (mouse, clicked) = (self.ui.mouse, self.ui.clicked);
+            (self.ui.mouse, self.ui.clicked) = (vec2(-1000.0, -1000.0), false);
+            let next = self.barracks_screen();
+            (self.ui.mouse, self.ui.clicked) = (mouse, clicked);
+            self.stat_panel();
+            return next;
+        }
+        self.barracks_screen()
+    }
+
+    fn barracks_screen(&mut self) -> Screen {
         self.header("Barracks", false);
         // Which chip draws the game, so players can check it is the fast one.
         if let Some(g) = crate::gpu_name() {
@@ -185,6 +198,9 @@ impl Game {
             );
             return Screen::Barracks;
         };
+        if self.ui.button(Rect::new(d.x + d.w - 184.0, d.y + 14.0, 160.0, 34.0), "Stats") || is_key_pressed(KeyCode::S) {
+            crate::stat_panel::set_open(true);
+        }
         let t = &self.troops[i];
         let (x, mut y) = (d.x + 24.0, d.y + 44.0);
         crate::art::draw_showcase(vec2(x + 30.0, y - 6.0), 34.0, &t.spec);
