@@ -4,6 +4,7 @@
 //! - `players`: profiles, leaderboard, publishing a base snapshot
 //! - `attacks`: matchmaking, server-checked raids, battle log, replays
 //! - `shop`: Town Hall, weapons and troop levels bought with online gold
+//! - `cup`: the weekly cup, one troop per player, paid in gold
 //! - `league`: seasons (leagues come from trophies)
 //! - `clans`: clans, chat and troops lent to clanmates
 //! - `wars`: clan wars
@@ -12,6 +13,7 @@ pub mod attacks;
 pub mod auth;
 pub mod clans;
 pub mod config;
+pub mod cup;
 pub mod error;
 pub mod league;
 pub mod players;
@@ -94,6 +96,11 @@ pub fn router(st: AppState) -> Router {
         .route("/v1/matchmaking", post(attacks::find_match))
         .route("/v1/attacks/{id}", post(attacks::submit))
         .route("/v1/attacks/{id}/replay", get(attacks::replay))
+        .route("/v1/attacks/{id}/revenge", post(attacks::revenge))
+        .route("/v1/raid-of-the-day", get(attacks::raid_of_the_day))
+        .route("/v1/cup", get(cup::standings))
+        .route("/v1/cup/entry", post(cup::enter))
+        .route("/v1/cup/{week}/{player}", get(cup::entry))
         .route("/v1/season", get(league::get_season))
         .route("/v1/me/seasons", get(league::my_seasons))
         .route("/v1/clans", get(clans::list).post(clans::create))
@@ -135,12 +142,13 @@ pub async fn tick(st: &AppState) -> Result<(), String> {
     league::current(&st.db, st.cfg.season).await.map_err(|e| e.message)?;
     league::roll(&st.db, st.cfg.season).await.map_err(|e| e.to_string())?;
     wars::settle(&st.db).await.map_err(|e| e.message)?;
-    cleanup(&st.db).await.map_err(|e| e.to_string())
+    cleanup(&st.db, st.cfg.keep_raids).await.map_err(|e| e.to_string())
 }
 
-/// Delete expired sessions and sign-ins, close timed-out raids, and drop old
-/// snapshots nothing points at any more.
-pub async fn cleanup(db: &PgPool) -> Result<(), sqlx::Error> {
+/// Delete expired sessions and sign-ins, close timed-out raids, forget raids
+/// older than `keep_raids` (their replays hold whole armies, about 1 MB each),
+/// and drop old snapshots nothing points at any more.
+pub async fn cleanup(db: &PgPool, keep_raids: Duration) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM sessions WHERE expires_at < now()")
         .execute(db)
         .await?;
@@ -153,6 +161,22 @@ pub async fn cleanup(db: &PgPool) -> Result<(), sqlx::Error> {
     )
     .execute(db)
     .await?;
+    // Finished raids leave the battle log after `keep_raids`; given-up and
+    // timed-out ones after a day.
+    sqlx::query(
+        "DELETE FROM attacks
+         WHERE (status = 'done' AND finished_at < now() - $1)
+            OR (status = 'expired' AND expires_at < now() - interval '1 day')",
+    )
+    .bind(keep_raids)
+    .execute(db)
+    .await?;
+    cup::pay_finished(db, bag_protocol::cup_week(chrono::Utc::now().timestamp())).await?;
+    // Cup entries stay for last week's podium, then go (each holds a troop).
+    sqlx::query("DELETE FROM cup_entries WHERE week < $1")
+        .bind(bag_protocol::cup_week(chrono::Utc::now().timestamp()) as i32 - 4)
+        .execute(db)
+        .await?;
     sqlx::query(
         "DELETE FROM snapshots s
          WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.current_snapshot = s.id)

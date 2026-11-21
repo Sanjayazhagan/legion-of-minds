@@ -2,7 +2,7 @@
 
 ## The battle rules are locked
 
-Since launch, the battle rules are frozen at **SIM_VERSION 8**. Players' trained troops, every published base and the server's raid checks all depend on them: a battle has to replay bit for bit on the player's machine and on the server.
+Since launch, the battle rules are frozen at **SIM_VERSION 9**. Players' trained troops, every published base and the server's raid checks all depend on them: a battle has to replay bit for bit on the player's machine and on the server.
 
 A change counts as a rules change if it changes any battle result (the golden fingerprint in `crates/godcore/tests/determinism.rs`), what a troop sees (`OBS_DIM`) or what it can do (`N_ACTIONS`). The `rules_are_locked` test fails on any of these.
 

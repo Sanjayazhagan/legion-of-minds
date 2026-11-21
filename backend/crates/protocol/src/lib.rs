@@ -11,7 +11,7 @@ use godcore::battle::{fingerprint, Battle};
 use godcore::classes::{ClassSpec, Role, TrainPlan};
 use godcore::nn::Mlp;
 use godcore::scenario::{
-    can_deploy, can_place_defender, max_troop_level, HomeBase, MAX_TOWN_HALL,
+    can_deploy, can_place_defender, max_troop_level, BuildKind, HomeBase, Placed, MAX_TOWN_HALL,
 };
 use godcore::sim::{Outcome, OBS_DIM};
 
@@ -255,6 +255,18 @@ pub struct Match {
     pub expires_at: String,
     /// Gold on offer at 100% destruction.
     pub max_loot: i64,
+    /// "raid", "practice" (nobody could be raided: no trophies, a little
+    /// gold from the server, the defender loses nothing) or "revenge".
+    #[serde(default = "raid_kind")]
+    pub kind: String,
+}
+
+pub const KIND_RAID: &str = "raid";
+pub const KIND_PRACTICE: &str = "practice";
+pub const KIND_REVENGE: &str = "revenge";
+
+fn raid_kind() -> String {
+    KIND_RAID.into()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -277,6 +289,10 @@ pub struct AttackOutcome {
     pub client_matched: Option<bool>,
     pub trophies: i32,
     pub gold_looted: i64,
+    /// Gold from the server on top of loot: the first win of the day, practice
+    /// raids and the league bonus below (which is part of this total).
+    #[serde(default)]
+    pub bonus_gold: i64,
     /// Extra gold for a win, from the attacker's league.
     #[serde(default)]
     pub league_bonus: i64,
@@ -293,6 +309,18 @@ pub struct AttackLog {
     pub gold_looted: i64,
     pub client_matched: Option<bool>,
     pub finished_at: String,
+    #[serde(default = "raid_kind")]
+    pub kind: String,
+    /// Gold the server paid the attacker on top of loot.
+    #[serde(default)]
+    pub bonus_gold: i64,
+    /// Gold the server paid the defender for holding the raid to no stars.
+    #[serde(default)]
+    pub defence_reward: i64,
+    /// True when the player reading the log was raided here and hasn't
+    /// taken revenge yet.
+    #[serde(default)]
+    pub can_revenge: bool,
 }
 
 /// Everything needed to watch a raid again, or to turn it into a training
@@ -305,6 +333,42 @@ pub struct Replay {
     pub sim_version: u32,
     pub snapshot: BaseSnapshot,
     pub army: Vec<Placement>,
+}
+
+/// Enter a troop in this week's cup. Entering again replaces the entry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CupEntry {
+    pub troop: Troop,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CupRow {
+    pub rank: u32,
+    pub player: PublicPlayer,
+    pub troop_name: String,
+    pub class_name: String,
+    pub score: f32,
+    /// Gold won; None while the week is still open.
+    pub prize: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CupStandings {
+    pub week: i64,
+    pub ends_at: String,
+    pub entries: u32,
+    pub top: Vec<CupRow>,
+    pub mine: Option<CupRow>,
+    /// Last week's top three.
+    pub last_week: Vec<CupRow>,
+}
+
+/// One cup entry with its troop, to replay its proving-grounds raids.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CupReplay {
+    pub row: CupRow,
+    pub sim_version: u32,
+    pub troop: Troop,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -553,6 +617,73 @@ pub fn run_raid(snapshot: &BaseSnapshot, army: &[Placement]) -> RaidResult {
 }
 
 // ---------------------------------------------------------------- economy
+
+/// How much of the full shield a defender gets: a light defeat protects for
+/// a short while, a wipe-out for the whole time.
+pub fn shield_share(stars: u32) -> f32 {
+    match stars {
+        0 => 0.0,
+        1 => 0.25,
+        2 => 0.5,
+        _ => 1.0,
+    }
+}
+
+/// Gold the server pays for a practice raid.
+pub fn practice_gold(per_town_hall: i64, town_hall: u32, destruction: f32) -> i64 {
+    ((per_town_hall * town_hall as i64) as f64 * destruction.clamp(0.0, 1.0) as f64).floor() as i64
+}
+
+/// A computer-made base with every building a Town Hall level allows and no
+/// defenders: towers on an outer ring, cannons inside.
+pub fn starter_layout(town_hall: u32) -> HomeBase {
+    let mut base = HomeBase {
+        town_hall,
+        buildings: Vec::new(),
+    };
+    for (kind, r, phase) in [(BuildKind::Tower, 5.4f32, 0.0f32), (BuildKind::Cannon, 3.2, 0.5)] {
+        for k in 0..24 {
+            let a = (k as f32 + phase) / 24.0 * std::f32::consts::TAU;
+            let (x, y) = (r * a.cos(), r * a.sin());
+            if base.can_add(kind) && base.fits(x, y) {
+                base.buildings.push(Placed { kind, x, y });
+            }
+        }
+    }
+    base
+}
+
+// ---------------------------------------------------------------- the cup
+
+pub const CUP_DAYS: i64 = 7;
+/// Gold for 1st, 2nd and 3rd, the rest of the top ten, and everyone else.
+pub const CUP_PRIZES: [i64; 5] = [500, 300, 200, 100, 25];
+
+/// Cup weeks run Monday to Monday (UTC). `unix_secs` -> week number.
+pub fn cup_week(unix_secs: i64) -> i64 {
+    (unix_secs.div_euclid(86_400) + 3).div_euclid(CUP_DAYS)
+}
+
+/// When `week` closes, in unix seconds.
+pub fn cup_week_end(week: i64) -> i64 {
+    ((week + 1) * CUP_DAYS - 3) * 86_400
+}
+
+pub fn cup_prize(rank: u32) -> i64 {
+    match rank {
+        1 => CUP_PRIZES[0],
+        2 => CUP_PRIZES[1],
+        3 => CUP_PRIZES[2],
+        4..=10 => CUP_PRIZES[3],
+        _ => CUP_PRIZES[4],
+    }
+}
+
+/// A troop's cup score: the game's Tournament (the same seeded solo and
+/// squad raids for everyone), so it is the same on any machine.
+pub fn cup_score(t: &Troop) -> f32 {
+    godcore::battle::tournament(std::slice::from_ref(t))[0].total
+}
 
 /// Trophies the attacker wins (and the defender loses). A raid with no
 /// stars counts as a defence win.
@@ -839,7 +970,7 @@ mod tests {
 
     #[test]
     fn team_training_is_kept_and_raids_match() {
-        assert_eq!(godcore::sim::SIM_VERSION, 8);
+        assert_eq!(godcore::sim::SIM_VERSION, 9);
         let mut a = army();
         a[0].troop.team_steps = 120_000;
         let c = canonical_army(&a, 1).unwrap();
