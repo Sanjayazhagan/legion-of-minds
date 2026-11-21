@@ -12,9 +12,17 @@ use crate::weapons::{mastery_dmg, mastery_skill_cd, mastery_skill_power, Skill, 
 use serde::{Deserialize, Serialize};
 
 pub const ARENA: f32 = 32.0;
+/// Share of damage a blessed troop is spared (see `World::blessed`).
+pub const BLESSING: f32 = 0.15;
+/// Extra damage a spellcaster (a unit whose attacks splash) takes from
+/// troops. Towers and cannons hit it like anyone else.
+pub const CASTER_EXPOSED: f32 = 0.25;
+/// Share of an attack's damage its splash does to buildings near the target
+/// (troops near the target take half).
+pub const SPLASH_BUILDING: f32 = 0.25;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
-pub const SIM_VERSION: u32 = 8;
+pub const SIM_VERSION: u32 = 9;
 pub const OBS_DIM: usize = 121;
 /// Where the teamwork part of the view starts (the two allies' roles,
 /// threats and actions, sim version 4).
@@ -1397,6 +1405,24 @@ impl World {
         (self.units[i].x, self.units[i].y)
     }
 
+    /// A troop standing within reach of a living healer on its side (not
+    /// itself) is blessed: it takes less damage. This is what makes a healer
+    /// worth a place in an army or a defence even when nobody is hurt yet.
+    pub fn blessed(&self, i: usize) -> bool {
+        let me = &self.units[i];
+        if me.kind.is_building() {
+            return false;
+        }
+        self.units.iter().enumerate().any(|(k, h)| {
+            k != i
+                && h.alive
+                && h.team == me.team
+                && !h.kind.is_building()
+                && h.heal >= 5.0
+                && h.dist(me) <= h.heal_range
+        })
+    }
+
     fn damage(&mut self, from: usize, to: usize, amount: f32) {
         if self.units[to].invuln > 0 {
             self.units[to].stats.evaded += 1;
@@ -1405,6 +1431,14 @@ impl World {
         let mut amount = amount;
         if self.units[to].ward > 0 {
             amount *= 1.0 - self.units[to].ward_power;
+        }
+        if self.blessed(to) {
+            amount *= 1.0 - BLESSING;
+        }
+        // Spellcasters hit a whole group at once, and pay for it when a
+        // troop gets to them.
+        if self.units[to].splash > 0.0 && !self.units[from].kind.is_building() {
+            amount *= 1.0 + CASTER_EXPOSED;
         }
         if self.units[to].block_ticks > 0 {
             let kept = amount * self.units[to].block_taken;
@@ -1645,7 +1679,9 @@ impl World {
                 .collect();
             let t = &self.units[j];
             for k in self.reach(i, near, |k| t.dist(&self.units[k])) {
-                self.damage(i, k, dmg * 0.5);
+                // Blasts scatter troops; walls and towers shrug most of it off.
+                let share = if self.units[k].kind.is_building() { SPLASH_BUILDING } else { 0.5 };
+                self.damage(i, k, dmg * share);
             }
             self.events.push(Event { kind: EventKind::Blast, from: to, to });
         }

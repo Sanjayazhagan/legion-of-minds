@@ -53,6 +53,12 @@ fn test_config(db: String, public_url: String, providers: Vec<OAuthProvider>) ->
         shield: Duration::from_secs(3600),
         start_gold: 500,
         match_range: 200,
+        keep_raids: Duration::from_secs(14 * 86_400),
+        defence_reward: 30,
+        defence_rewards_per_day: 5,
+        daily_win_bonus: 100,
+        practice_gold: 20,
+        practice_paid_per_day: 5,
         max_body_bytes: 8 << 20,
         max_json_bytes: 16 << 20,
         season: Duration::from_secs(28 * 86_400),
@@ -158,6 +164,8 @@ async fn full_armies_of_the_biggest_brains_fit() {
 
         let mut bob = Client::new(&url);
         bob.dev_login("Bob").unwrap();
+        // Raiders need a base of their own.
+        bob.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
         let m = bob.find_match().unwrap();
         assert_eq!(m.snapshot.defenders.len(), 4);
         let troops: Vec<_> = (1..=5).map(|i| big(BaseClass::Fighter, i)).collect();
@@ -207,8 +215,10 @@ async fn raid_flow_is_checked_and_scored() {
         // Bob's own base sets his Town Hall (troop level cap) for raids.
         bob.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
 
-        // Nobody else has a base yet.
-        assert_eq!(api_code(bob.find_match()), "no_opponent");
+        // Nobody else has a base yet: Bob gets a practice raid on a
+        // computer-made base instead of nothing.
+        let p = bob.find_match().unwrap();
+        assert_eq!((p.kind.as_str(), p.defender.display_name.as_str()), ("practice", "Training Camp"));
 
         // The reference base is Town Hall 3, which Alice must buy online.
         assert_eq!(api_code(alice.publish_base(&home_defense())), "invalid");
@@ -226,6 +236,9 @@ async fn raid_flow_is_checked_and_scored() {
         // Alice is reserved while Bob's raid is open, so Carol gets Bob.
         let mut carol = Client::new(&url);
         carol.dev_login("Carol").unwrap();
+        // Only players with a base of their own can raid.
+        assert_eq!(api_code(carol.find_match()), "no_base");
+        carol.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
         assert_eq!(carol.find_match().unwrap().defender.display_name, "Bob");
 
         let (local, out) = bob.attack(&m, army()).unwrap();
@@ -242,7 +255,9 @@ async fn raid_flow_is_checked_and_scored() {
         let swing = trophy_swing(out.result.stars);
         let gold = loot(500, out.result.destruction);
         assert_eq!(out.gold_looted, gold);
-        assert_eq!(out.attacker.gold, 500 + gold);
+        // The first win of the day pays a bonus on top of the loot.
+        assert_eq!(out.bonus_gold, if out.result.stars > 0 { 100 } else { 0 });
+        assert_eq!(out.attacker.gold, 500 + gold + out.bonus_gold);
         assert_eq!(out.attacker.trophies, swing.max(0));
         let a = alice.me().unwrap();
         assert_eq!(a.gold, 500 - gold);
@@ -282,6 +297,7 @@ async fn tampered_raids_are_caught() {
         alice.publish_base(&home_defense()).unwrap();
         let mut bob = Client::new(&url);
         bob.dev_login("Bob").unwrap();
+        bob.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
 
         // Honest local result for reference.
         let m = bob.find_match().unwrap();
@@ -350,6 +366,203 @@ async fn tampered_raids_are_caught() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn practice_revenge_rewards_and_raid_of_the_day() {
+    let db = fresh_db().await;
+    let dbu = db.clone();
+    let url = serve(|u| test_config(db, u, vec![])).await;
+    blocking(move || {
+        let empty = || snapshot_from(&HomeBase::default(), &[]);
+        let mut alice = Client::new(&url);
+        alice.dev_login("Alice").unwrap();
+        alice.publish_base(&empty()).unwrap();
+        let mut bob = Client::new(&url);
+        bob.dev_login("Bob").unwrap();
+        bob.publish_base(&empty()).unwrap();
+        assert_eq!(api_code(alice.raid_of_the_day()), "not_found");
+
+        // Bob raids Alice's empty base: stars, loot, the first-win bonus,
+        // and a shield for Alice.
+        let m = bob.find_match().unwrap();
+        assert_eq!(m.kind, "raid");
+        let (_, won) = bob.attack(&m, army()).unwrap();
+        assert!(won.result.stars > 0);
+        assert_eq!(won.bonus_gold, 100);
+        assert!(alice.me().unwrap().shield_until.is_some());
+
+        // Alice is shielded, so Bob's next match is practice on a copy of
+        // her base: no trophies, nothing taken from her, a little gold from
+        // the server, and no second first-win bonus.
+        let (a0, b0) = (alice.me().unwrap(), bob.me().unwrap());
+        let p = bob.find_match().unwrap();
+        assert_eq!((p.kind.as_str(), p.defender.display_name.as_str()), ("practice", "Alice"));
+        assert_eq!(p.max_loot, 20);
+        let (_, out) = bob.attack(&p, army()).unwrap();
+        let paid = (20.0 * out.result.destruction as f64).floor() as i64;
+        assert_eq!((out.trophies, out.gold_looted, out.bonus_gold), (0, 0, paid));
+        assert_eq!(out.attacker.gold, b0.gold + paid);
+        let a1 = alice.me().unwrap();
+        assert_eq!((a1.gold, a1.trophies), (a0.gold, a0.trophies));
+        // Alice's log doesn't show practice on her base.
+        assert_eq!(alice.log("defense").unwrap().len(), 1);
+        // Only the first five practice raids in a day pay.
+        for k in 1..6 {
+            let p = bob.find_match().unwrap();
+            let (_, out) = bob.attack(&p, army()).unwrap();
+            assert_eq!(out.bonus_gold > 0, k < 5, "practice raid {}", k + 1);
+        }
+
+        // Revenge: Alice raids Bob back from her log, once.
+        let log = alice.log("defense").unwrap();
+        assert!(log[0].can_revenge);
+        assert!(!bob.log("attack").unwrap().iter().any(|l| l.can_revenge));
+        assert_eq!(api_code(bob.revenge(log[0].attack_id)), "not_found");
+        let r = alice.revenge(log[0].attack_id).unwrap();
+        assert_eq!((r.kind.as_str(), r.defender.display_name.as_str()), ("revenge", "Bob"));
+        // A one-troop army of a healer can't hurt the base: Bob holds, and
+        // the server pays him for the defence.
+        let weak = bag_client::army_from(&[(fixture("healer"), army_spots(1)[0])]);
+        let b0 = bob.me().unwrap();
+        let (_, lost) = alice.attack(&r, weak).unwrap();
+        assert_eq!(lost.result.stars, 0);
+        let b1 = bob.me().unwrap();
+        assert_eq!(b1.gold, b0.gold - lost.gold_looted + 30);
+        assert!(b1.shield_until.is_none(), "no shield for a held raid");
+        let entry = bob.log("defense").unwrap();
+        assert_eq!((entry[0].kind.as_str(), entry[0].defence_reward), ("revenge", 30));
+        assert!(!alice.log("defense").unwrap()[0].can_revenge);
+        assert_eq!(api_code(alice.revenge(log[0].attack_id)), "revenged");
+
+        // Anyone can watch the best raid of the day: Bob's win, not practice.
+        let mut carol = Client::new(&url);
+        carol.dev_login("Carol").unwrap();
+        let best = carol.raid_of_the_day().unwrap();
+        assert_eq!(best.log.attack_id, won.attack_id);
+        assert_eq!(bag_client::bag_protocol::run_raid(&best.snapshot, &best.army), won.result);
+        // The Training Camp is not a player.
+        assert!(carol.leaderboard(10).unwrap().iter().all(|p| p.display_name != "Training Camp"));
+        let _ = &dbu;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn weekly_cup_ranks_and_pays() {
+    use bag_client::bag_protocol::{cup_score, cup_week};
+    let db = fresh_db().await;
+    let db2 = db.clone();
+    let url = serve(|u| test_config(db, u, vec![])).await;
+    let pool = sqlx::PgPool::connect(&db2).await.unwrap();
+    let (week, alice_id) = blocking(move || {
+        let mut alice = Client::new(&url);
+        let a = alice.dev_login("Alice").unwrap();
+        let mut bob = Client::new(&url);
+        bob.dev_login("Bob").unwrap();
+        assert!(alice.cup().unwrap().top.is_empty());
+
+        // Defenders can't enter; attackers are scored like the game's own
+        // Tournament, the same on any machine.
+        assert!(matches!(alice.enter_cup(&fixture("guard")), Err(Error::Invalid(_))));
+        let fighter = fixture("fighter");
+        let s = alice.enter_cup(&fighter).unwrap();
+        let mine = s.mine.unwrap();
+        assert_eq!((s.entries, mine.rank), (1, 1));
+        assert_eq!(mine.score, cup_score(&fighter));
+        assert!(mine.prize.is_none());
+        let s = bob.enter_cup(&fixture("healer")).unwrap();
+        assert_eq!(s.entries, 2);
+        assert!(s.top[0].score >= s.top[1].score);
+        // Entering again replaces the entry.
+        assert_eq!(bob.enter_cup(&fighter).unwrap().entries, 2);
+        // Anyone can fetch an entry's troop to replay it.
+        let r = bob.cup_replay(s.week, a.id).unwrap();
+        assert_eq!(r.troop.actor.params, fighter.actor.params);
+        (s.week, a.id)
+    })
+    .await;
+    assert_eq!(week, cup_week(chrono::Utc::now().timestamp()));
+    // The week is still open: nothing is paid.
+    assert_eq!(bag_server::cup::pay_finished(&pool, week).await.unwrap(), 0);
+    // Once it closes, everyone is paid once.
+    assert_eq!(bag_server::cup::pay_finished(&pool, week + 1).await.unwrap(), 2);
+    assert_eq!(bag_server::cup::pay_finished(&pool, week + 1).await.unwrap(), 0);
+    let golds: Vec<i64> = sqlx::query_scalar("SELECT gold FROM users WHERE NOT is_bot ORDER BY gold DESC")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(golds, vec![500 + 500, 500 + 300]);
+    let prize: Option<i64> = sqlx::query_scalar("SELECT prize FROM cup_entries WHERE user_id = $1")
+        .bind(alice_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(matches!(prize, Some(500 | 300)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn old_raids_and_their_bases_are_cleaned_up() {
+    let db = fresh_db().await;
+    let db2 = db.clone();
+    // No shields, so Bob can raid Alice twice.
+    let url = serve(|u| Config {
+        shield: Duration::ZERO,
+        ..test_config(db, u, vec![])
+    })
+    .await;
+    let pool = sqlx::PgPool::connect(&db2).await.unwrap();
+    let dbu = db2.clone();
+    let (old, new) = blocking(move || {
+        let mut alice = Client::new(&url);
+        alice.dev_login("Alice").unwrap();
+        buy_town_hall(&dbu, &alice, 3);
+        alice.publish_base(&home_defense()).unwrap();
+        let mut bob = Client::new(&url);
+        bob.dev_login("Bob").unwrap();
+        bob.publish_base(&snapshot_from(&HomeBase::default(), &[]))
+            .unwrap();
+        let m = bob.find_match().unwrap();
+        let (_, old) = bob.attack(&m, army()).unwrap();
+        // Alice publishes a new base; the old one stays while a raid needs it.
+        alice.publish_base(&home_defense()).unwrap();
+        bob.find_match().unwrap(); // given up: expired
+        let m = bob.find_match().unwrap();
+        let (_, new) = bob.attack(&m, army()).unwrap();
+        (old.attack_id, new.attack_id)
+    })
+    .await;
+    let count = |q: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(q)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(count("SELECT count(*) FROM snapshots").await, 3);
+    sqlx::query("UPDATE attacks SET finished_at = now() - interval '15 days' WHERE id = $1")
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE attacks SET expires_at = now() - interval '2 days' WHERE status = 'expired'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    bag_server::cleanup(&pool, Duration::from_secs(14 * 86_400))
+        .await
+        .unwrap();
+    let left: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM attacks")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, vec![new], "old and given-up raids are gone");
+    // Alice's first base went with its raid; her current one and Bob's stay.
+    assert_eq!(count("SELECT count(*) FROM snapshots").await, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bases_from_older_rules_are_not_matched() {
     let db = fresh_db().await;
     let db2 = db.clone();
@@ -368,7 +581,9 @@ async fn bases_from_older_rules_are_not_matched() {
     blocking(move || {
         let mut bob = Client::new(&url);
         bob.dev_login("Bob").unwrap();
-        assert_eq!(api_code(bob.find_match()), "no_opponent");
+        bob.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
+        // Alice's old-rules base is never offered, not even for practice.
+        assert_eq!(bob.find_match().unwrap().defender.display_name, "Training Camp");
         // Re-publishing under the current rules makes Alice raidable again.
         let mut alice = Client::new(&url);
         alice.dev_login("Alice").unwrap();
@@ -396,6 +611,7 @@ async fn upgrades_only_count_once_paid_online() {
         let me = alice.dev_login("Alice").unwrap();
         assert_eq!(me.upgrades.town_hall, 1);
         assert!(me.upgrades.weapons.is_empty() && me.upgrades.levels.is_empty());
+        alice.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
 
         // A level 2 troop (allowed by Town Hall 1) that was only levelled offline.
         let m = alice.find_match().unwrap();
@@ -462,13 +678,14 @@ async fn raids_are_rate_limited() {
     blocking(move || {
         let mut bob = Client::new(&url);
         bob.dev_login("Bob").unwrap(); // sign-ins have their own, larger allowance
-        assert_eq!(api_code(bob.find_match()), "no_opponent");
-        assert_eq!(api_code(bob.find_match()), "no_opponent");
+        // Bob has no base yet, so each allowed call is turned away with no_base.
+        assert_eq!(api_code(bob.find_match()), "no_base");
+        assert_eq!(api_code(bob.find_match()), "no_base");
         assert_eq!(api_code(bob.find_match()), "slow_down");
         // Another player on the same address has their own allowance.
         let mut amy = Client::new(&url);
         amy.dev_login("Amy").unwrap();
-        assert_eq!(api_code(amy.find_match()), "no_opponent");
+        assert_eq!(api_code(amy.find_match()), "no_base");
         // Light requests still go through.
         assert_eq!(bob.me().unwrap().display_name, "Bob");
         let r = reqwest::blocking::Client::new()

@@ -80,9 +80,9 @@ pub async fn roll(db: &PgPool, length: Duration) -> Result<Option<i32>, sqlx::Er
     // Everyone who played online this season, ranked by trophies.
     let players: Vec<(uuid::Uuid, i32)> = sqlx::query_as(
         "SELECT u.id, u.trophies FROM users u
-         WHERE u.trophies > 0 OR EXISTS (
-             SELECT 1 FROM attacks a WHERE a.status = 'done'
-               AND (a.attacker_id = u.id OR a.defender_id = u.id))
+         WHERE NOT u.is_bot AND (u.trophies > 0 OR EXISTS (
+             SELECT 1 FROM attacks a WHERE a.status = 'done' AND a.kind <> 'practice'
+               AND (a.attacker_id = u.id OR a.defender_id = u.id)))
          ORDER BY u.trophies DESC, u.created_at ASC",
     )
     .fetch_all(&mut *tx)

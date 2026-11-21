@@ -16,3 +16,7 @@ flate2 = "1"
 [[bin]]
 name = "bagctl"
 path = "src/bin/bagctl.rs"
+
+[[bin]]
+name = "bagsim"
+path = "src/bin/bagsim.rs"

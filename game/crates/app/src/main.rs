@@ -19,6 +19,7 @@ mod render;
 mod scene;
 mod settings;
 mod sfx;
+mod stat_panel;
 mod teamtrain;
 mod tour;
 mod save;
@@ -151,7 +152,7 @@ fn demo_screen(g: &mut Game) -> Option<Screen> {
         "armoury" => Screen::Armoury(armoury::ArmouryState { idx: 0 }),
         "team" => Screen::Team(teamtrain::TeamState::demo(g)),
         "signin" => Screen::SignIn(online::SignInState::from_game(&g.account)),
-        "online" => online::OnlineState::demo(g),
+        "online" | "cup" => online::OnlineState::demo(g),
         "clan" => {
             g.account.user = g.account.client().me().ok();
             Screen::Clan(clan::ClanState::new(g))
