@@ -399,7 +399,14 @@ Fighter, Archer and Healer, seed 7, level 3, 600k steps, 120 greedy drills each.
 | Twin Gate | 2 stars (93%) | 2 stars (60%, timed out) |
 | Citadel | 0 stars | 0 stars |
 
-Troops trained under v10 learned to pace themselves: in all four raids none of them ever dropped below half stamina. They win about as often, the Archer dies far less, and raids take longer because they stop to catch their breath.
+With seed 7, troops trained under v10 paced themselves so carefully that none dropped below half stamina, and raids took longer. That seed turned out to be the cautious one. Two more Fighter seeds (600k steps, same Archer and Healer):
+
+| Fighter seed | v8 drill wins | v10 drill wins | v10 Fighter lowest stamina (Outpost / Fort / Twin Gate / Citadel) | Time spent standing still in v10 raids |
+|---|---|---|---|---|
+| 21 | 77% | 81% | 48% / 10% / 32% / 69% | 46-76% |
+| 22 | 70% | 82% | 26% / 14% / 15% / 7% | 32-66% |
+
+So fatigue does bite in long fights: Fighters run low on the Fort, Twin Gate and Citadel and stop to recover between bouts. Raid times were similar to v8 for these seeds (Outpost 197 and 198 ticks against 239 and 183), and seed 22's squad did 45% on the Citadel against 12% under v8. The 900-tick clock already ended Twin Gate raids before v10 (v8 seed 22: 52%, timed out), and still does (v10: 79%).
 
 Old brains: the starter troops (254k steps, trained under v8) load with the new inputs switched off and still 3-star the Outpost in 241 ticks (40 s at 1x), but drop from 3 to 2 stars on the Fort because they don't know to pace and run out of breath (the Archer spent 400 ticks tired). 150k more steps under v10 brought the Fort back to 3 stars and the Fighter's drill wins from 28% to 54%; the Archer was still behind (16%) at that point, so plan on more retraining for ranged troops.
 
