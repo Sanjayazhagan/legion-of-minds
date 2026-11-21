@@ -275,6 +275,18 @@ impl Game {
             18.0,
             BREATH,
         );
+        let born = t.traits().words();
+        if !born.is_empty() {
+            y += 22.0;
+            let supply = if b.arrows > 0.0 {
+                format!("  ·  carries {:.0} arrows", b.arrows)
+            } else if b.mana > 0.0 {
+                format!("  ·  {:.0} mana", b.mana)
+            } else {
+                String::new()
+            };
+            text(&format!("Born: {born}{supply}"), x, y + 8.0, 18.0, MUTED);
+        }
         y += 30.0;
         text(
             &format!(

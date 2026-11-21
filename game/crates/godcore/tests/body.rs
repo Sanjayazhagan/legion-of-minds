@@ -154,3 +154,99 @@ fn brains_see_their_own_breath() {
     w.units[me].stamina = 25.0;
     assert_eq!(w.observe(me)[OBS_BODY], 0.25);
 }
+
+// ---- Stage A: injuries, supplies, traits and weapon weight.
+
+#[test]
+fn hits_hurt_legs_and_arms_and_big_ones_bleed() {
+    let (mut w, me, foe) = duel(BaseClass::Fighter);
+    w.units[foe].dmg = 4.0;
+    for _ in 0..400 {
+        step(&mut w, me, ACT_IDLE);
+    }
+    let u = &w.units[me];
+    assert!(u.legs > 0.0 && u.arms > 0.0, "some hits land on each: {} {}", u.legs, u.arms);
+    let (mut w, me, _) = duel(BaseClass::Fighter);
+    w.units[me].legs = 0.4;
+    let mut ok = w.clone();
+    ok.units[me].legs = 0.0;
+    step(&mut w, me, 1);
+    step(&mut ok, me, 1);
+    assert!(w.units[me].x - 10.0 < 0.75 * (ok.units[me].x - 10.0), "ruined legs limp");
+}
+
+#[test]
+fn bleeding_drains_until_healed() {
+    let mut w = World::new(900);
+    let me = w.add_troop(&BaseClass::Fighter.spec(), 10.0, 10.0, Control::External, 0);
+    let doc = w.add_troop(&BaseClass::Healer.spec(), 11.0, 10.0, Control::External, 1);
+    w.add_core(28.0, 28.0);
+    w.units[me].bleed = 0.3;
+    w.units[me].hp = 80.0;
+    let mut acts = vec![ACT_IDLE; w.units.len()];
+    w.step(&acts);
+    assert!(w.units[me].hp < 80.0);
+    assert!(w.mask(doc)[ACT_HEAL as usize]);
+    acts[doc] = ACT_HEAL;
+    w.step(&acts);
+    assert_eq!(w.units[me].bleed, 0.0, "a heal stops the bleeding");
+}
+
+#[test]
+fn archers_run_out_of_arrows_and_fight_in_close() {
+    let mut w = World::new(900);
+    let me = w.add_troop(&BaseClass::Archer.spec(), 10.0, 10.0, Control::External, 0);
+    w.add_core(28.0, 28.0);
+    let u = &w.units[me];
+    assert_eq!(u.arrows, 40.0);
+    assert!(u.range > 2.5);
+    w.units[me].arrows = 0.0;
+    step(&mut w, me, ACT_IDLE);
+    assert_eq!(w.units[me].range, godcore::body::MAKESHIFT_RANGE);
+    assert!(w.units[me].dmg < w.units[me].full_dmg);
+    assert_eq!(w.units[me].supply(), 0.0);
+}
+
+#[test]
+fn mages_spend_mana_and_get_it_back() {
+    let (mut w, me, _) = duel(BaseClass::Mage);
+    assert_eq!(w.units[me].mana, 100.0);
+    w.units[me].mana = 3.0;
+    step(&mut w, me, ACT_IDLE);
+    assert_eq!(w.units[me].splash, 0.0, "no mana, no spell");
+    for _ in 0..40 {
+        step(&mut w, me, ACT_IDLE);
+    }
+    assert!(w.units[me].splash > 0.0, "mana came back");
+}
+
+#[test]
+fn recruits_are_born_different_but_balanced() {
+    use godcore::body::Traits;
+    let a = Troop::new(1, "a".into(), BaseClass::Fighter.spec(), 101);
+    let b = Troop::new(2, "b".into(), BaseClass::Fighter.spec(), 202);
+    assert_ne!(a.spec.traits, b.spec.traits);
+    for seed in 0..200 {
+        let s: f32 = Traits::roll(seed).scores().iter().sum();
+        assert!(s.abs() < 0.3, "seed {seed}: traits add up to {s}");
+    }
+    // Old saves (no traits) stay average, and a client can't pick traits.
+    let mut old = a.clone();
+    old.born = false;
+    let back = Troop::load_json(&old.save_json()).unwrap();
+    assert_eq!(back.spec.traits, Traits::default());
+    let mut forged = a.clone();
+    forged.spec.traits.strength = 5.0;
+    assert_eq!(Troop::load_json(&forged.save_json()).unwrap().spec.traits, a.spec.traits);
+}
+
+#[test]
+fn heavy_weapons_cost_more_to_swing() {
+    let (mut axe, a, _) = duel(BaseClass::Fighter);
+    let (mut dag, b, _) = duel(BaseClass::Assassin);
+    let (s0, t0) = (axe.units[a].stamina, dag.units[b].stamina);
+    step(&mut axe, a, ACT_HIT_UNIT);
+    step(&mut dag, b, ACT_HIT_UNIT);
+    let (ds_axe, ds_dag) = (s0 - axe.units[a].stamina, t0 - dag.units[b].stamina);
+    assert!(ds_axe > ds_dag + 1.0, "greataxe {ds_axe} vs daggers {ds_dag}");
+}

@@ -525,6 +525,7 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
         // battles don't read it.
         level_from: t.level_from,
         plateaued: t.plateaued,
+        born: t.born,
     };
     // Move practice comes from the troop's own practice record, never from
     // the client's copy in the spec.

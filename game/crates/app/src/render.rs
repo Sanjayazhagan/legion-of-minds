@@ -1010,11 +1010,11 @@ fn draw_sight(w: &World) {
     let fill: [u8; 4] = [255, 255, 215, 22];
     let edge = Color::new(1.0, 1.0, 0.85, 0.3);
     let half = godcore::sim::SIGHT_COS.acos();
-    let r = godcore::sim::SIGHT_RANGE;
     for (i, u) in w.units.iter().enumerate() {
         if !u.alive || !w.has_senses(i) {
             continue;
         }
+        let r = u.sight;
         let base = u.facing.1.atan2(u.facing.0);
         let n = 16;
         let at = |k: usize| {

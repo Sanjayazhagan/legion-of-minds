@@ -8,6 +8,9 @@
 //! Skeleton guards, towers and scripted fighters don't tire.
 
 use crate::classes::{BaseClass, ClassSpec};
+use crate::rng::Rng;
+use crate::weapons::Weapon;
+use serde::{Deserialize, Serialize};
 
 /// One class's body: (untrained, fully conditioned) for the numbers that
 /// training improves.
@@ -60,6 +63,146 @@ pub struct Body {
     pub react: u32,
     /// Share of stamina spent that comes off the pool for the rest of the battle.
     pub wear: f32,
+    /// Arrows carried (crossbows only, 0 otherwise).
+    pub arrows: f32,
+    /// Mana (fire staffs only, 0 otherwise).
+    pub mana: f32,
+    /// Stamina cost of each attack, from the weapon's weight.
+    pub swing: f32,
+    /// Born traits.
+    pub traits: Traits,
+}
+
+/// Arrows a troop of each class carries, and mana (sim version 10).
+fn quiver(c: BaseClass) -> f32 {
+    match c {
+        BaseClass::Archer => 40.0,
+        BaseClass::Sentry => 35.0,
+        _ => 30.0,
+    }
+}
+
+fn mana_pool(c: BaseClass) -> f32 {
+    match c {
+        BaseClass::Mage | BaseClass::Warlock => 100.0,
+        _ => 80.0,
+    }
+}
+
+/// Conditioning adds up to this share of arrows and mana.
+pub const SUPPLY_TRAINED: f32 = 0.25;
+/// Mana a spell costs, a Fireball costs 3 times as much, and mana back per tick.
+pub const SPELL_MANA: f32 = 6.0;
+pub const MANA_REGEN: f32 = 0.1;
+/// With no arrows (or no mana for a spell) a troop fights in close: this
+/// reach and this share of its damage.
+pub const MAKESHIFT_RANGE: f32 = 1.3;
+pub const MAKESHIFT_DMG: f32 = 0.4;
+
+/// How heavy a weapon is to swing: stamina per attack, times the base cost,
+/// and armour weight it adds.
+pub fn weapon_weight(w: Weapon) -> (f32, f32) {
+    match w {
+        Weapon::SwordShield => (1.0, 0.2),
+        Weapon::Greataxe | Weapon::Greatsword => (1.3, 0.0),
+        Weapon::Daggers => (0.7, 0.0),
+        Weapon::Crossbow => (1.2, 0.0),
+        Weapon::FireStaff | Weapon::HolyWand => (0.8, 0.0),
+    }
+}
+
+/// What a recruit is born with (sim version 10). Every value is a
+/// difference from the class's normal; each troop's add up to the same
+/// total, so traits make troops different, not better. Troops recruited
+/// before traits existed are average in everything.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Traits {
+    /// Walking speed (+-8%).
+    pub speed: f32,
+    /// Damage (+-10%).
+    pub strength: f32,
+    /// Health (+-10%).
+    pub toughness: f32,
+    /// Stamina pool (+-15%).
+    pub lungs: f32,
+    /// Stamina recovery (+-15%).
+    pub recovery: f32,
+    /// Sight range (+-2 steps).
+    pub eyesight: f32,
+    /// Reaction time (+-1 tick, negative is quicker).
+    pub reflexes: f32,
+    /// Chance to miss a shot (+-5%, negative is steadier).
+    pub aim: f32,
+}
+
+/// How far each trait can go from average.
+const TRAIT_SPAN: [f32; 8] = [0.08, 0.10, 0.10, 0.15, 0.15, 2.0, 1.0, 0.05];
+/// Names for a strong and a weak trait.
+const TRAIT_WORDS: [(&str, &str); 8] = [
+    ("Quick", "Slow"),
+    ("Strong", "Weak arm"),
+    ("Tough", "Frail"),
+    ("Iron lungs", "Short of breath"),
+    ("Quick to recover", "Slow to recover"),
+    ("Sharp eyes", "Short-sighted"),
+    ("Fast reflexes", "Slow reflexes"),
+    ("Steady hands", "Shaky aim"),
+];
+
+impl Traits {
+    /// The traits a recruit with this seed is born with. Each one is drawn,
+    /// then the average is taken off so every troop's add up to zero.
+    pub fn roll(seed: u64) -> Traits {
+        let mut rng = Rng::new(seed ^ 0x7472_6169_7473);
+        let mut v = [0.0f32; 8];
+        for x in v.iter_mut() {
+            *x = rng.range(-1.0, 1.0);
+        }
+        let mean = v.iter().sum::<f32>() / 8.0;
+        // Shrink (rather than cut) so the scores still add up to zero.
+        let big = v.iter().map(|x| (x - mean).abs()).fold(1.0f32, f32::max);
+        let mut out = [0.0f32; 8];
+        for k in 0..8 {
+            out[k] = (v[k] - mean) / big * TRAIT_SPAN[k];
+        }
+        // For reflexes and aim, lower is better: flip so a positive draw is good.
+        Traits {
+            speed: out[0],
+            strength: out[1],
+            toughness: out[2],
+            lungs: out[3],
+            recovery: out[4],
+            eyesight: out[5],
+            reflexes: -out[6],
+            aim: -out[7],
+        }
+    }
+
+    /// Each trait as a share of its span, positive meaning better.
+    pub fn scores(&self) -> [f32; 8] {
+        let v = [self.speed, self.strength, self.toughness, self.lungs, self.recovery, self.eyesight, -self.reflexes, -self.aim];
+        let mut o = [0.0; 8];
+        for k in 0..8 {
+            o[k] = v[k] / TRAIT_SPAN[k];
+        }
+        o
+    }
+
+    /// The strongest and weakest traits in words, e.g. "Quick, Iron lungs;
+    /// Short-sighted". Empty for an average troop.
+    pub fn words(&self) -> String {
+        let sc = self.scores();
+        let mut idx: Vec<usize> = (0..8).filter(|&k| sc[k].abs() >= 0.35).collect();
+        idx.sort_by(|&a, &b| sc[b].partial_cmp(&sc[a]).unwrap());
+        let good: Vec<&str> = idx.iter().filter(|&&k| sc[k] > 0.0).take(2).map(|&k| TRAIT_WORDS[k].0).collect();
+        let bad: Vec<&str> = idx.iter().rev().filter(|&&k| sc[k] < 0.0).take(1).map(|&k| TRAIT_WORDS[k].1).collect();
+        match (good.is_empty(), bad.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => good.join(", "),
+            (true, false) => bad.join(", "),
+            (false, false) => format!("{}; {}", good.join(", "), bad.join(", ")),
+        }
+    }
 }
 
 /// Wear for an untrained body: every 20 stamina spent costs 1 of the pool.
@@ -71,8 +214,19 @@ impl Body {
     pub fn of(spec: &ClassSpec) -> Body {
         let c = spec.conditioning.clamp(0.0, 1.0);
         let at = |p: (f32, f32)| p.0 + (p.1 - p.0) * c;
-        let mut b = Body { stamina: 0.0, recovery: 0.0, load: 0.0, react: 0, wear: WEAR * (1.0 - 0.5 * c) };
-        let mut react = 0.0;
+        let t = spec.traits;
+        let mut b = Body {
+            stamina: 0.0,
+            recovery: 0.0,
+            load: 0.0,
+            react: 0,
+            wear: WEAR * (1.0 - 0.5 * c),
+            arrows: 0.0,
+            mana: 0.0,
+            swing: 1.0,
+            traits: t,
+        };
+        let (mut react, mut arrows, mut mana) = (0.0, 0.0, 0.0);
         let total: f32 = spec.parents.iter().map(|p| p.1).sum();
         for &(class, share) in &spec.parents {
             let s = class.body();
@@ -81,8 +235,23 @@ impl Body {
             b.recovery += at(s.recovery) * w;
             b.load += s.load * w;
             react += at(s.react) * w;
+            arrows += quiver(class) * w;
+            mana += mana_pool(class) * w;
         }
-        b.react = react.round().max(1.0) as u32;
+        let supply = 1.0 + SUPPLY_TRAINED * c;
+        let weapon = spec.weapon();
+        if weapon == Weapon::Crossbow {
+            b.arrows = (arrows * supply).round();
+        }
+        if weapon == Weapon::FireStaff {
+            b.mana = (mana * supply).round();
+        }
+        let (swing, load) = weapon_weight(weapon);
+        b.swing = swing;
+        b.load += load;
+        b.stamina *= 1.0 + t.lungs;
+        b.recovery *= 1.0 + t.recovery;
+        b.react = (react + t.reflexes).round().max(1.0) as u32;
         b
     }
 }
@@ -126,6 +295,30 @@ pub const WEAR_FLOOR: f32 = 0.5;
 pub const PAIN_AT: f32 = 0.5;
 /// Speed and recovery lost at the edge of death.
 pub const PAIN_SLOW: f32 = 0.25;
+
+/// Injuries (sim version 10). Each hit on a trained troop lands on its legs,
+/// arms or torso. Damage to the legs slows it, to the arms weakens and slows
+/// its attacks, fully once that part has taken this share of its health.
+pub const INJURY_FULL: f32 = 0.4;
+/// Share of hits on the legs and on the arms (the rest hit the torso).
+pub const HIT_LEGS: f32 = 0.3;
+pub const HIT_ARMS: f32 = 0.3;
+/// Speed left with ruined legs; damage left and cooldown with ruined arms.
+pub const LAME_SPEED: f32 = 0.7;
+pub const ARM_DMG: f32 = 0.75;
+pub const ARM_COOLDOWN: f32 = 1.25;
+/// A hit this big (share of health) opens a wound: bleeding this much a
+/// tick, adding up to the most. Any heal stops it.
+pub const WOUND: f32 = 0.15;
+pub const BLEED: f32 = 0.1;
+pub const BLEED_MAX: f32 = 0.3;
+/// A heal mends injuries by this share of what it heals.
+pub const MEND: f32 = 0.5;
+
+/// How badly (0 to 1) a part that took this much damage is hurt.
+pub fn injury(taken: f32) -> f32 {
+    (taken / INJURY_FULL).clamp(0.0, 1.0)
+}
 
 /// How tired (0 fresh to 1 empty) a troop with this much stamina is.
 pub fn tiredness(stamina: f32, pool: f32) -> f32 {

@@ -1,7 +1,7 @@
 //! A trained troop as the player owns it: class, level, brain and history.
 //! Saved as one small JSON file, which is also what gets shared for wars.
 
-use crate::body::conditioning_of;
+use crate::body::{conditioning_of, Traits};
 use crate::classes::{talents_for_level, ClassSpec};
 use crate::env::EpisodeInfo;
 use crate::nn::Mlp;
@@ -180,6 +180,10 @@ pub struct Troop {
     /// can't take "ready to level up" away again.
     #[serde(default)]
     pub plateaued: bool,
+    /// Born with traits rolled from its seed (rules v10). Troops recruited
+    /// before traits existed are average in everything.
+    #[serde(default)]
+    pub born: bool,
 }
 
 /// Starting score for actions a grown brain has never tried (dodge, block,
@@ -209,6 +213,22 @@ impl Troop {
             team_steps: 0,
             level_from: Some(0),
             plateaued: false,
+            born: true,
+        }
+        .synced()
+    }
+
+    fn synced(mut self) -> Self {
+        self.sync_moves();
+        self
+    }
+
+    /// What this troop was born with (average for troops from before traits).
+    pub fn traits(&self) -> Traits {
+        if self.born {
+            Traits::roll(self.seed)
+        } else {
+            Traits::default()
         }
     }
 
@@ -338,6 +358,7 @@ impl Troop {
     pub fn sync_moves(&mut self) {
         self.spec.talents = talents_for_level(self.level);
         self.spec.conditioning = conditioning_of(self.steps);
+        self.spec.traits = self.traits();
         for m in Move::ALL {
             self.spec.move_practice[m as usize] = if self.spec.has_move(m) { self.move_practice(m) } else { 0.0 };
         }

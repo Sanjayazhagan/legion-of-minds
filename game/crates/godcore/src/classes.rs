@@ -159,6 +159,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Archer => ClassSpec {
@@ -188,6 +189,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Healer => ClassSpec {
@@ -217,6 +219,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Guard => ClassSpec {
@@ -239,6 +242,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Sentry => ClassSpec {
@@ -261,6 +265,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Keeper => ClassSpec {
@@ -287,6 +292,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Mage => ClassSpec {
@@ -545,6 +551,9 @@ pub struct ClassSpec {
     /// (see `body`): more stamina, faster recovery, steadier nerve.
     #[serde(default)]
     pub conditioning: f32,
+    /// What the troop was born with, set from the troop (see `body::Traits`).
+    #[serde(default)]
+    pub traits: crate::body::Traits,
 }
 
 /// Most units a multi-target talent can reach (a level 5 troop).
@@ -581,6 +590,7 @@ impl ClassSpec {
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
             conditioning: 0.0,
+            traits: Default::default(),
             talents: TALENT_MAX,
         }
     }
@@ -650,6 +660,7 @@ impl ClassSpec {
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
             conditioning: 0.0,
+            traits: Default::default(),
             talents: TALENT_MAX,
         }
     }
@@ -730,6 +741,7 @@ impl ClassSpec {
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
             conditioning: 0.0,
+            traits: Default::default(),
             talents: TALENT_MAX,
         }
     }
@@ -757,6 +769,7 @@ impl ClassSpec {
         self.move_practice = other.move_practice;
         self.talents = other.talents;
         self.conditioning = other.conditioning;
+        self.traits = other.traits;
         self
     }
 

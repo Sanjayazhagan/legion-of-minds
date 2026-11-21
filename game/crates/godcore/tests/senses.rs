@@ -132,6 +132,9 @@ fn ranged_troops_sometimes_miss() {
     let (mut w, me, foe) = setup(15.4, 10.0);
     w.units[foe].hp = 1e9;
     w.units[foe].max_hp = 1e9;
+    // Enough arrows to measure aim (a real quiver runs out, rules v10).
+    w.units[me].arrows = 1e6;
+    w.units[me].arrows_max = 1e6;
     for _ in 0..600 {
         step(&mut w, me, ACT_HIT_UNIT);
     }

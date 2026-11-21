@@ -24,7 +24,7 @@ pub const SPLASH_BUILDING: f32 = 0.25;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
 pub const SIM_VERSION: u32 = 10;
-pub const OBS_DIM: usize = 128;
+pub const OBS_DIM: usize = 132;
 /// Where the teamwork part of the view starts (the two allies' roles,
 /// threats and actions, sim version 4).
 pub const OBS_TEAM: usize = 74;
@@ -216,6 +216,8 @@ pub struct UnitStats {
     /// Ticks spent tired (below half stamina), and out of breath (empty).
     pub tired: u32,
     pub winded: u32,
+    /// Health lost to bleeding.
+    pub bled: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -286,6 +288,26 @@ pub struct Unit {
     /// Last tick it exerted itself (struck, dodged, cast...). It only gets
     /// its breath back fully once it stops for a moment.
     pub effort: u32,
+    /// Damage taken (share of max health) to the legs and to the arms, and
+    /// health lost to bleeding each tick (sim version 10).
+    pub legs: f32,
+    pub arms: f32,
+    pub bleed: f32,
+    /// Arrows left and carried (crossbows), mana left and most (fire staffs).
+    pub arrows: f32,
+    pub arrows_max: f32,
+    pub mana: f32,
+    pub mana_max: f32,
+    /// Stamina cost of each attack (weapon weight).
+    pub swing: f32,
+    /// How far it sees, and extra chance to miss a shot (born traits).
+    pub sight: f32,
+    pub aim: f32,
+    /// Reach, damage and splash with its weapon working (with no arrows or
+    /// mana left it fights in close instead).
+    pub full_range: f32,
+    pub full_dmg: f32,
+    pub full_splash: f32,
 }
 
 impl Unit {
@@ -299,6 +321,32 @@ impl Unit {
         self.load = b.load;
         self.wear = b.wear;
         self.react = b.react;
+        self.arrows = b.arrows;
+        self.arrows_max = b.arrows;
+        self.mana = b.mana;
+        self.mana_max = b.mana;
+        self.swing = b.swing;
+        let t = b.traits;
+        self.max_hp *= 1.0 + t.toughness;
+        self.hp = self.max_hp;
+        self.dmg *= 1.0 + t.strength;
+        self.speed *= 1.0 + t.speed;
+        self.sight = SIGHT_RANGE + t.eyesight;
+        self.aim = t.aim;
+        self.full_range = self.range;
+        self.full_dmg = self.dmg;
+        self.full_splash = self.splash;
+    }
+
+    /// Ammunition left as a share (1 for troops that need none).
+    pub fn supply(&self) -> f32 {
+        if self.arrows_max > 0.0 {
+            self.arrows / self.arrows_max
+        } else if self.mana_max > 0.0 {
+            self.mana / self.mana_max
+        } else {
+            1.0
+        }
     }
 
     /// How tired (0 fresh to 1 empty). Tireless units are never tired.
@@ -553,6 +601,19 @@ impl World {
             wear: 0.0,
             react: REACT,
             effort: 0,
+            legs: 0.0,
+            arms: 0.0,
+            bleed: 0.0,
+            arrows: 0.0,
+            arrows_max: 0.0,
+            mana: 0.0,
+            mana_max: 0.0,
+            swing: 1.0,
+            sight: SIGHT_RANGE,
+            aim: 0.0,
+            full_range: 0.0,
+            full_dmg: 0.0,
+            full_splash: 0.0,
         }
     }
 
@@ -894,11 +955,15 @@ impl World {
         let (team, x, y) = (me.team, me.x, me.y);
         match me.skill {
             None => false,
-            Some(Skill::ShieldBash) | Some(Skill::Volley) => self.unit_target(i).is_some(),
+            Some(Skill::ShieldBash) => self.unit_target(i).is_some(),
+            Some(Skill::Volley) => self.unit_target(i).is_some() && (me.arrows_max == 0.0 || me.arrows >= 1.0),
             Some(Skill::Whirlwind) => !self.enemies_near(team, x, y, 2.2, true).is_empty(),
             Some(Skill::GroundSlam) => !self.enemies_near(team, x, y, 2.0, false).is_empty(),
             Some(Skill::Shadowstep) => self.shadowstep_target(i).is_some(),
-            Some(Skill::Fireball) => self.unit_target(i).is_some() || self.building_target(i).is_some(),
+            Some(Skill::Fireball) => {
+                (self.unit_target(i).is_some() || self.building_target(i).is_some())
+                    && (me.mana_max == 0.0 || me.mana >= 3.0 * crate::body::SPELL_MANA)
+            }
             Some(Skill::HealingNova) => self.units.iter().any(|u| {
                 u.alive && u.team == team && u.kind == Kind::Troop && u.max_hp - u.hp >= 5.0 && me.dist(u) <= 3.5
             }),
@@ -938,7 +1003,9 @@ impl World {
             return 1.0;
         }
         let u = &self.units[i];
-        (1.0 - (1.0 - body::TIRED_SPEED) * u.tiredness()) * (1.0 - body::PAIN_SLOW * body::pain(u.hp, u.max_hp))
+        (1.0 - (1.0 - body::TIRED_SPEED) * u.tiredness())
+            * (1.0 - body::PAIN_SLOW * body::pain(u.hp, u.max_hp))
+            * (1.0 - (1.0 - body::LAME_SPEED) * body::injury(u.legs))
     }
 
     /// Damage left after tiredness (1 for tireless units).
@@ -946,7 +1013,8 @@ impl World {
         if !self.human(i) {
             return 1.0;
         }
-        1.0 - (1.0 - body::TIRED_DMG) * self.units[i].tiredness()
+        let u = &self.units[i];
+        (1.0 - (1.0 - body::TIRED_DMG) * u.tiredness()) * (1.0 - (1.0 - body::ARM_DMG) * body::injury(u.arms))
     }
 
     /// Attack cooldown after tiredness.
@@ -955,7 +1023,10 @@ impl World {
         if !self.human(i) {
             return u.cd_max;
         }
-        (u.cd_max as f32 * (1.0 + (body::TIRED_COOLDOWN - 1.0) * u.tiredness())).round() as u32
+        (u.cd_max as f32
+            * (1.0 + (body::TIRED_COOLDOWN - 1.0) * u.tiredness())
+            * (1.0 + (body::ARM_COOLDOWN - 1.0) * body::injury(u.arms)))
+            .round() as u32
     }
 
     /// Get breath back after acting: most when standing still, little when
@@ -983,6 +1054,59 @@ impl World {
         let t = u.tiredness();
         u.stats.tired += (t > 0.0) as u32;
         u.stats.winded += (u.stamina < 1.0) as u32;
+        u.mana = (u.mana + body::MANA_REGEN).min(u.mana_max);
+        if u.bleed > 0.0 {
+            u.stats.bled += u.bleed.min(u.hp);
+            u.hp -= u.bleed;
+            if u.hp <= 0.0 {
+                u.hp = 0.0;
+                u.alive = false;
+                let p = (u.x, u.y);
+                self.events.push(Event { kind: EventKind::Death, from: p, to: p });
+                return;
+            }
+        }
+        self.arm(i);
+    }
+
+    /// With arrows or mana a troop uses its weapon; without, it fights in
+    /// close with whatever it has.
+    fn arm(&mut self, i: usize) {
+        let u = &mut self.units[i];
+        let empty = (u.arrows_max > 0.0 && u.arrows < 1.0) || (u.mana_max > 0.0 && u.mana < body::SPELL_MANA);
+        if empty {
+            u.range = body::MAKESHIFT_RANGE;
+            u.dmg = u.full_dmg * body::MAKESHIFT_DMG;
+            u.splash = 0.0;
+        } else {
+            u.range = u.full_range;
+            u.dmg = u.full_dmg;
+            u.splash = u.full_splash;
+        }
+    }
+
+    /// Use up what an attack needs: an arrow, or mana for a spell.
+    fn use_supply(&mut self, i: usize, times: f32) {
+        if !self.human(i) {
+            return;
+        }
+        let u = &mut self.units[i];
+        if u.arrows_max > 0.0 && u.arrows >= 1.0 {
+            u.arrows = (u.arrows - times).max(0.0);
+        } else if u.mana_max > 0.0 && u.mana >= body::SPELL_MANA {
+            u.mana = (u.mana - body::SPELL_MANA * times).max(0.0);
+        }
+    }
+
+    /// Heals stop bleeding and mend injuries a little.
+    fn mend(&mut self, j: usize, amount: f32) {
+        let u = &mut self.units[j];
+        if u.max_hp > 0.0 {
+            let m = body::MEND * amount / u.max_hp;
+            u.legs = (u.legs - m).max(0.0);
+            u.arms = (u.arms - m).max(0.0);
+        }
+        u.bleed = 0.0;
     }
 
     pub fn has_senses(&self, i: usize) -> bool {
@@ -1003,7 +1127,7 @@ impl World {
         if c - edge <= TOUCH {
             return true;
         }
-        if c - edge > SIGHT_RANGE || me.facing.0 * dx + me.facing.1 * dy < SIGHT_COS * c - edge {
+        if c - edge > me.sight || me.facing.0 * dx + me.facing.1 * dy < SIGHT_COS * c - edge {
             return false;
         }
         for (k, b) in self.units.iter().enumerate() {
@@ -1457,6 +1581,13 @@ impl World {
         for s in 0..2 {
             put(&mut o, al.get(s).map_or(0.0, |&(j, _)| self.units[j].breath()));
         }
+        // Injuries and supplies: how hurt its legs and arms are, how fast it
+        // bleeds, and how much ammunition or mana it has left.
+        let me = &self.units[i];
+        put(&mut o, body::injury(me.legs));
+        put(&mut o, body::injury(me.arms));
+        put(&mut o, me.bleed / body::BLEED_MAX);
+        put(&mut o, me.supply());
         debug_assert_eq!(k, OBS_DIM);
         o
     }
@@ -1609,6 +1740,20 @@ impl World {
         }
         let hit = amount.min(self.units[to].hp);
         self.units[to].hp -= hit;
+        if self.human(to) && hit > 0.0 {
+            // Where the blow landed (sim version 10).
+            let r = self.roll(to, from ^ 0x5bd1);
+            let u = &mut self.units[to];
+            let share = hit / u.max_hp;
+            if r < body::HIT_LEGS {
+                u.legs += share;
+            } else if r < body::HIT_LEGS + body::HIT_ARMS {
+                u.arms += share;
+            }
+            if share >= body::WOUND {
+                u.bleed = (u.bleed + body::BLEED).min(body::BLEED_MAX);
+            }
+        }
         let to_building = self.units[to].kind.is_building();
         let s = &mut self.units[from].stats;
         if to_building {
@@ -1774,6 +1919,7 @@ impl World {
                     .min(self.units[j].max_hp - self.units[j].hp);
                 self.units[j].hp += amount;
                 self.units[i].stats.heal += amount;
+                self.mend(j, amount);
                 self.units[i].cd = self.tired_cd(i);
                 self.spend(i, body::COST_SHOT);
                 let (from, to) = (self.pos(i), self.pos(j));
@@ -1822,7 +1968,9 @@ impl World {
         self.units[i].cd = self.tired_cd(i);
         self.units[i].cloak = 0;
         let ranged = self.units[i].range > 2.5;
-        self.spend(i, if ranged { body::COST_SHOT } else { body::COST_SWING });
+        let swing = self.units[i].swing;
+        self.spend(i, swing * if ranged { body::COST_SHOT } else { body::COST_SWING });
+        self.use_supply(i, 1.0);
         let kind = if ranged { EventKind::Arrow } else { EventKind::Melee };
         let (from, to) = (self.pos(i), self.pos(j));
         // Trained troops are not perfect shots: far and moving targets get
@@ -1834,7 +1982,8 @@ impl World {
             } else {
                 let r = (me.dist(t) / me.range).min(1.0);
                 0.04 + 0.2 * r * r + if matches!(t.last_action, 1..=8) { 0.12 } else { 0.0 }
-            } + body::TIRED_MISS * tired;
+            } + body::TIRED_MISS * tired
+                + me.aim;
             let roll = self.roll(i, j);
             if roll < p {
                 let (dx, dy) = (to.0 - from.0, to.1 - from.1);
@@ -1980,6 +2129,7 @@ impl World {
                 let targets = self.nearest_k(i, reach, |u| u.team != team && !u.kind.is_building());
                 for (j, d) in targets {
                     if d <= range {
+                        self.use_supply(i, 1.0);
                         let p = self.pos(j);
                         self.events.push(Event { kind: EventKind::Arrow, from: me, to: p });
                         self.damage(i, j, base);
@@ -1989,6 +2139,7 @@ impl World {
             Skill::Fireball => {
                 let j = self.unit_target(i).or_else(|| self.building_target(i)).unwrap();
                 to = self.pos(j);
+                self.use_supply(i, 3.0);
                 self.damage(i, j, base * 2.0);
                 let near: Vec<usize> = self.enemies_near(team, to.0, to.1, 2.5, true).into_iter().filter(|&k| k != j).collect();
                 let t = &self.units[j];
@@ -2010,6 +2161,7 @@ impl World {
                     let h = amount.min(u.max_hp - u.hp);
                     self.units[k].hp += h;
                     self.units[i].stats.heal += h;
+                    self.mend(k, h);
                 }
             }
         }

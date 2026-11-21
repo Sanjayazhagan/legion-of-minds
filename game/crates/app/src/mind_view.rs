@@ -150,7 +150,7 @@ pub fn draw_on_map(v: View, w: &World, t: &Thought, who: &dyn Fn(usize) -> Strin
     let edge = |k: usize| {
         let a = base - half + 2.0 * half * k as f32 / n as f32;
         let (dx, dy) = (a.cos(), a.sin());
-        let mut r = sim::SIGHT_RANGE;
+        let mut r = me.sight;
         for (d, p) in [(dx, me.x), (dy, me.y)] {
             if d > 1e-4 {
                 r = r.min((sim::ARENA - p) / d);
@@ -421,6 +421,20 @@ fn body_words(u: &godcore::sim::Unit) -> String {
     }
     if godcore::body::pain(u.hp, u.max_hp) > 0.0 {
         s += ", in pain";
+    }
+    if godcore::body::injury(u.legs) >= 0.25 {
+        s += ", limping";
+    }
+    if godcore::body::injury(u.arms) >= 0.25 {
+        s += ", hurt arm";
+    }
+    if u.bleed > 0.0 {
+        s += ", bleeding";
+    }
+    if u.arrows_max > 0.0 {
+        s += &format!(", {:.0} arrows", u.arrows);
+    } else if u.mana_max > 0.0 {
+        s += &format!(", {:.0} mana", u.mana);
     }
     s
 }
