@@ -583,6 +583,7 @@ impl Game {
             let act = match said {
                 Some(c) => format!("says \"{}\"", crate::render::call_words(c.kind)),
                 None if !u.alive => "down".to_string(),
+                None if u.pool > 0.0 && u.stamina < 1.0 => format!("{}, out of breath", action_name(u.last_action)),
                 None => action_name(u.last_action).to_string(),
             };
             text(
@@ -597,6 +598,9 @@ impl Game {
                 u.hp / u.max_hp,
                 GOOD,
             );
+            if u.alive {
+                stamina_bar(Rect::new(r.x + 44.0, r.y + 42.0, r.w - 56.0, 4.0), u);
+            }
             y += 56.0;
         }
         if let (Some(t), Some(f)) = (&thought, s.focus) {

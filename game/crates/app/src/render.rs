@@ -1963,6 +1963,11 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             draw_rectangle(top.x - bw / 2.0 - 1.0, top.y - 7.0, bw + 2.0, 6.0, Color::new(0.0, 0.0, 0.0, 0.6));
             bar(Rect::new(top.x - bw / 2.0, top.y - 6.0, bw, 4.0), u.hp / u.max_hp, col);
         }
+        // A tired troop shows its stamina under its health.
+        if u.pool > 0.0 && u.stamina < u.pool * 0.5 {
+            let bw = s * 1.1;
+            crate::ui::stamina_bar(Rect::new(top.x - bw / 2.0, top.y - 1.0, bw, 3.0), u);
+        }
     }
 
     // ---- Flying bits

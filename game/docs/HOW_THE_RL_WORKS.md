@@ -350,6 +350,59 @@ Hardness 5 drills won: 69% before, 84.5% after.
 
 The first version made a call use up the turn. Teams called 45 times a drill and did worse. That is why calls are now free.
 
+## 14. Human limits: stamina, wear, pain and class bodies
+
+Sanjay asked for troops that imitate human biological limits, different by class and improved by training (2026-11-21). Sim version 10 gives every trained troop a body (`godcore::body`). Skeleton guards, towers and scripted fighters stay tireless.
+
+| Limit | Rule |
+|---|---|
+| Stamina | Everything costs breath: walking 0.25 a tick (times armour weight), a melee swing 3, a shot or heal 1.5, a dodge 12, raising a guard 5 (and 0.2 a tick to hold it), a charge 15, a weapon skill 10, cloak/blink/snare/ward 8. Standing still for 10 ticks after exerting itself gives full recovery; walking gives 35% of it, fighting 20%, holding a guard none. |
+| Tired | Below half its pool, a troop gets steadily worse. At empty: 70% speed, 1.5x attack cooldown, 80% damage (swings, charges and skills), and shots miss 15% more often. |
+| Out of breath | A troop without the stamina for a dodge, block, charge, skill, cloak, blink, snare or ward can't use it. |
+| Wear | Every 20 stamina spent (not walking) takes 1 off the pool for the rest of the battle, never below half. Full conditioning halves this. |
+| Pain | Below half health, speed and recovery fall, down to 75% at the edge of death. |
+| Reaction time | Now per class (2 to 5 ticks) instead of 4 for everyone. |
+
+Class bodies (untrained → fully conditioned):
+
+| Class | Stamina | Recovery / tick | Armour weight | Reaction (ticks) |
+|---|---|---|---|---|
+| Fighter | 100 → 130 | 1.0 → 1.4 | 1.1 | 4 → 3 |
+| Archer | 80 → 110 | 1.1 → 1.5 | 1.0 | 4 → 3 |
+| Healer | 70 → 95 | 1.2 → 1.6 | 1.0 | 4 |
+| Mage | 60 → 85 | 1.2 → 1.6 | 1.0 | 4 → 3 |
+| Assassin | 90 → 120 | 1.3 → 1.8 | 0.8 | 3 → 2 |
+| Paladin | 120 → 150 | 0.8 → 1.1 | 1.3 | 5 → 4 |
+| Guard | 120 → 150 | 0.9 → 1.2 | 1.3 | 5 → 4 |
+| Sentry | 80 → 105 | 1.1 → 1.5 | 1.0 | 4 → 3 |
+| Keeper | 75 → 100 | 1.2 → 1.6 | 1.0 | 4 |
+| Warlock | 65 → 90 | 1.2 → 1.6 | 1.0 | 4 → 3 |
+| Hunter | 110 → 140 | 1.2 → 1.6 | 0.9 | 3 → 2 |
+
+Mixes blend these by share. Conditioning is `sqrt(steps / 3.5M)`: about 29% at the level 1 cap, 41% at level 2, 59% at level 3, 76% at level 4 and 100% at level 5. It is computed from the troop's training record in `sync_moves`, so the server ignores whatever a client sends.
+
+Brains get 7 new inputs (`OBS_BODY`, 121 to 128): their own stamina and worn ceiling as shares of the pool, how much breath the 3 nearest enemies have (0 when not in sight, 1 for tireless units) and the 2 nearest allies.
+
+The battle screen shows a yellow stamina bar under each troop's health in the side list (dark red for what wear took), a small one over a tired troop's head, "out of breath" in its action, and a Body line in the thinking panel. The Barracks shows each troop's conditioning and body.
+
+### Measured
+
+Fighter, Archer and Healer, seed 7, level 3, 600k steps, 120 greedy drills each. Raids use the three as a squad.
+
+| | Rules v8 | Rules v10 |
+|---|---|---|
+| Fighter drill wins / deaths | 71% / 28% | 66% / 26% |
+| Archer drill wins / deaths | 43% / 41% | 43% / 18% |
+| Healer drill wins / deaths | 50% / 1% | 48% / 3% |
+| Outpost | 3 stars, 248 ticks | 3 stars, 359 ticks |
+| Fort | 3 stars, 381 ticks | 3 stars, 451 ticks |
+| Twin Gate | 2 stars (93%) | 2 stars (60%, timed out) |
+| Citadel | 0 stars | 0 stars |
+
+Troops trained under v10 learned to pace themselves: in all four raids none of them ever dropped below half stamina. They win about as often, the Archer dies far less, and raids take longer because they stop to catch their breath.
+
+Old brains: the starter troops (254k steps, trained under v8) load with the new inputs switched off and still 3-star the Outpost in 241 ticks (40 s at 1x), but drop from 3 to 2 stars on the Fort because they don't know to pace and run out of breath (the Archer spent 400 ticks tired). 150k more steps under v10 brought the Fort back to 3 stars and the Fighter's drill wins from 28% to 54%; the Archer was still behind (16%) at that point, so plan on more retraining for ranged troops.
+
 ## In one line
 
 Your choices (class mix and training plan) decide **what the troop is rewarded for**, the training decides **how it actually behaves**, and the battle simply replays that behaviour exactly.

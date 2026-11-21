@@ -250,6 +250,23 @@ impl Game {
         let kit = t.spec.moves();
         let moves: Vec<String> = kit.iter().map(|m| format!("{} {:.0}%", m.name(), t.move_practice(*m) * 100.0)).collect();
         text(&format!("Moves practised: {}", if moves.is_empty() { "none".to_string() } else { moves.join(", ") }), x, y + 8.0, 18.0, TEXT);
+        y += 24.0;
+        // The body training has built (human limits, rules v10).
+        let b = godcore::body::Body::of(&t.spec);
+        text(
+            &format!(
+                "Body {:.0}% conditioned: stamina {:.0}, recovers {:.1}/tick, armour weight {:.1}, reacts in {} ticks",
+                t.spec.conditioning * 100.0,
+                b.stamina,
+                b.recovery,
+                b.load,
+                b.react
+            ),
+            x,
+            y + 8.0,
+            18.0,
+            BREATH,
+        );
         y += 30.0;
         text(
             &format!(

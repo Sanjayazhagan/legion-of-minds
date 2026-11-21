@@ -581,6 +581,19 @@ mod tests {
         Troop::new(id, format!("t{id}"), spec, 100 + id)
     }
 
+    /// A troop's conditioning (rules v10) comes from its training record,
+    /// never from the copy the client sends.
+    #[test]
+    fn conditioning_comes_from_training() {
+        let mut t = troop(9, BaseClass::Fighter.spec());
+        t.add_training(200_000);
+        let honest = t.spec.conditioning;
+        assert!(honest > 0.0);
+        t.spec.conditioning = 1.0;
+        let c = canonical_troop(&t, Role::Attack, 1).unwrap();
+        assert_eq!(c.spec.conditioning, honest);
+    }
+
     fn snapshot() -> BaseSnapshot {
         let spots = home_spots(2);
         BaseSnapshot {
@@ -839,7 +852,7 @@ mod tests {
 
     #[test]
     fn team_training_is_kept_and_raids_match() {
-        assert_eq!(godcore::sim::SIM_VERSION, 8);
+        assert_eq!(godcore::sim::SIM_VERSION, 10);
         let mut a = army();
         a[0].troop.team_steps = 120_000;
         let c = canonical_army(&a, 1).unwrap();

@@ -6,6 +6,7 @@
 //! (all exactly rounded by IEEE 754), and randomness comes from the seeded
 //! `Rng`. The same layout, models and actions give the same battle anywhere.
 
+use crate::body::{self, Body};
 use crate::classes::ClassSpec;
 use crate::moves::{Move, N_MOVES};
 use crate::weapons::{mastery_dmg, mastery_skill_cd, mastery_skill_power, Skill, Weapon};
@@ -14,14 +15,17 @@ use serde::{Deserialize, Serialize};
 pub const ARENA: f32 = 32.0;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
-pub const SIM_VERSION: u32 = 8;
-pub const OBS_DIM: usize = 121;
+pub const SIM_VERSION: u32 = 10;
+pub const OBS_DIM: usize = 128;
 /// Where the teamwork part of the view starts (the two allies' roles,
 /// threats and actions, sim version 4).
 pub const OBS_TEAM: usize = 74;
 /// Where the senses part starts (sim version 6), and the calls part (7).
 pub const OBS_SENSES: usize = 90;
 pub const OBS_CALLS: usize = 100;
+/// Where the body part starts (sim version 10): stamina, wear, and how
+/// tired the nearest enemies and allies look.
+pub const OBS_BODY: usize = 121;
 pub const N_ACTIONS: usize = 28;
 /// The first observation features and actions, as they were before dodge,
 /// block and skills (brains from older saves are grown from these).
@@ -201,6 +205,9 @@ pub struct UnitStats {
     pub missed: u32,
     /// Calls made to teammates.
     pub calls: u32,
+    /// Ticks spent tired (below half stamina), and out of breath (empty).
+    pub tired: u32,
+    pub winded: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -256,9 +263,50 @@ pub struct Unit {
     pub invuln: u32,
     /// Which way the unit looks (unit length). Trained troops only see ahead.
     pub facing: (f32, f32),
+    /// Human limits (sim version 10, see `body`). A pool of 0 means a unit
+    /// that never tires (guards, towers, scripted fighters).
+    pub stamina: f32,
+    /// Most stamina the troop can get back to now (wear lowers it).
+    pub max_stamina: f32,
+    /// Stamina at the start of the battle.
+    pub pool: f32,
+    pub recovery: f32,
+    pub load: f32,
+    pub wear: f32,
+    /// Ticks to react to something new.
+    pub react: u32,
+    /// Last tick it exerted itself (struck, dodged, cast...). It only gets
+    /// its breath back fully once it stops for a moment.
+    pub effort: u32,
 }
 
 impl Unit {
+    /// Give a troop the body of its class mix and conditioning.
+    pub fn give_body(&mut self, spec: &ClassSpec) {
+        let b = Body::of(spec);
+        self.pool = b.stamina;
+        self.stamina = b.stamina;
+        self.max_stamina = b.stamina;
+        self.recovery = b.recovery;
+        self.load = b.load;
+        self.wear = b.wear;
+        self.react = b.react;
+    }
+
+    /// How tired (0 fresh to 1 empty). Tireless units are never tired.
+    pub fn tiredness(&self) -> f32 {
+        body::tiredness(self.stamina, self.pool)
+    }
+
+    /// Stamina as a share of the starting pool (1 for tireless units).
+    pub fn breath(&self) -> f32 {
+        if self.pool > 0.0 {
+            self.stamina / self.pool
+        } else {
+            1.0
+        }
+    }
+
     pub fn dist(&self, o: &Unit) -> f32 {
         let dx = o.x - self.x;
         let dy = o.y - self.y;
@@ -489,6 +537,14 @@ impl World {
             stun: 0,
             invuln: 0,
             facing: (0.0, 1.0),
+            stamina: 0.0,
+            max_stamina: 0.0,
+            pool: 0.0,
+            recovery: 0.0,
+            load: 1.0,
+            wear: 0.0,
+            react: REACT,
+            effort: 0,
         }
     }
 
@@ -548,6 +604,7 @@ impl World {
         // A mixed-in block keeps less of the weapon's protection.
         u.block_taken = 1.0 - (1.0 - ws.block_taken) * u.moves[Move::Block as usize];
         u.tag = tag;
+        u.give_body(spec);
         // Raiders look towards the middle of the map, defenders out from it.
         let c = ARENA * 0.5;
         let (dx, dy) = if team == Team::Attack { (c - x, c - y) } else { (x - c, y - c) };
@@ -742,6 +799,19 @@ impl World {
                 && self.traps.iter().filter(|t| t.owner == i).count() < MAX_SNARES
                 && self.nearest_noticed(i, |u| u.team != me.team && !u.kind.is_building()).is_some_and(|(_, d)| d <= 8.0);
             m[ACT_WARD as usize] = ready(Move::Ward) && self.ward_useful(i);
+            // Out of breath: no rolls, rushes, spells or raised guards.
+            for (a, cost) in [
+                (ACT_DODGE, body::COST_DODGE),
+                (ACT_BLOCK, body::COST_BLOCK),
+                (ACT_SKILL, body::COST_SKILL),
+                (ACT_CHARGE, body::COST_CHARGE),
+                (ACT_CLOAK, body::COST_FOCUS),
+                (ACT_BLINK, body::COST_FOCUS),
+                (ACT_SNARE, body::COST_FOCUS),
+                (ACT_WARD, body::COST_FOCUS),
+            ] {
+                m[a as usize] = m[a as usize] && self.can_afford(i, cost);
+            }
             let tick = self.tick;
             if self.anyone_to_call(i) && !self.calls.iter().any(|c| c.from == i && tick - c.tick < CALL_GAP) {
                 for a in ACT_CALL_FOCUS..ACT_CALL_FOCUS + N_CALLS as u8 {
@@ -831,6 +901,82 @@ impl World {
 
     /// Trained troops have senses; towers, guards and scripted troops still
     /// know where everyone is.
+    /// Whether unit `i` has human limits: a trained troop with a body.
+    pub fn human(&self, i: usize) -> bool {
+        self.has_senses(i) && self.units[i].pool > 0.0
+    }
+
+    /// Spend stamina on an action. What is spent also wears the body down a
+    /// little for the rest of the battle.
+    fn spend(&mut self, i: usize, cost: f32) {
+        if !self.human(i) {
+            return;
+        }
+        let tick = self.tick;
+        let u = &mut self.units[i];
+        u.effort = tick;
+        u.max_stamina = (u.max_stamina - cost * u.wear).max(u.pool * body::WEAR_FLOOR);
+        u.stamina = (u.stamina - cost).max(0.0).min(u.max_stamina);
+    }
+
+    /// Whether troop `i` has the breath for something costing `cost`.
+    fn can_afford(&self, i: usize, cost: f32) -> bool {
+        !self.human(i) || self.units[i].stamina >= cost
+    }
+
+    /// Speed left after tiredness and pain (1 for tireless units).
+    fn vigour(&self, i: usize) -> f32 {
+        if !self.human(i) {
+            return 1.0;
+        }
+        let u = &self.units[i];
+        (1.0 - (1.0 - body::TIRED_SPEED) * u.tiredness()) * (1.0 - body::PAIN_SLOW * body::pain(u.hp, u.max_hp))
+    }
+
+    /// Damage left after tiredness (1 for tireless units).
+    fn force(&self, i: usize) -> f32 {
+        if !self.human(i) {
+            return 1.0;
+        }
+        1.0 - (1.0 - body::TIRED_DMG) * self.units[i].tiredness()
+    }
+
+    /// Attack cooldown after tiredness.
+    fn tired_cd(&self, i: usize) -> u32 {
+        let u = &self.units[i];
+        if !self.human(i) {
+            return u.cd_max;
+        }
+        (u.cd_max as f32 * (1.0 + (body::TIRED_COOLDOWN - 1.0) * u.tiredness())).round() as u32
+    }
+
+    /// Get breath back after acting: most when standing still, little when
+    /// fighting, none behind a raised guard (holding it costs). Pain slows it.
+    fn breathe(&mut self, i: usize) {
+        if !self.human(i) || !self.units[i].alive {
+            return;
+        }
+        let u = &self.units[i];
+        let rest = if u.block_ticks > 0 {
+            0.0
+        } else if (u.stun > 0 || u.last_action == ACT_IDLE) && self.tick >= u.effort + body::BREATHER {
+            1.0
+        } else if matches!(u.last_action, 1..=8) {
+            body::REST_WALKING
+        } else {
+            body::REST_FIGHTING
+        };
+        if u.block_ticks > 0 {
+            self.spend(i, body::COST_HOLD);
+        }
+        let u = &mut self.units[i];
+        let gain = u.recovery * rest * (1.0 - body::PAIN_SLOW * body::pain(u.hp, u.max_hp));
+        u.stamina = (u.stamina + gain).min(u.max_stamina);
+        let t = u.tiredness();
+        u.stats.tired += (t > 0.0) as u32;
+        u.stats.winded += (u.stamina < 1.0) as u32;
+    }
+
     pub fn has_senses(&self, i: usize) -> bool {
         let u = &self.units[i];
         u.kind == Kind::Troop && u.control == Control::External
@@ -877,6 +1023,7 @@ impl World {
             self.mem = vec![FORGOTTEN; n * n];
         }
         let tick = self.tick;
+        let react: Vec<u32> = self.units.iter().map(|u| u.react).collect();
         for i in 0..n {
             if !self.units[i].alive || !self.has_senses(i) {
                 continue;
@@ -891,7 +1038,7 @@ impl World {
                 // Something new (or long forgotten) takes a moment to react to;
                 // what is in view when the battle starts is already noticed.
                 if m.seen == NEVER || (!building && tick > m.seen + MEMORY) {
-                    m.ready = if first_look { 0 } else { tick + REACT };
+                    m.ready = if first_look { 0 } else { tick + react[i] };
                 }
                 *m = Mem { x, y, hp, seen: tick, ready: m.ready };
             }
@@ -1289,6 +1436,19 @@ impl World {
                 }
             }
         }
+        // Body (sim version 10): its own breath and how far wear has
+        // brought its ceiling down, how tired the three enemies above look
+        // (1 if fresh or tireless, 0 if not in sight), and the two nearest
+        // allies (0 if none).
+        let me = &self.units[i];
+        put(&mut o, me.breath());
+        put(&mut o, if me.pool > 0.0 { me.max_stamina / me.pool } else { 1.0 });
+        for s in 0..3 {
+            put(&mut o, es.get(s).filter(|e| e.fresh >= 1.0).map_or(0.0, |e| self.units[e.j].breath()));
+        }
+        for s in 0..2 {
+            put(&mut o, al.get(s).map_or(0.0, |&(j, _)| self.units[j].breath()));
+        }
         debug_assert_eq!(k, OBS_DIM);
         o
     }
@@ -1436,6 +1596,11 @@ impl World {
     }
 
     fn troop_act(&mut self, i: usize, a: u8) {
+        self.troop_do(i, a);
+        self.breathe(i);
+    }
+
+    fn troop_do(&mut self, i: usize, a: u8) {
         {
             let u = &mut self.units[i];
             for t in [&mut u.cd, &mut u.skill_cd, &mut u.block_ticks, &mut u.invuln, &mut u.cloak, &mut u.ward] {
@@ -1463,8 +1628,14 @@ impl World {
             1..=8 => {
                 let (dx, dy) = DIRS[(a - 1) as usize];
                 let u = &self.units[i];
-                let sp = if u.block_ticks > 0 { u.speed * 0.5 } else { u.speed };
+                let sp = if u.block_ticks > 0 { u.speed * 0.5 } else { u.speed } * self.vigour(i);
+                let cost = body::COST_WALK * u.load;
                 self.move_unit(i, dx * sp, dy * sp);
+                // Walking doesn't wear the body down, it just costs breath.
+                if self.human(i) {
+                    let u = &mut self.units[i];
+                    u.stamina = (u.stamina - cost).max(0.0);
+                }
                 self.turn_toward(i, dx, dy);
             }
             ACT_DODGE if m[ACT_DODGE as usize] => {
@@ -1478,6 +1649,7 @@ impl World {
                 u.invuln = DODGE_INVULN;
                 u.move_cd[Move::Dodge as usize] = move_cd(DODGE_CD, u.moves[Move::Dodge as usize]);
                 u.stats.dodges += 1;
+                self.spend(i, body::COST_DODGE);
                 let to = self.pos(i);
                 self.events.push(Event { kind: EventKind::Dodge, from, to });
             }
@@ -1485,6 +1657,7 @@ impl World {
                 let u = &mut self.units[i];
                 u.block_ticks = BLOCK_TICKS;
                 u.move_cd[Move::Block as usize] = move_cd(BLOCK_CD, u.moves[Move::Block as usize]);
+                self.spend(i, body::COST_BLOCK);
             }
             ACT_CHARGE if m[ACT_CHARGE as usize] => self.charge(i),
             ACT_CLOAK if m[ACT_CLOAK as usize] => {
@@ -1492,6 +1665,7 @@ impl World {
                 let p = u.moves[Move::Cloak as usize];
                 u.cloak = (CLOAK_TICKS as f32 * p).round() as u32;
                 u.move_cd[Move::Cloak as usize] = move_cd(CLOAK_CD, p);
+                self.spend(i, body::COST_FOCUS);
                 let at = self.pos(i);
                 self.events.push(Event { kind: EventKind::Cloak, from: at, to: at });
             }
@@ -1508,6 +1682,7 @@ impl World {
                 u.invuln = BLINK_INVULN;
                 u.move_cd[Move::Blink as usize] = move_cd(BLINK_CD, p);
                 u.stats.dodges += 1;
+                self.spend(i, body::COST_FOCUS);
                 let to = self.pos(i);
                 self.events.push(Event { kind: EventKind::Blink, from, to });
             }
@@ -1516,6 +1691,7 @@ impl World {
                 let p = self.units[i].moves[Move::Snare as usize];
                 self.traps.push(Trap { x, y, team, owner: i, power: p, ttl: SNARE_LIFE });
                 self.units[i].move_cd[Move::Snare as usize] = move_cd(SNARE_CD, p);
+                self.spend(i, body::COST_FOCUS);
                 self.events.push(Event { kind: EventKind::TrapSet, from: (x, y), to: (x, y) });
             }
             ACT_WARD if m[ACT_WARD as usize] => {
@@ -1533,6 +1709,7 @@ impl World {
                     self.units[k].ward_power = 0.5 * p;
                 }
                 self.units[i].move_cd[Move::Ward as usize] = move_cd(WARD_CD, p);
+                self.spend(i, body::COST_FOCUS);
                 let at = self.pos(i);
                 self.events.push(Event { kind: EventKind::Ward, from: at, to: at });
             }
@@ -1563,7 +1740,8 @@ impl World {
                     .min(self.units[j].max_hp - self.units[j].hp);
                 self.units[j].hp += amount;
                 self.units[i].stats.heal += amount;
-                self.units[i].cd = self.units[i].cd_max;
+                self.units[i].cd = self.tired_cd(i);
+                self.spend(i, body::COST_SHOT);
                 let (from, to) = (self.pos(i), self.pos(j));
                 self.events.push(Event {
                     kind: EventKind::Heal,
@@ -1605,9 +1783,12 @@ impl World {
     }
 
     fn strike(&mut self, i: usize, j: usize) {
-        self.units[i].cd = self.units[i].cd_max;
+        // A tired troop swings slower and softer, and shoots wider.
+        let (tired, force) = (if self.human(i) { self.units[i].tiredness() } else { 0.0 }, self.force(i));
+        self.units[i].cd = self.tired_cd(i);
         self.units[i].cloak = 0;
         let ranged = self.units[i].range > 2.5;
+        self.spend(i, if ranged { body::COST_SHOT } else { body::COST_SWING });
         let kind = if ranged { EventKind::Arrow } else { EventKind::Melee };
         let (from, to) = (self.pos(i), self.pos(j));
         // Trained troops are not perfect shots: far and moving targets get
@@ -1619,7 +1800,7 @@ impl World {
             } else {
                 let r = (me.dist(t) / me.range).min(1.0);
                 0.04 + 0.2 * r * r + if matches!(t.last_action, 1..=8) { 0.12 } else { 0.0 }
-            };
+            } + body::TIRED_MISS * tired;
             let roll = self.roll(i, j);
             if roll < p {
                 let (dx, dy) = (to.0 - from.0, to.1 - from.1);
@@ -1632,7 +1813,7 @@ impl World {
             }
         }
         self.events.push(Event { kind, from, to });
-        let dmg = self.units[i].dmg;
+        let dmg = self.units[i].dmg * force;
         self.damage(i, j, dmg);
         let splash = self.units[i].splash;
         if splash > 0.0 {
@@ -1663,10 +1844,12 @@ impl World {
         self.units[i].facing = (dx / d, dy / d);
         self.units[i].move_cd[Move::Charge as usize] = move_cd(CHARGE_CD, p);
         self.units[i].cloak = 0;
+        let force = self.force(i);
+        self.spend(i, body::COST_CHARGE);
         let to = self.pos(i);
         self.events.push(Event { kind: EventKind::Charge, from, to });
         if self.units[i].dist(&self.units[j]) <= self.units[i].range + 0.5 {
-            let dmg = self.units[i].dmg * 1.2 * p;
+            let dmg = self.units[i].dmg * 1.2 * p * force;
             self.damage(i, j, dmg);
             self.stun(j, (10.0 * p).round() as u32);
         }
@@ -1714,9 +1897,10 @@ impl World {
     fn use_skill(&mut self, i: usize) {
         let Some(skill) = self.units[i].skill else { return };
         let (team, power) = (self.units[i].team, self.units[i].skill_power);
-        let base = self.units[i].dmg * power;
+        let base = self.units[i].dmg * power * self.force(i);
         let me = self.pos(i);
         self.units[i].skill_cd = self.units[i].skill_cd_max;
+        self.spend(i, body::COST_SKILL);
         self.units[i].stats.skills += 1;
         self.units[i].cloak = 0;
         let mut to = me;

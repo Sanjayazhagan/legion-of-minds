@@ -1,6 +1,7 @@
 //! A trained troop as the player owns it: class, level, brain and history.
 //! Saved as one small JSON file, which is also what gets shared for wars.
 
+use crate::body::conditioning_of;
 use crate::classes::{talents_for_level, ClassSpec};
 use crate::env::EpisodeInfo;
 use crate::nn::Mlp;
@@ -226,9 +227,11 @@ impl Troop {
         practice_of(self.move_xp.get(&m).copied().unwrap_or(0))
     }
 
-    /// Copy move practice and the level's talent reach into the spec the sim reads.
+    /// Copy move practice, the level's talent reach and the body's
+    /// conditioning into the spec the sim reads.
     pub fn sync_moves(&mut self) {
         self.spec.talents = talents_for_level(self.level);
+        self.spec.conditioning = conditioning_of(self.steps);
         for m in Move::ALL {
             self.spec.move_practice[m as usize] = if self.spec.has_move(m) { self.move_practice(m) } else { 0.0 };
         }
