@@ -168,16 +168,17 @@ fn fit(device: String, pts: &[(f64, f64)]) -> PcResult {
 mod tests {
     use super::*;
 
-    /// The 4-core cloud machine this was built on: 2,598 steps/s at 128 and
-    /// 931 at 256 measured; 512 and 1024 measured at 269 and 75.
+    /// The 4-core cloud machine this was built on (sim with 154 inputs):
+    /// 3,081 steps/s at 128 and 952 at 256 measured; 512 and 1024 measured
+    /// at 275 and 83 (`godcore` example `brainbench`).
     fn cloud() -> PcResult {
-        fit("CPU".into(), &[(brain_params(128) as f64, 1e6 / 2598.0), (brain_params(256) as f64, 1e6 / 931.0)])
+        fit("CPU".into(), &[(brain_params(128) as f64, 1e6 / 3081.0), (brain_params(256) as f64, 1e6 / 952.0)])
     }
 
     #[test]
     fn the_fit_predicts_bigger_brains_within_a_tenth() {
         let r = cloud();
-        for (h, measured) in [(512, 269.0), (1024, 75.0)] {
+        for (h, measured) in [(512, 275.0), (1024, 83.0)] {
             let p = r.steps_per_sec(h);
             assert!((p - measured).abs() / measured < 0.12, "{h}: predicted {p:.0}, measured {measured}");
         }

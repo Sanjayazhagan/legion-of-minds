@@ -19,9 +19,9 @@ mod packed {
     use serde::de::{Error, SeqAccess, Visitor};
     use serde::{Deserializer, Serializer};
 
-    /// Lists longer than this are packed. A 256-neuron actor has 104,220
-    /// numbers, its critic about 98k; a 384 one has 200k+.
-    pub const PACK_ABOVE: usize = 110_000;
+    /// Lists longer than this are packed. A 256-neuron actor has about
+    /// 113k numbers (154 inputs), its critic about 106k; a 384 one has 218k.
+    pub const PACK_ABOVE: usize = 150_000;
     const PREFIX: &str = "f32le:";
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

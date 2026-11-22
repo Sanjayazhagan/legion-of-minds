@@ -327,8 +327,10 @@ impl Client {
         borrowed: &[(Loan, (f32, f32))],
     ) -> Result<(Vec<Placement>, Vec<Borrowed>, RaidResult)> {
         let paid = self.me()?.upgrades;
-        let own = canonical_army(&army, paid.town_hall)?;
+        let mut own = canonical_army(&army, paid.town_hall)?;
         paid.check(&own)?;
+        // Start as tired as the server counts the troops for this raid.
+        bag_protocol::apply_rest(&mut own, &m.rest);
         let b: Vec<Borrowed> = borrowed
             .iter()
             .map(|(l, (x, y))| Borrowed {
@@ -566,6 +568,7 @@ fn placements(v: &[(Troop, (f32, f32))]) -> Vec<Placement> {
             troop: t.clone(),
             x: *x,
             y: *y,
+            fatigue: 0.0,
         })
         .collect()
 }

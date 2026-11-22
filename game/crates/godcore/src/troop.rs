@@ -1,6 +1,7 @@
 //! A trained troop as the player owns it: class, level, brain and history.
 //! Saved as one small JSON file, which is also what gets shared for wars.
 
+use crate::body::{conditioning_of, Traits};
 use crate::classes::{talents_for_level, ClassSpec};
 use crate::env::EpisodeInfo;
 use crate::nn::Mlp;
@@ -149,6 +150,22 @@ impl Skills {
     }
 }
 
+/// Tiredness a troop carries between raids (stage C).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Rest {
+    /// Share of the stamina pool missing when the last raid ended.
+    pub carried: f32,
+    /// When that raid ended, in unix seconds.
+    pub since: u64,
+}
+
+/// Unix seconds now (0 if the clock is before 1970).
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Troop {
     pub id: u64,
@@ -186,6 +203,19 @@ pub struct Troop {
     /// can't take "ready to level up" away again.
     #[serde(default)]
     pub plateaued: bool,
+    /// Born with traits rolled from its seed (rules v10). Troops recruited
+    /// before traits existed are average in everything.
+    #[serde(default)]
+    pub born: bool,
+    /// Tiredness carried home from the last raid and when it ended (unix
+    /// seconds). Only this player's own record; online, the server keeps
+    /// its own.
+    #[serde(default)]
+    pub rest: Rest,
+    /// What its team came to mean by each signal (stage D), from the last
+    /// team session it trained in; empty for none, "" where unknown.
+    #[serde(default)]
+    pub signals: Vec<String>,
 }
 
 /// Starting score for actions a grown brain has never tried (dodge, block,
@@ -215,6 +245,45 @@ impl Troop {
             team_steps: 0,
             level_from: Some(0),
             plateaued: false,
+            born: true,
+            rest: Rest::default(),
+            signals: Vec::new(),
+        }
+        .synced()
+    }
+
+    fn synced(mut self) -> Self {
+        self.sync_moves();
+        self
+    }
+
+    /// How tired (share of the pool) this troop would start a raid at
+    /// `now` (unix seconds).
+    pub fn fatigue_at(&self, now: u64) -> f32 {
+        crate::body::rested(self.rest.carried, now.saturating_sub(self.rest.since))
+    }
+
+    /// Seconds until this troop is fully rested.
+    pub fn rest_left(&self, now: u64) -> u64 {
+        crate::body::rest_left(self.rest.carried, now.saturating_sub(self.rest.since))
+    }
+
+    /// What this troop's team means by signal `k`, if it has learned one.
+    pub fn signal_meaning(&self, k: u8) -> Option<&str> {
+        self.signals.get(k as usize).map(String::as_str).filter(|m| !m.is_empty())
+    }
+
+    /// Record how tired a raid that ended at `now` left it.
+    pub fn after_raid(&mut self, carried: f32, now: u64) {
+        self.rest = Rest { carried, since: now };
+    }
+
+    /// What this troop was born with (average for troops from before traits).
+    pub fn traits(&self) -> Traits {
+        if self.born {
+            Traits::roll_for(self.seed, &self.spec)
+        } else {
+            Traits::default()
         }
     }
 
@@ -368,9 +437,12 @@ impl Troop {
         practice_of(self.move_xp.get(&m).copied().unwrap_or(0))
     }
 
-    /// Copy move practice and the level's talent reach into the spec the sim reads.
+    /// Copy move practice, the level's talent reach and the body's
+    /// conditioning into the spec the sim reads.
     pub fn sync_moves(&mut self) {
         self.spec.talents = talents_for_level(self.level);
+        self.spec.conditioning = conditioning_of(self.steps);
+        self.spec.traits = self.traits();
         for m in Move::ALL {
             self.spec.move_practice[m as usize] = if self.spec.has_move(m) { self.move_practice(m) } else { 0.0 };
         }

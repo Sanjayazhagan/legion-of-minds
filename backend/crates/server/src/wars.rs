@@ -438,6 +438,8 @@ pub async fn attack(
         expires_at: expires.to_rfc3339(),
         max_loot: 0,
         kind: bag_protocol::KIND_RAID.into(),
+        // War attacks start fresh: carried tiredness is for raids only.
+        rest: Vec::new(),
     }))
 }
 
