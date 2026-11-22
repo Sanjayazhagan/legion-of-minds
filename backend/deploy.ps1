@@ -269,6 +269,7 @@ tar -czf $Archive -C $Root `
     backend game/Cargo.toml game/Cargo.lock game/crates/godcore
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Packing failed (tar exit $LASTEXITCODE)." -ForegroundColor Red
+    Clear-DeployFiles
     exit 1
 }
 $SizeMb = [math]::Round((Get-Item $Archive).Length / 1MB, 1)
