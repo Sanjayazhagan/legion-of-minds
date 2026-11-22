@@ -286,6 +286,26 @@ async fn raid_flow_is_checked_and_scored() {
         let board = carol.leaderboard(10).unwrap();
         assert_eq!(board.len(), 3);
         assert!(board.windows(2).all(|w| w[0].trophies >= w[1].trophies));
+
+        // Bob's squad came home tired; his next raid starts that tired, as
+        // the server counts it (stage C), and his machine runs the same raid.
+        assert_eq!(out.carried.len(), 3);
+        assert!(out.carried.iter().all(|c| (0.0..=0.4).contains(&c.fatigue)));
+        let m2 = bob.find_match().unwrap();
+        for c in &out.carried {
+            let now = m2.rest.iter().find(|r| r.troop_id == c.troop_id).map_or(0.0, |r| r.fatigue);
+            assert!((now - c.fatigue).abs() <= 0.011, "troop {}: {now} vs {}", c.troop_id, c.fatigue);
+        }
+        let (local, out2) = bob.attack(&m2, army()).unwrap();
+        assert_eq!(out2.client_matched, Some(true));
+        assert_eq!(local, out2.result);
+        let r2 = bob.replay(m2.attack_id).unwrap();
+        let tired: Vec<f32> = r2.army.iter().map(|p| p.fatigue).collect();
+        for c in &out.carried {
+            let k = r2.army.iter().position(|p| p.troop.id == c.troop_id).unwrap();
+            assert!((tired[k] - c.fatigue).abs() <= 0.011, "the replay keeps the start");
+        }
+        assert_eq!(bag_client::bag_protocol::run_raid(&r2.snapshot, &r2.army), out2.result);
     })
     .await;
 }

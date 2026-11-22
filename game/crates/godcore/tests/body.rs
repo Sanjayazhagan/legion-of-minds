@@ -255,3 +255,45 @@ fn heavy_weapons_cost_more_to_swing() {
     let (ds_axe, ds_dag) = (s0 - axe.units[a].stamina, t0 - dag.units[b].stamina);
     assert!(ds_axe > ds_dag + 1.0, "greataxe {ds_axe} vs daggers {ds_dag}");
 }
+
+// ---- Stage C: tiredness carried between raids.
+
+#[test]
+fn raids_leave_troops_tired_and_rest_brings_them_back() {
+    use godcore::battle::Battle;
+    use godcore::body::{carried, rested, rest_left, CARRY_MAX, REST_SECS};
+    use godcore::scenario::BASES;
+    // A worn ceiling comes home, up to the most, in hundredths.
+    assert_eq!(carried(100.0, 100.0), 0.0);
+    assert_eq!(carried(100.0, 77.0), 0.23);
+    assert_eq!(carried(100.0, 50.0), CARRY_MAX);
+    // Four hours of rest take it all away, evenly.
+    assert_eq!(rested(0.3, 0), 0.3);
+    assert_eq!(rested(0.3, REST_SECS / 2), 0.15);
+    assert_eq!(rested(0.3, REST_SECS), 0.0);
+    assert_eq!(rest_left(0.3, 3600), REST_SECS - 3600);
+    assert_eq!(rest_left(0.0, 0), 0);
+
+    let mut t = Troop::new(5, "t".into(), BaseClass::Fighter.spec(), 5);
+    assert_eq!(t.fatigue_at(1_000), 0.0, "recruits start fresh");
+    t.after_raid(0.2, 1_000);
+    assert_eq!(t.fatigue_at(1_000), 0.2);
+    assert_eq!(t.fatigue_at(1_000 + REST_SECS), 0.0);
+    let back = Troop::load_json(&t.save_json()).unwrap();
+    assert_eq!(back.rest, t.rest, "kept in the save");
+
+    // A tired start: less stamina and a lower ceiling, and a different fight.
+    let deploy = vec![(t.clone(), (4.0, 4.0))];
+    let mut fresh = Battle::new(&BASES[0], deploy.clone());
+    let mut tired = Battle::new(&BASES[0], deploy);
+    tired.tire_attackers(&[0.3]);
+    let i = (0..tired.world.units.len()).find(|&i| tired.world.human(i)).unwrap();
+    let u = &tired.world.units[i];
+    assert!((u.max_stamina - u.pool * 0.7).abs() < 1e-4 && u.stamina == u.max_stamina);
+    fresh.tire_attackers(&[0.0]);
+    assert_eq!(fresh.world.units[i].max_stamina, fresh.world.units[i].pool, "zero changes nothing");
+    tired.run();
+    let home = tired.carried_home();
+    assert_eq!(home.len(), 1);
+    assert!(home[0] >= 0.3 - 1e-6 && home[0] <= CARRY_MAX, "goes home at least as tired: {}", home[0]);
+}

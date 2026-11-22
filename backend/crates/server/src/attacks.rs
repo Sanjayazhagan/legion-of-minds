@@ -8,10 +8,11 @@ use crate::players::{load_user, public};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use godcore::body::rested;
 use bag_protocol::{
-    loot, practice_gold, run_raid, shield_share, starter_layout, trophy_swing,
+    apply_rest, loot, practice_gold, run_raid_rested, shield_share, starter_layout, trophy_swing,
     AttackLog, AttackOutcome, AttackSubmit, BaseSnapshot, Match, Placement, PublicPlayer,
-    RaidResult, Replay, User, KIND_PRACTICE, KIND_RAID, KIND_REVENGE, SIM_VERSION,
+    RaidResult, Replay, TroopFatigue, User, KIND_PRACTICE, KIND_RAID, KIND_REVENGE, SIM_VERSION,
     League,
 };
 use sqlx::{Postgres, Transaction};
@@ -66,11 +67,26 @@ async fn open_raid(
     revenge_of: Option<Uuid>,
 ) -> ApiResult<Json<Match>> {
     let attack_id = Uuid::new_v4();
+    // How tired the attacker's troops are right now, fixed for this raid.
+    let rows: Vec<(i64, f32, DateTime<Utc>)> =
+        sqlx::query_as("SELECT troop_id, carried, finished_at FROM troop_rest WHERE user_id = $1")
+            .bind(me.id)
+            .fetch_all(&mut *tx)
+            .await?;
+    let now = Utc::now();
+    let rest: Vec<TroopFatigue> = rows
+        .into_iter()
+        .map(|(id, carried, at)| TroopFatigue {
+            troop_id: id as u64,
+            fatigue: rested(carried, (now - at).num_seconds().max(0) as u64),
+        })
+        .filter(|r| r.fatigue > 0.0)
+        .collect();
     let expires: DateTime<Utc> =
         Utc::now() + chrono::Duration::from_std(st.cfg.attack_window).expect("fits");
     sqlx::query(
-        "INSERT INTO attacks (id, attacker_id, defender_id, snapshot_id, status, expires_at, sim_version, kind, revenge_of)
-         VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8)",
+        "INSERT INTO attacks (id, attacker_id, defender_id, snapshot_id, status, expires_at, sim_version, kind, revenge_of, rest)
+         VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9)",
     )
     .bind(attack_id)
     .bind(me.id)
@@ -80,6 +96,7 @@ async fn open_raid(
     .bind(SIM_VERSION as i32)
     .bind(kind)
     .bind(revenge_of)
+    .bind(serde_json::to_string(&rest).map_err(ApiError::internal)?)
     .execute(&mut *tx)
     .await?;
     let data: String = sqlx::query_scalar("SELECT data FROM snapshots WHERE id = $1")
@@ -102,6 +119,7 @@ async fn open_raid(
         snapshot: parse(&data)?,
         expires_at: expires.to_rfc3339(),
         kind: kind.into(),
+        rest,
     }))
 }
 
@@ -243,9 +261,9 @@ pub async fn submit(
     Path(attack_id): Path<Uuid>,
     SameRulesJson(req): SameRulesJson<AttackSubmit>,
 ) -> ApiResult<Json<AttackOutcome>> {
-    type Row = (Uuid, String, String, DateTime<Utc>, i32, String, Option<Uuid>);
+    type Row = (Uuid, String, String, DateTime<Utc>, i32, String, Option<Uuid>, Option<String>);
     let row: Option<Row> = sqlx::query_as(
-        "SELECT a.defender_id, a.status, s.data, a.expires_at, a.sim_version, a.kind, a.revenge_of
+        "SELECT a.defender_id, a.status, s.data, a.expires_at, a.sim_version, a.kind, a.revenge_of, a.rest
          FROM attacks a JOIN snapshots s ON s.id = a.snapshot_id
          WHERE a.id = $1 AND a.attacker_id = $2",
     )
@@ -253,7 +271,7 @@ pub async fn submit(
     .bind(user.id)
     .fetch_optional(&st.db)
     .await?;
-    let (defender_id, status, data, expires, sim, kind, revenge_of) =
+    let (defender_id, status, data, expires, sim, kind, revenge_of, rest) =
         row.ok_or_else(|| ApiError::not_found("raid"))?;
     if status != "pending" || sim != SIM_VERSION as i32 || expires + chrono::Duration::seconds(GRACE_SECS) < Utc::now() {
         return Err(ApiError::conflict(
@@ -262,14 +280,25 @@ pub async fn submit(
         ));
     }
     let me = load_user(&st.db, user.id).await?;
-    let army = crate::clans::raid_army(&st.db, &me, &req).await?;
+    let mut army = crate::clans::raid_army(&st.db, &me, &req).await?;
     let snapshot: BaseSnapshot = parse(&data)?;
+    // The player's own troops start as tired as they were when the raid
+    // opened; borrowed troops (placed after them) arrive fresh.
+    let rest: Vec<TroopFatigue> = match rest {
+        Some(r) => parse(&r)?,
+        None => Vec::new(),
+    };
+    let own = req.army.len().min(army.len());
+    apply_rest(&mut army[..own], &rest);
 
-    let (result, army) = {
+    let (result, carried, army) = {
         let army = army.clone();
-        tokio::task::spawn_blocking(move || (run_raid(&snapshot, &army), army))
-            .await
-            .map_err(ApiError::internal)?
+        tokio::task::spawn_blocking(move || {
+            let (r, c) = run_raid_rested(&snapshot, &army);
+            (r, c, army)
+        })
+        .await
+        .map_err(ApiError::internal)?
     };
     let client_matched = req
         .client_result
@@ -420,6 +449,18 @@ pub async fn submit(
     .bind(defence_reward)
     .execute(&mut *tx)
     .await?;
+    // How tired the player's own troops went home.
+    for (p, c) in army[..own].iter().zip(&carried) {
+        sqlx::query(
+            "INSERT INTO troop_rest (user_id, troop_id, carried, finished_at) VALUES ($1, $2, $3, now())
+             ON CONFLICT (user_id, troop_id) DO UPDATE SET carried = $3, finished_at = now()",
+        )
+        .bind(user.id)
+        .bind(p.troop.id as i64)
+        .bind(*c)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
 
     Ok(Json(AttackOutcome {
@@ -432,6 +473,11 @@ pub async fn submit(
         client_matched,
         result,
         attacker: load_user(&st.db, user.id).await?,
+        carried: army[..own]
+            .iter()
+            .zip(&carried)
+            .map(|(p, c)| TroopFatigue { troop_id: p.troop.id, fatigue: *c })
+            .collect(),
     }))
 }
 

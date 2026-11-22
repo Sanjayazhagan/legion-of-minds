@@ -219,6 +219,17 @@ A team trained for 1.3M steps at hardness 1 won 97% of hardness-1 drills, 51% at
 
 When there are more units in range than that, healing talents go to the most hurt first, Ward goes to allies under attack first, and damage talents hit the closest first. Built-in enemy bases keep the full reach of 4. The barracks shows each troop's reach, and the level-up message says when it grows.
 
+### Tiredness between raids
+
+| Rule | Detail |
+|---|---|
+| Carried | A troop goes home from a raid as worn as the raid left its stamina ceiling, up to 40% of its pool. Its next raid starts that much short, both in stamina and in ceiling. |
+| Rest | Carried tiredness fades evenly over 4 hours of real time. The squad picker shows "tired 18%", the Barracks "Resting: starts a raid 18% tired, fresh in 2h 15m". |
+| Where it counts | Offline and online raids, revenge and practice raids. Training, drills, defending, cups and clan wars always start fresh, and borrowed clan troops arrive fresh. |
+| Online | The server keeps its own record per player and troop (`troop_rest`), fixes each troop's tiredness when the raid opens (sent in the match), and replaces whatever the client sends. The raid it re-runs, the replay and the player's machine all use the same numbers, in hundredths. |
+
+Brains need no new inputs: a tired start looks like the end of a long fight, which they already see (stamina and worn ceiling).
+
 ### Measured
 
 Paladin + Archer + Healer, 4 seeds at level 1 and 4 at level 5, 300 team drills per check. "Apart" is 600k solo steps per troop; "together" is 300k solo plus 300k team steps, the same total.

@@ -143,6 +143,22 @@ impl Skills {
     }
 }
 
+/// Tiredness a troop carries between raids (stage C).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Rest {
+    /// Share of the stamina pool missing when the last raid ended.
+    pub carried: f32,
+    /// When that raid ended, in unix seconds.
+    pub since: u64,
+}
+
+/// Unix seconds now (0 if the clock is before 1970).
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Troop {
     pub id: u64,
@@ -184,6 +200,11 @@ pub struct Troop {
     /// before traits existed are average in everything.
     #[serde(default)]
     pub born: bool,
+    /// Tiredness carried home from the last raid and when it ended (unix
+    /// seconds). Only this player's own record; online, the server keeps
+    /// its own.
+    #[serde(default)]
+    pub rest: Rest,
 }
 
 /// Starting score for actions a grown brain has never tried (dodge, block,
@@ -214,6 +235,7 @@ impl Troop {
             level_from: Some(0),
             plateaued: false,
             born: true,
+            rest: Rest::default(),
         }
         .synced()
     }
@@ -221,6 +243,22 @@ impl Troop {
     fn synced(mut self) -> Self {
         self.sync_moves();
         self
+    }
+
+    /// How tired (share of the pool) this troop would start a raid at
+    /// `now` (unix seconds).
+    pub fn fatigue_at(&self, now: u64) -> f32 {
+        crate::body::rested(self.rest.carried, now.saturating_sub(self.rest.since))
+    }
+
+    /// Seconds until this troop is fully rested.
+    pub fn rest_left(&self, now: u64) -> u64 {
+        crate::body::rest_left(self.rest.carried, now.saturating_sub(self.rest.since))
+    }
+
+    /// Record how tired a raid that ended at `now` left it.
+    pub fn after_raid(&mut self, carried: f32, now: u64) {
+        self.rest = Rest { carried, since: now };
     }
 
     /// What this troop was born with (average for troops from before traits).

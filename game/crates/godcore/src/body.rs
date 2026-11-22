@@ -352,6 +352,41 @@ pub const TIRED_MISS: f32 = 0.15;
 /// Wear never takes more than this share of the pool.
 pub const WEAR_FLOOR: f32 = 0.5;
 
+/// Tiredness that carries between raids (sim version 10, stage C). The
+/// share of the pool a raid wore away comes back with the troop, up to this
+/// much; then it rests off over `REST_SECS` of real time. Training, drills,
+/// defending and wars ignore it.
+pub const CARRY_MAX: f32 = 0.4;
+/// Real seconds to rest off carried tiredness completely (4 hours).
+pub const REST_SECS: u64 = 4 * 3600;
+
+/// Hundredths, so the client and server agree exactly.
+fn hundredths(x: f32) -> f32 {
+    (x * 100.0).round() / 100.0
+}
+
+/// What a troop that ended a raid with this worn ceiling carries home.
+pub fn carried(pool: f32, max_stamina: f32) -> f32 {
+    if pool <= 0.0 {
+        return 0.0;
+    }
+    hundredths((1.0 - max_stamina / pool).clamp(0.0, CARRY_MAX))
+}
+
+/// What is left of `carried` after resting this many seconds.
+pub fn rested(carried: f32, secs: u64) -> f32 {
+    let left = 1.0 - (secs.min(REST_SECS) as f32) / REST_SECS as f32;
+    hundredths(carried.clamp(0.0, CARRY_MAX) * left)
+}
+
+/// Seconds of rest until a troop carrying this much is fresh again.
+pub fn rest_left(carried: f32, secs: u64) -> u64 {
+    if carried <= 0.0 {
+        return 0;
+    }
+    REST_SECS.saturating_sub(secs)
+}
+
 /// Below this share of health a troop is in pain.
 pub const PAIN_AT: f32 = 0.5;
 /// Speed and recovery lost at the edge of death.

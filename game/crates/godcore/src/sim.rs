@@ -340,6 +340,17 @@ impl Unit {
         self.full_splash = self.splash;
     }
 
+    /// Start a raid already tired: `fatigue` of the pool is missing from
+    /// both the ceiling and the stamina (stage C). Tireless units ignore it.
+    pub fn start_tired(&mut self, fatigue: f32) {
+        if self.pool <= 0.0 {
+            return;
+        }
+        let f = fatigue.clamp(0.0, body::CARRY_MAX);
+        self.max_stamina = self.pool * (1.0 - f);
+        self.stamina = self.max_stamina;
+    }
+
     /// Ammunition left as a share (1 for troops that need none).
     pub fn supply(&self) -> f32 {
         if self.arrows_max > 0.0 {

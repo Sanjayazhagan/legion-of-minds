@@ -10,6 +10,7 @@ use godcore::classes::Role;
 use godcore::scenario::{build_base, can_deploy, BASES, DEPLOY_RADIUS, HOME_NAME, WAVES};
 use godcore::mind::think;
 use godcore::sim::{Control, Kind, Outcome, Team, World, ARENA};
+use godcore::troop::Troop;
 use macroquad::prelude::*;
 
 pub const MAX_SQUAD: usize = 5;
@@ -149,11 +150,21 @@ impl BattleState {
             .enumerate()
             .map(|(k, &i)| (g.troops[i].clone(), (4.0 + 1.5 * k as f32, 4.0)))
             .collect();
-        BattleState::start(
-            Mode::Raid(base),
-            Box::new(move || Battle::new(&BASES[base], deploy.clone())),
-        )
+        BattleState::start(Mode::Raid(base), raid_maker(base, deploy))
     }
+}
+
+/// Builds a raid on an offline base. Each troop starts as tired as it is
+/// now (carried from earlier raids, stage C); that is fixed here so replays
+/// and clips match.
+fn raid_maker(base: usize, deploy: Vec<(Troop, (f32, f32))>) -> Box<dyn Fn() -> Battle> {
+    let now = godcore::troop::unix_now();
+    let fatigue: Vec<f32> = deploy.iter().map(|(t, _)| t.fatigue_at(now)).collect();
+    Box::new(move || {
+        let mut b = Battle::new(&BASES[base], deploy.clone());
+        b.tire_attackers(&fatigue);
+        b
+    })
 }
 
 /// Sim ticks shown per second at 1x. Playing all 20 ticks of a sim second
@@ -260,6 +271,12 @@ impl Game {
                 16.0,
                 MUTED,
             );
+            // Carried tiredness from the last raid (stage C).
+            let tired = t.fatigue_at(godcore::troop::unix_now());
+            if tired > 0.0 {
+                let w = format!("tired {:.0}%", tired * 100.0);
+                text(&w, r.x + r.w - 12.0 - text_width(&w, 16.0), r.y + 28.0, 16.0, BREATH);
+            }
             if self.ui.hover(r) && self.ui.clicked {
                 if on {
                     s.picked.retain(|&x| x != i);
@@ -430,10 +447,7 @@ impl Game {
                 .collect();
             self.fx.clear();
             let b = s.base;
-            return Screen::Battle(BattleState::start(
-                Mode::Raid(b),
-                Box::new(move || Battle::new(&BASES[b], deploy.clone())),
-            ));
+            return Screen::Battle(BattleState::start(Mode::Raid(b), raid_maker(b, deploy)));
         }
         Screen::Deploy(s)
     }
@@ -807,6 +821,14 @@ impl Game {
             self.profile.victories += 1;
         }
         self.store.save_profile(&self.profile);
+        // The squad goes home as tired as the raid left it.
+        let now = godcore::troop::unix_now();
+        for (t, c) in s.battle.troops.iter().zip(s.battle.carried_home()) {
+            if let Some(mine) = self.troops.iter_mut().find(|m| m.id == t.id) {
+                mine.after_raid(c, now);
+                self.store.save_troop(mine);
+            }
+        }
         (stars, gold, new_stars > 0)
     }
 }
