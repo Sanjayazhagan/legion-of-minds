@@ -159,7 +159,7 @@ impl BattleState {
 /// Sim ticks shown per second at 1x. Playing all 20 ticks of a sim second
 /// made troops sprint and hit five times a second; at 6 they move at a
 /// Clash-of-Clans-like pace, a fighter strikes about every 0.7 s, and a full
-/// battle (900 ticks) lasts 2.5 minutes. Only playback changes: results are
+/// battle (1080 ticks) lasts 3 minutes. Only playback changes: results are
 /// the same.
 pub const WATCH_TPS: f32 = 6.0;
 

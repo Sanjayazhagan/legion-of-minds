@@ -6,7 +6,8 @@ use crate::sim::{Control, Ground, Light, Patch, World, ARENA};
 use serde::{Deserialize, Serialize};
 
 pub const DRILL_TICKS: u32 = 500;
-pub const BATTLE_TICKS: u32 = 900;
+/// A raid lasts 1080 ticks: 3 minutes at 1x (rules v10; was 900).
+pub const BATTLE_TICKS: u32 = 1080;
 const C: f32 = ARENA / 2.0;
 const SQUAD_TOWER_R: f32 = 3.5;
 const SQUAD_GUARDS: usize = 5;
