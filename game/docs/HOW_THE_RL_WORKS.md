@@ -230,6 +230,26 @@ When there are more units in range than that, healing talents go to the most hur
 
 Brains need no new inputs: a tired start looks like the end of a long fight, which they already see (stamina and worn ceiling).
 
+### Learned signals
+
+Since rules v10 the seven calls are blank: "Hey!", "Ho!", "Hup!", "Oi!", "Psst!", "Yah!" and "Hai!". Every one carries where the caller stands and what it is looking at (the nearest enemy or enemy building it has noticed within 30 degrees of where it faces, or a spot 6 steps ahead). Listeners get both points (14 new inputs, OBS_DIM 154). Nothing in the rules says what a signal means; a team decides in team training, because using them well wins more drills.
+
+The Team screen works out each signal's meaning after a session, from when the team uses it (looking at an enemy, a building, nothing, or badly hurt) and whether teammates go towards or away from what it points at, and shows it ("Ho! "Hit that building!": teammates went that way 83%"). Troops remember their last team's meanings, and the battle's team talk shows them.
+
+Measured: the 1.2M Fighter, Archer and Mage with a Healer, which had never signalled (fewer than 1 call per drill), team-trained 400k steps each on Auto (it reached hardness 3). Played on 60 hardness-2 team drills:
+
+| Signal | Used when looking at (enemy / building / nothing) | Teammates went that way | Meaning |
+|---|---|---|---|
+| Ho! | 26 / 286 / 18 | 83% (662 heard) | Hit that building! |
+| Hup! | 139 / 271 / 45 | 76% | Hit that building! |
+| Oi! | 101 / 85 / 43 | 75% | Get that one! |
+| Hai! | 15 / 34 / 58 | 76% | This way! |
+| Yah! | 6 / 159 / 82 | 69% | Hit that building! |
+| Psst! | 36 / 37 / 25 | 69% | Hit that building! |
+| Hey! | 4 / 9 / 20 | 66% (96 heard) | This way! |
+
+They went from under 1 to about 53 signals a drill, every signal was followed well above the 50% of a team that ignores it, and team drill wins at hardness 2 went from 94% to 100%. Teams trained with the old fixed calls should get about 400-500k more team steps to relearn.
+
 ### Measured
 
 Paladin + Archer + Healer, 4 seeds at level 1 and 4 at level 5, 300 team drills per check. "Apart" is 600k solo steps per troop; "together" is 300k solo plus 300k team steps, the same total.
