@@ -162,6 +162,14 @@ impl Game {
                 18.0,
                 if t.skills.win >= 0.5 { GOOD } else { MUTED },
             );
+            // Busy troops say so; they can still be selected to watch them.
+            if let Some(l) = self.busy_label(i) {
+                let w = text_width(&l, 15.0) + 14.0;
+                let tag = Rect::new(r.x + r.w - 10.0 - w, r.y + 36.0, w, 20.0);
+                draw_rectangle(tag.x, tag.y, tag.w, tag.h, Color::new(0.12, 0.2, 0.32, 1.0));
+                draw_rectangle_lines(tag.x, tag.y, tag.w, tag.h, 1.0, SKY);
+                text(&l, tag.x + 7.0, tag.y + 15.0, 15.0, TEXT);
+            }
             if self.ui.hover(r) && self.ui.clicked {
                 self.selected = Some(i);
                 self.confirm_release = false;
@@ -249,7 +257,9 @@ impl Game {
         let (ml, mf) = crate::armoury::mastery_progress(ms);
         text(&format!("{}  ·  {} mastery  ·  skill: {}", w.name(), godcore::weapons::MASTERY_TITLES[ml as usize], w.skill_name()), x, y + 8.0, 20.0, ACCENT);
         bar(Rect::new(x, y + 16.0, 300.0, 6.0), mf, ACCENT);
-        let open_armoury = self.ui.button(Rect::new(d.x + d.w - 184.0, y - 14.0, 160.0, 34.0), "Armoury");
+        let busy = self.busy_label(i);
+        let t = &self.troops[i];
+        let open_armoury = self.ui.button_ex(Rect::new(d.x + d.w - 184.0, y - 14.0, 160.0, 34.0), "Armoury", busy.is_none(), false);
         if open_armoury {
             self.confirm_release = false;
             return Screen::Armoury(crate::armoury::ArmouryState { idx: i });
@@ -361,17 +371,29 @@ impl Game {
         y += 164.0;
 
         // Actions
-        let can_train = t.steps_left() > 0;
-        let train_label = if can_train { "Train" } else { "At level cap" };
-        crate::tour::mark("train", Rect::new(x, y, 170.0, 44.0));
         let id = t.id;
         let level = t.level;
+        let in_team = self.team_run_of(id).is_some();
+        let can_train = t.steps_left() > 0 || busy.is_some();
+        let train_label = if in_team {
+            "Watch team"
+        } else if busy.is_some() {
+            "Watch training"
+        } else if can_train {
+            "Train"
+        } else {
+            "At level cap"
+        };
+        crate::tour::mark("train", Rect::new(x, y, 170.0, 44.0));
         if self
             .ui
             .button_ex(Rect::new(x, y, 170.0, 44.0), train_label, can_train, false)
         {
             self.confirm_release = false;
-            return Screen::Train(crate::training::TrainState::new(i, &self.troops[i]));
+            if in_team {
+                return Screen::Team(crate::teamtrain::TeamState::new(self));
+            }
+            return Screen::Train(crate::training::TrainState::new(&self.troops[i]));
         }
         let cost = level_up_cost(level);
         let th_cap = max_troop_level(self.profile.base.town_hall);
@@ -396,7 +418,7 @@ impl Game {
         } else {
             "Release"
         };
-        if self.ui.button(Rect::new(x + 530.0, y, 170.0, 44.0), rl) {
+        if self.ui.button_ex(Rect::new(x + 530.0, y, 170.0, 44.0), rl, busy.is_none(), false) {
             if self.confirm_release {
                 self.store.delete_troop(id);
                 let name = self.troops.remove(i).name;
@@ -411,7 +433,15 @@ impl Game {
                 self.confirm_release = true;
             }
         }
-        if level < MAX_LEVEL && level >= th_cap {
+        if let Some(l) = &busy {
+            text(
+                &format!("{l}. It can't fight, level up or change gear until it's done; everyone else can."),
+                x,
+                y + 64.0,
+                16.0,
+                SKY,
+            );
+        } else if level < MAX_LEVEL && level >= th_cap {
             text(
                 &format!(
                     "Upgrade your Town Hall to {} in Home Base to level up",
@@ -451,6 +481,8 @@ impl Game {
         let th_cap = max_troop_level(self.profile.base.town_hall);
         if level >= MAX_LEVEL {
             ("Max level".to_string(), false)
+        } else if self.is_busy(i) {
+            ("Training...".to_string(), false)
         } else if level >= th_cap {
             ("Needs Town Hall".to_string(), false)
         } else if !self.troops[i].plateau().ready() {
@@ -467,6 +499,8 @@ impl Game {
         let th = self.profile.base.town_hall;
         if t.level >= MAX_LEVEL {
             Some(format!("{} is at the top level.", t.name))
+        } else if self.is_busy(i) {
+            Some(format!("{} is training. Level it up once that ends.", t.name))
         } else if t.level >= max_troop_level(th) {
             Some(format!("Level {} troops need Town Hall {}. Upgrade it in Home.", t.level + 1, t.level))
         } else if !t.plateau().ready() {

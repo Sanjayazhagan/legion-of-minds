@@ -28,7 +28,7 @@ impl SetupState {
             .position(|&s| s < 3)
             .unwrap_or(0);
         let mut picked: Vec<usize> = (0..g.troops.len())
-            .filter(|&i| g.troops[i].spec.role == Role::Attack)
+            .filter(|&i| g.troops[i].spec.role == Role::Attack && !g.is_busy(i))
             .collect();
         picked.sort_by(|&a, &b| {
             g.troops[b]
@@ -225,6 +225,8 @@ impl Game {
         let attackers: Vec<usize> = (0..self.troops.len())
             .filter(|&i| self.troops[i].spec.role == Role::Attack)
             .collect();
+        // Troops that started training since the squad was picked drop out.
+        s.picked.retain(|&i| !self.is_busy(i));
         for (slot, &i) in attackers.iter().enumerate() {
             let t = &self.troops[i];
             let r = Rect::new(
@@ -260,7 +262,9 @@ impl Game {
                 16.0,
                 MUTED,
             );
-            if self.ui.hover(r) && self.ui.clicked {
+            if let Some(l) = self.busy_label(i) {
+                crate::bg::busy_veil(r, &l);
+            } else if self.ui.hover(r) && self.ui.clicked {
                 if on {
                     s.picked.retain(|&x| x != i);
                 } else if s.picked.len() < MAX_SQUAD {
