@@ -9,7 +9,10 @@ param(
     # A domain pointed at the VM (for example game.example.com) turns on
     # HTTPS, which Google sign-in needs. Without one the server answers on
     # http://<VmHost>:<Port>.
-    [string]$Domain = ""
+    [string]$Domain = "",
+    # Deploy without deploy.env (no sign-in keys, no admin page). Only for a
+    # quick test: players can't sign in with Google or Discord without it.
+    [switch]$NoSecrets
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,6 +43,17 @@ if ($Domain -and $Domain -notmatch '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$') 
 }
 if ($Port -lt 1024 -or $Port -gt 65535) {
     Write-Host "Port must be between 1024 and 65535." -ForegroundColor Red
+    exit 1
+}
+# deploy.env holds the sign-in keys and ADMIN_KEY. Stop before doing
+# anything if it's missing, instead of deploying a server nobody can sign in to.
+$DeployEnv = Join-Path $Backend "deploy.env"
+if (-not (Test-Path $DeployEnv) -and -not $NoSecrets) {
+    Write-Host "deploy.env not found in $Backend" -ForegroundColor Red
+    Write-Host "It holds the Google/Discord sign-in keys and ADMIN_KEY. Make it with:" -ForegroundColor Yellow
+    Write-Host "    copy deploy.env.example deploy.env" -ForegroundColor Yellow
+    Write-Host "    notepad deploy.env" -ForegroundColor Yellow
+    Write-Host "then run .\deploy.ps1 again. To deploy without it anyway: .\deploy.ps1 -NoSecrets" -ForegroundColor Yellow
     exit 1
 }
 if (-not (Test-Path $SshKey)) {
@@ -86,7 +100,6 @@ Write-Host "  Upload complete." -ForegroundColor Green
 
 # Server secrets (OAuth keys, ADMIN_KEY), merged into the VM's env file:
 # only the keys in deploy.env are replaced or added.
-$DeployEnv = Join-Path $Backend "deploy.env"
 if (Test-Path $DeployEnv) {
     scp -i $SshKey @SshOpts $DeployEnv "${VmUser}@${VmHost}:/tmp/legion-deploy.env"
     if ($LASTEXITCODE -ne 0) {
@@ -96,7 +109,7 @@ if (Test-Path $DeployEnv) {
     }
     Write-Host "  Server secrets uploaded (deploy.env)." -ForegroundColor Green
 } else {
-    Write-Host "  No deploy.env found - skipping server secrets (see deploy.env.example)." -ForegroundColor DarkYellow
+    Write-Host "  -NoSecrets: deploying without deploy.env (no sign-in keys, no admin page)." -ForegroundColor DarkYellow
 }
 
 # ─── Step 3: Back up, build and restart on the VM ────────────────

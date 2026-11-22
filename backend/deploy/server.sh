@@ -94,6 +94,13 @@ if ! command -v cargo >/dev/null 2>&1; then
   curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null
   . "$HOME/.cargo/env"
 fi
+# rustup can be installed without a default toolchain (then every cargo call
+# fails with "rustup could not choose a version of cargo to run").
+if command -v rustup >/dev/null 2>&1 && ! cargo --version >/dev/null 2>&1; then
+  say "Rust has no default toolchain: installing stable and making it the default"
+  rustup default stable >/dev/null
+fi
+cargo --version >/dev/null 2>&1 || fail "cargo doesn't run on the VM. Try 'rustup default stable' there, then deploy again."
 
 # --- Source and build ----------------------------------------------------
 mkdir -p "$APP/src"
