@@ -186,7 +186,7 @@ fn calls_reach_nearby_teammates_after_a_moment() {
 }
 
 #[test]
-fn new_calls_point_where_they_should() {
+fn every_signal_points_at_what_the_caller_looks_at() {
     let mut w = World::new(900);
     let a = w.add_troop(&BaseClass::Fighter.spec(), 10.0, 10.0, Control::External, 0);
     let _b = w.add_troop(&BaseClass::Archer.spec(), 11.0, 12.0, Control::External, 1);
@@ -204,10 +204,35 @@ fn new_calls_point_where_they_should() {
         }
         e
     };
-    let e = shout(&mut w, ACT_CALL_TOWER);
-    assert_eq!(e.to, (w.units[tower].x, w.units[tower].y), "points at the tower");
-    let e = shout(&mut w, ACT_CALL_GO);
-    assert!(e.to.0 > e.from.0 + 5.0, "points ahead of the caller");
-    let e = shout(&mut w, ACT_CALL_WAIT);
-    assert_eq!(e.to, e.from, "points at the caller");
+    // Blank signals (rules v10): all of them carry the same look-point.
+    for act in [ACT_CALL_TOWER, ACT_CALL_WAIT, ACT_CALL_GO, ACT_CALL_BACK] {
+        w.units[a].facing = (1.0, 0.0);
+        let e = shout(&mut w, act);
+        assert_eq!(e.to, (w.units[tower].x, w.units[tower].y), "the tower it faces");
+    }
+    // Looking away from everything: a spot ahead.
+    w.units[a].facing = (0.0, -1.0);
+    let e = shout(&mut w, ACT_CALL_FOCUS);
+    assert!(e.to.1 < e.from.1 - 5.0 && (e.to.0 - e.from.0).abs() < 1e-4, "ahead: {:?} from {:?}", e.to, e.from);
+}
+
+#[test]
+fn listeners_hear_where_a_signal_came_from() {
+    let mut w = World::new(900);
+    let a = w.add_troop(&BaseClass::Fighter.spec(), 10.0, 10.0, Control::External, 0);
+    let b = w.add_troop(&BaseClass::Archer.spec(), 13.0, 14.0, Control::External, 1);
+    w.add_core(28.0, 28.0);
+    w.step(&[ACT_IDLE; 3]);
+    let mut acts = vec![ACT_IDLE; 3];
+    acts[a] = ACT_CALL_HELP;
+    w.step(&acts);
+    for _ in 0..REACT {
+        w.step(&[ACT_IDLE; 3]);
+    }
+    let o = w.observe(b);
+    let k = (ACT_CALL_HELP - ACT_CALL_FOCUS) as usize;
+    assert!(o[OBS_CALLS + 3 * k + 2] > 0.5, "heard");
+    // The caller's position sits at the end of the view, two per signal.
+    let at = OBS_DIM - 2 * N_CALLS + 2 * k;
+    assert!((o[at] - (10.0 - 13.0) / CALL_RANGE).abs() < 1e-5 && (o[at + 1] - (10.0 - 14.0) / CALL_RANGE).abs() < 1e-5);
 }

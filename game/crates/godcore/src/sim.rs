@@ -24,7 +24,7 @@ pub const SPLASH_BUILDING: f32 = 0.25;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
 pub const SIM_VERSION: u32 = 10;
-pub const OBS_DIM: usize = 140;
+pub const OBS_DIM: usize = 154;
 /// Where the teamwork part of the view starts (the two allies' roles,
 /// threats and actions, sim version 4).
 pub const OBS_TEAM: usize = 74;
@@ -58,23 +58,23 @@ pub const ACT_BLINK: u8 = 17;
 pub const ACT_SNARE: u8 = 18;
 pub const ACT_WARD: u8 = 19;
 pub const ACT_HEAL_2: u8 = 20;
-/// Calls to teammates (sim version 7). What each one comes to mean is up to
-/// the team: troops learn it in training. "Focus" points at the enemy the
-/// caller is looking at; "fall back" and "help" point at the caller.
+/// Signals to teammates. Since rules v10 (stage D) they are blank: each
+/// carries where the caller stands and what it is looking at, and a team
+/// learns in training what each one means. The constant names are kept from
+/// the fixed calls of versions 7 and 8.
 pub const ACT_CALL_FOCUS: u8 = 21;
 pub const ACT_CALL_BACK: u8 = 22;
 pub const ACT_CALL_HELP: u8 = 23;
-/// More calls (sim version 8): "hit the tower" points at the nearest
-/// building the caller sees, "wait" at the caller, "go that way" a few steps
-/// ahead of where the caller faces, and "watch out" at the enemy closest to
-/// the caller's nearest teammate.
 pub const ACT_CALL_TOWER: u8 = 24;
 pub const ACT_CALL_WAIT: u8 = 25;
 pub const ACT_CALL_GO: u8 = 26;
 pub const ACT_CALL_WATCH: u8 = 27;
 pub const N_CALLS: usize = 7;
-/// What each call says, as shown on screen.
-pub const CALL_WORDS: [&str; N_CALLS] = ["Focus!", "Fall back!", "Help!", "Hit the tower!", "Wait!", "Go that way!", "Watch out!"];
+/// What each signal sounds like, as shown on screen. Meaningless until a
+/// team gives it a meaning (see `team::call_reactions`).
+pub const CALL_WORDS: [&str; N_CALLS] = ["Hey!", "Ho!", "Hup!", "Oi!", "Psst!", "Yah!", "Hai!"];
+/// A troop looks at things within 30 degrees of where it faces.
+const LOOK_COS: f32 = 0.866_025_4;
 
 const DODGE_DIST: f32 = 2.4;
 const DODGE_INVULN: u32 = 6;
@@ -1351,6 +1351,31 @@ impl World {
         best
     }
 
+    /// What troop `i` is looking at: the nearest enemy or enemy building it
+    /// has noticed within 30 degrees of its facing, or a spot 6 steps ahead.
+    pub fn look_point(&self, i: usize) -> (f32, f32) {
+        let me = &self.units[i];
+        let (fx, fy) = me.facing;
+        let mut best: Option<(usize, f32)> = None;
+        for (j, u) in self.units.iter().enumerate() {
+            if u.team == me.team || !u.alive || u.cloak > 0 || !self.noticed(i, j) {
+                continue;
+            }
+            let (dx, dy) = (u.x - me.x, u.y - me.y);
+            let d = (dx * dx + dy * dy).sqrt();
+            if d < 1e-3 || (dx * fx + dy * fy) / d < LOOK_COS {
+                continue;
+            }
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((j, d));
+            }
+        }
+        match best {
+            Some((j, _)) => (self.units[j].x, self.units[j].y),
+            None => ((me.x + fx * 6.0).clamp(0.5, ARENA - 0.5), (me.y + fy * 6.0).clamp(0.5, ARENA - 0.5)),
+        }
+    }
+
     /// The nearest fight troop `i` can hear (not one it is standing in):
     /// where, and how far.
     fn heard(&self, i: usize) -> Option<((f32, f32), f32)> {
@@ -1420,7 +1445,8 @@ impl World {
 
     /// The freshest call of each kind troop `i` has heard and had time to
     /// take in: where it points, and how fresh it is.
-    fn heard_calls(&self, i: usize) -> [Option<(f32, f32, f32)>; N_CALLS] {
+    /// Also where the caller stood (rules v10).
+    fn heard_calls(&self, i: usize) -> [Option<(f32, f32, f32, f32, f32)>; N_CALLS] {
         let me = &self.units[i];
         let mut out = [None; N_CALLS];
         let mut best = [0u32; N_CALLS];
@@ -1433,7 +1459,7 @@ impl World {
             let k = c.kind as usize;
             if out[k].is_none() || c.tick > best[k] {
                 best[k] = c.tick;
-                out[k] = Some((c.x, c.y, 1.0 - age as f32 / CALL_LIFE as f32));
+                out[k] = Some((c.x, c.y, 1.0 - age as f32 / CALL_LIFE as f32, c.cx, c.cy));
             }
         }
         out
@@ -1654,9 +1680,10 @@ impl World {
         }
         // Calls from teammates (sim versions 7 and 8): for each kind, where
         // the freshest one points and how fresh it is.
-        for c in self.heard_calls(i) {
+        let heard = self.heard_calls(i);
+        for c in heard {
             match c {
-                Some((x, y, fresh)) => {
+                Some((x, y, fresh, _, _)) => {
                     put(&mut o, (x - me.x) / CALL_RANGE);
                     put(&mut o, (y - me.y) / CALL_RANGE);
                     put(&mut o, fresh);
@@ -1710,6 +1737,12 @@ impl World {
             let (ux, uy, near) = best.map_or((0.0, 0.0, 0.0), |(e, ux, uy)| (ux, uy, 1.0 - e / GROUND_FEEL));
             put(&mut o, ux * near);
             put(&mut o, uy * near);
+        }
+        // Blank signals (stage D): where each one's caller stood.
+        for c in heard {
+            let (dx, dy) = c.map_or((0.0, 0.0), |(_, _, _, cx, cy)| ((cx - me.x) / CALL_RANGE, (cy - me.y) / CALL_RANGE));
+            put(&mut o, dx);
+            put(&mut o, dy);
         }
         debug_assert_eq!(k, OBS_DIM);
         o
@@ -2087,28 +2120,14 @@ impl World {
     }
 
     /// Shout to the team. Calling gives away a cloaked troop.
+    ///
+    /// Signals are blank (rules v10, stage D): every one carries where the
+    /// caller stands and what it is looking at (the nearest enemy or enemy
+    /// building it has noticed within 30 degrees of where it faces, or a
+    /// spot 6 steps ahead). What each signal means is whatever the team learns it means.
     fn call(&mut self, i: usize, kind: u8) {
         let (team, cx, cy) = (self.units[i].team, self.units[i].x, self.units[i].y);
-        let enemy = |u: &Unit| u.team != team;
-        let (x, y) = match kind {
-            0 => self.nearest_noticed(i, enemy).map_or((cx, cy), |(j, _)| self.pos(j)),
-            3 => self.nearest_noticed(i, |u| u.team != team && u.kind.is_building()).map_or((cx, cy), |(j, _)| self.pos(j)),
-            5 => {
-                let (fx, fy) = self.units[i].facing;
-                ((cx + fx * 6.0).clamp(0.5, ARENA - 0.5), (cy + fy * 6.0).clamp(0.5, ARENA - 0.5))
-            }
-            6 => {
-                // The danger closest to the nearest teammate.
-                let mate = self.nearest_noticed(i, |u| u.team == team && u.kind == Kind::Troop);
-                let foe = mate.and_then(|(m, _)| {
-                    (0..self.units.len())
-                        .filter(|&j| self.units[j].alive && !self.units[j].kind.is_building() && self.units[j].cloak == 0 && enemy(&self.units[j]) && self.noticed(i, j))
-                        .min_by(|&a, &b| self.units[m].dist(&self.units[a]).total_cmp(&self.units[m].dist(&self.units[b])).then(a.cmp(&b)))
-                });
-                foe.map_or((cx, cy), |j| self.pos(j))
-            }
-            _ => (cx, cy),
-        };
+        let (x, y) = self.look_point(i);
         self.calls.push(Call { team, from: i, kind, cx, cy, x, y, tick: self.tick });
         // The enemy can hear a shout too.
         self.sounds.push((cx, cy, CALL_RANGE, Some(team)));
@@ -2418,7 +2437,7 @@ impl World {
         self.heard_calls(i)
             .iter()
             .enumerate()
-            .filter_map(|(k, c)| c.map(|(x, y, _)| (k as u8, x, y)))
+            .filter_map(|(k, c)| c.map(|(x, y, _, _, _)| (k as u8, x, y)))
             .collect()
     }
 

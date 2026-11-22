@@ -205,6 +205,10 @@ pub struct Troop {
     /// its own.
     #[serde(default)]
     pub rest: Rest,
+    /// What its team came to mean by each signal (stage D), from the last
+    /// team session it trained in; empty for none, "" where unknown.
+    #[serde(default)]
+    pub signals: Vec<String>,
 }
 
 /// Starting score for actions a grown brain has never tried (dodge, block,
@@ -236,6 +240,7 @@ impl Troop {
             plateaued: false,
             born: true,
             rest: Rest::default(),
+            signals: Vec::new(),
         }
         .synced()
     }
@@ -254,6 +259,11 @@ impl Troop {
     /// Seconds until this troop is fully rested.
     pub fn rest_left(&self, now: u64) -> u64 {
         crate::body::rest_left(self.rest.carried, now.saturating_sub(self.rest.since))
+    }
+
+    /// What this troop's team means by signal `k`, if it has learned one.
+    pub fn signal_meaning(&self, k: u8) -> Option<&str> {
+        self.signals.get(k as usize).map(String::as_str).filter(|m| !m.is_empty())
     }
 
     /// Record how tired a raid that ended at `now` left it.

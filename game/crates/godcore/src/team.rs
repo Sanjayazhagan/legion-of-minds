@@ -498,9 +498,40 @@ pub struct Reaction {
     /// ...and then went towards what it pointed at, or away from it.
     pub toward: u32,
     pub away: u32,
+    /// When the team used it (stage D, learned signals): times the caller
+    /// was looking at an enemy troop, at a building, at nothing in
+    /// particular, and times it was badly hurt (below 40% health).
+    pub used: [u32; 4],
 }
 
+/// The situations a signal is used in, as `Reaction::used` counts them.
+pub const USED_ENEMY: usize = 0;
+pub const USED_BUILDING: usize = 1;
+pub const USED_AHEAD: usize = 2;
+pub const USED_HURT: usize = 3;
+
 impl Reaction {
+    /// What the team has come to mean by this signal, from when it uses it
+    /// and what teammates do on hearing it. None when it is rarely used.
+    pub fn meaning(&self) -> Option<&'static str> {
+        let made: u32 = self.used.iter().sum();
+        if made < 5 {
+            return None;
+        }
+        let k = (0..4).max_by_key(|&k| (self.used[k], 3 - k)).unwrap();
+        // Teammates that back off when it points at an enemy treat it as a warning.
+        let wary = self.followed().map_or(false, |f| f < 0.4);
+        Some(match (k, wary) {
+            (USED_HURT, _) => "Help me!",
+            (USED_ENEMY, true) => "Watch out, there!",
+            (USED_ENEMY, false) => "Get that one!",
+            (USED_BUILDING, true) => "Keep clear of that!",
+            (USED_BUILDING, false) => "Hit that building!",
+            (_, true) => "Not that way!",
+            _ => "This way!",
+        })
+    }
+
     /// Of the listeners that moved, the share that went the way the call
     /// pointed. About 50% means the call meant nothing to them.
     pub fn followed(&self) -> Option<f32> {
@@ -544,6 +575,19 @@ pub fn call_reactions(team: &[(ClassSpec, Mlp)], hardness: u8, drills: u64) -> [
                 if let EventKind::Call(kind) = e.kind {
                     if let Some(from) = (0..k).find(|&j| (w.units[j].x - e.from.0).abs() < 1e-3 && (w.units[j].y - e.from.1).abs() < 1e-3) {
                         made.push((kind, from, e.from, e.to, w.tick));
+                        // What the caller was looking at, and how it was.
+                        let me = &w.units[from];
+                        let seen = w.units.iter().find(|u| u.alive && u.team != me.team && u.x == e.to.0 && u.y == e.to.1);
+                        let used = if me.hp < 0.4 * me.max_hp {
+                            USED_HURT
+                        } else {
+                            match seen {
+                                Some(u) if u.kind.is_building() => USED_BUILDING,
+                                Some(_) => USED_ENEMY,
+                                None => USED_AHEAD,
+                            }
+                        };
+                        out[kind as usize].used[used] += 1;
                     }
                 }
             }

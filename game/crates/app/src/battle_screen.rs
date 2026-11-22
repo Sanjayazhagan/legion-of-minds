@@ -662,9 +662,16 @@ impl Game {
             text("Team talk", rx, y + 14.0, 18.0, TEXT);
             y += 24.0;
             for c in self.fx.calls.iter().rev().take(((H - 110.0 - y) / 22.0).max(0.0) as usize) {
+                // What the caller's team has learned the signal means (stage D).
+                let means = w
+                    .units
+                    .get(c.from)
+                    .filter(|u| u.tag < troops.len() && u.control == Control::External)
+                    .and_then(|u| troops[u.tag].signal_meaning(c.kind))
+                    .map_or(String::new(), |m| format!(" = \"{m}\""));
                 let line = match c.target {
-                    Some(t) => format!("{}: {} ({})", who(c.from), crate::render::call_words(c.kind), who(t)),
-                    None => format!("{}: {}", who(c.from), crate::render::call_words(c.kind)),
+                    Some(t) => format!("{}: {}{means} ({})", who(c.from), crate::render::call_words(c.kind), who(t)),
+                    None => format!("{}: {}{means}", who(c.from), crate::render::call_words(c.kind)),
                 };
                 text(&line, rx + 6.0, y + 14.0, 16.0, crate::render::call_color(c.kind));
                 y += 22.0;

@@ -63,18 +63,18 @@ fn a_hill_lets_you_see_further() {
     assert!(!w.sees(me, foe));
     w.terrain.push(Patch { ground: Ground::Hill, x: 5.0, y: 10.0, r: 2.5 });
     assert!(w.sees(me, foe));
-    assert_eq!(w.observe(me)[OBS_DIM - 5], 1.0, "knows it's on a hill");
+    assert_eq!(w.observe(me)[OBS_DIM - 19], 1.0, "knows it's on a hill");
 }
 
 #[test]
 fn troops_feel_where_the_nearest_mud_is() {
     let (mut w, me, _) = setup(30.0);
-    assert_eq!(w.observe(me)[OBS_DIM - 4], 0.0, "no mud anywhere");
+    assert_eq!(w.observe(me)[OBS_DIM - 18], 0.0, "no mud anywhere");
     // Mud behind it, its edge 2 steps away: felt even while facing away.
     w.terrain.push(Patch { ground: Ground::Mud, x: 1.0, y: 10.0, r: 2.0 });
     let o = w.observe(me);
-    assert!(o[OBS_DIM - 4] < -0.5 && o[OBS_DIM - 3].abs() < 1e-6, "to the west: {} {}", o[OBS_DIM - 4], o[OBS_DIM - 3]);
-    assert_eq!(o[OBS_DIM - 2], 0.0, "no hill");
+    assert!(o[OBS_DIM - 18] < -0.5 && o[OBS_DIM - 17].abs() < 1e-6, "to the west: {} {}", o[OBS_DIM - 18], o[OBS_DIM - 17]);
+    assert_eq!(o[OBS_DIM - 16], 0.0, "no hill");
 }
 
 #[test]

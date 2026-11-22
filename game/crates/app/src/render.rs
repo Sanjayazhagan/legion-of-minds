@@ -42,7 +42,7 @@ pub struct HeardCall {
     /// Unit index of the caller.
     pub from: usize,
     pub kind: u8,
-    /// The enemy a "focus" call points at.
+    /// What the signal points at, if it is a unit.
     pub target: Option<usize>,
     pub at: f64,
 }
@@ -531,7 +531,8 @@ impl Effects {
                     sfx::play(Sfx::Click, fx, 0.5, 0.0);
                     let find = |p: (f32, f32)| w.units.iter().position(|u| u.alive && (u.x - p.0).abs() < 1e-3 && (u.y - p.1).abs() < 1e-3);
                     if let Some(from) = find(e.from) {
-                        let target = if matches!(kind, 0 | 3 | 6) && e.to != e.from { find(e.to) } else { None };
+                        // Every signal points at what the caller looks at (rules v10).
+                        let target = if e.to != e.from { find(e.to) } else { None };
                         self.calls.push(HeardCall { from, kind, target, at: crate::record::now() });
                         let cut = self.calls.len().saturating_sub(8);
                         self.calls.drain(..cut);
