@@ -137,14 +137,15 @@ pub struct Traits {
 
 /// How far each trait can go from average.
 const TRAIT_SPAN: [f32; 8] = [0.08, 0.10, 0.10, 0.15, 0.15, 2.0, 1.0, 0.05];
-/// Drill win points each trait is worth at full span, measured on
-/// 600k-step troops over 2,000 drills each (melee, ranged, caster, other).
-/// Speed, eyesight and reflexes barely matter; strength and toughness do.
+/// Drill win points each trait is worth at full span (melee, ranged,
+/// caster, other): the average of two measurements, 600k-step troops under
+/// the first v10 tuning and 1.2M-step troops under this one, 2,000 drills
+/// each. Speed, eyesight and reflexes barely matter; strength does.
 const TRAIT_VALUE: [[f32; 8]; 4] = [
-    [0.6, 14.4, 11.3, 4.4, 2.0, 0.0, 0.2, 0.0],
-    [1.2, 9.5, 3.8, 0.2, 0.6, 1.8, 0.0, 3.0],
-    [0.0, 7.5, 3.3, 0.2, 0.2, 0.0, 0.6, 2.3],
-    [0.6, 10.5, 6.1, 1.6, 0.9, 0.6, 0.3, 1.8],
+    [0.3, 10.7, 7.6, 2.8, 1.2, 0.0, 0.1, 0.0],
+    [1.3, 12.2, 3.9, 0.6, 1.8, 1.9, 0.0, 4.6],
+    [0.0, 6.5, 4.4, 0.1, 0.1, 0.7, 0.4, 2.0],
+    [0.5, 9.8, 5.3, 1.2, 1.0, 0.9, 0.2, 2.2],
 ];
 
 fn trait_value(class: BaseClass) -> [f32; 8] {
