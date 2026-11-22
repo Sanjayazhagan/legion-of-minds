@@ -20,7 +20,7 @@ pub struct TourState {
 impl TourState {
     pub fn new(g: &Game) -> Self {
         TourState {
-            entrants: attackers(g),
+            entrants: free_attackers(g),
             results: None,
         }
     }
@@ -46,6 +46,11 @@ fn attackers(g: &Game) -> Vec<usize> {
     (0..g.troops.len())
         .filter(|&i| g.troops[i].spec.role == godcore::classes::Role::Attack)
         .collect()
+}
+
+/// Attackers that can enter right now (not training).
+fn free_attackers(g: &Game) -> Vec<usize> {
+    attackers(g).into_iter().filter(|&i| !g.is_busy(i)).collect()
 }
 
 pub struct ReplayState {
@@ -125,7 +130,9 @@ impl Game {
                     16.0,
                     MUTED,
                 );
-                if self.ui.hover(r) && self.ui.clicked {
+                if let Some(l) = self.busy_label(i) {
+                    crate::bg::busy_veil(r, &l);
+                } else if self.ui.hover(r) && self.ui.clicked {
                     if on {
                         s.entrants.retain(|&x| x != i);
                     } else {
@@ -133,6 +140,7 @@ impl Game {
                     }
                 }
             }
+            s.entrants.retain(|&i| !self.is_busy(i));
             if self.ui.button_ex(
                 Rect::new(W - 320.0, H - 80.0, 300.0, 56.0),
                 "Run the cup",

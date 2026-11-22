@@ -9,6 +9,7 @@ mod art;
 mod plan;
 mod record;
 mod barracks;
+mod bg;
 mod battle_screen;
 mod clip;
 mod clan;
@@ -78,6 +79,14 @@ pub struct Game {
     pub go_barracks: bool,
     /// The new player tour's current step, while it is running.
     pub tour: Option<usize>,
+    /// Troops training on their own in the background.
+    pub solo_runs: Vec<training::SoloRun>,
+    /// Teams training together in the background.
+    pub team_runs: Vec<teamtrain::TeamRun>,
+    /// What each troop's last finished session achieved, by troop id.
+    pub train_news: std::collections::HashMap<u64, String>,
+    /// What the last finished team session achieved.
+    pub team_news: Option<teamtrain::TeamNews>,
 }
 
 impl Game {
@@ -145,7 +154,7 @@ fn demo_screen(g: &mut Game) -> Option<Screen> {
     let all: Vec<usize> = (0..g.troops.len().min(5)).collect();
     Some(match which.as_str() {
         "recruit" => Screen::Recruit(recruit::RecruitState::new(g.fresh_name())),
-        "train" => Screen::Train(training::TrainState::demo(0, &g.troops[0])),
+        "train" => Screen::Train(training::TrainState::demo(g, 0)),
         "setup" => Screen::BattleSetup(battle_screen::SetupState::new(g)),
         "deploy" => Screen::Deploy(battle_screen::DeployState::demo(g, 1, all)),
         "battle" => Screen::Battle(battle_screen::BattleState::demo(g, 1, all)),
@@ -299,12 +308,21 @@ async fn main() {
         open_sign_in: false,
         go_barracks: false,
         tour: None,
+        solo_runs: Vec::new(),
+        team_runs: Vec::new(),
+        train_news: Default::default(),
+        team_news: None,
     };
     game.settings = settings::Settings::load(&game.store.home);
     game.settings.apply();
     #[cfg(feature = "cheats")]
     if game.settings.test_mode {
         game.set_test_mode(true);
+    }
+    // Training that was running when the game last closed carries on.
+    // Screenshot and recording runs leave it paused for next time.
+    if std::env::var_os("BAG_SCREEN").is_none() && std::env::var_os("BAG_RECORD").is_none() {
+        game.resume_training();
     }
     if std::env::var("BAG_SCREEN").as_deref() == Ok("settings") {
         game.settings_open = true;
@@ -396,18 +414,16 @@ async fn main() {
                 }
             }
         }
+        game.tick_training();
         game.tour_frame(&screen, click);
         if let Some(n) = save::take_notice() {
             game.toast = Some((n, 6.0));
         }
         game.draw_toast();
         if is_quit_requested() {
-            // Keep a running training session's progress, then everything else.
-            match &mut screen {
-                Screen::Train(s) => game.quit_training(s),
-                Screen::Team(s) => game.quit_team(s),
-                _ => {}
-            }
+            // Keep running training sessions' progress (they carry on next
+            // time), then everything else.
+            game.pause_all_training();
             game.save_all();
             break;
         }

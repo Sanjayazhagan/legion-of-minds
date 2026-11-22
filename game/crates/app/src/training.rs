@@ -1,5 +1,9 @@
 //! Training: PPO runs on a background thread while the screen shows a live
 //! drill played by the newest brain, the learning curve and skill badges.
+//!
+//! A session belongs to the game, not to the screen: leaving the screen
+//! keeps it running, and only the troop being trained is busy until it ends
+//! (see `bg.rs`). Closing the game pauses it, and it carries on next time.
 
 use crate::barracks::fmt_steps;
 use crate::render::{draw_ground, draw_world, View};
@@ -31,7 +35,7 @@ struct Shared {
     done: bool,
 }
 
-struct Job {
+pub(crate) struct Job {
     shared: Arc<Mutex<Shared>>,
     stop: Arc<AtomicBool>,
     target: u64,
@@ -61,12 +65,42 @@ struct Preview {
     end_hold: f32,
 }
 
+/// A troop training on its own in the background.
+pub struct SoloRun {
+    pub id: u64,
+    /// The troop's steps when the session first started (before any pause),
+    /// so the progress bar carries on where it was.
+    pub from: u64,
+    job: Job,
+}
+
+impl SoloRun {
+    /// How far through the session it is, 0 to 1.
+    pub fn progress(&self) -> f32 {
+        let steps = self.job.shared.lock().unwrap().steps;
+        (steps.saturating_sub(self.from)) as f32 / self.job.target.saturating_sub(self.from).max(1) as f32
+    }
+
+    pub fn stop(&self) {
+        self.job.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// The step count the session trains up to.
+    pub fn target(&self) -> u64 {
+        self.job.target
+    }
+
+    /// Seconds left at the current pace, once there is a pace.
+    pub fn eta(&self) -> Option<f32> {
+        let sh = self.job.shared.lock().unwrap();
+        (sh.rate > 0.0).then(|| self.job.target.saturating_sub(sh.steps) as f32 / sh.rate)
+    }
+}
+
 pub struct TrainState {
-    idx: usize,
+    id: u64,
     budget: u64,
-    job: Option<Job>,
     preview: Option<Preview>,
-    finished: Option<String>,
     preview_seed: u64,
     /// The plan being edited in the overlay, if open.
     plan: Option<godcore::classes::TrainPlan>,
@@ -74,14 +108,12 @@ pub struct TrainState {
 }
 
 impl TrainState {
-    pub fn new(idx: usize, t: &Troop) -> Self {
+    pub fn new(t: &Troop) -> Self {
         let left = t.steps_left();
         TrainState {
-            idx,
+            id: t.id,
             budget: left.min(200_000).max(left.min(50_000)),
-            job: None,
             preview: None,
-            finished: None,
             preview_seed: t.seed ^ 77,
             plan: None,
             ed: Default::default(),
@@ -90,9 +122,11 @@ impl TrainState {
 }
 
 impl TrainState {
-    pub fn demo(idx: usize, t: &Troop) -> Self {
-        let mut s = Self::new(idx, t);
-        s.job = Some(spawn(t, t.steps + 200_000, None));
+    pub fn demo(g: &mut Game, idx: usize) -> Self {
+        let t = &g.troops[idx];
+        let s = Self::new(t);
+        let target = t.steps + 200_000;
+        g.solo_runs.push(SoloRun { id: t.id, from: t.steps, job: spawn(t, target, None) });
         s
     }
 }
@@ -167,6 +201,21 @@ impl Game {
         (!v.is_empty()).then(|| Arc::new(v))
     }
 
+    /// Start troop `i` training in the background until it has `target`
+    /// steps in all. `from` is where a paused session first started.
+    pub fn start_solo(&mut self, i: usize, target: u64, from: Option<u64>) {
+        let pool = self.opponents_for(i);
+        let t = &self.troops[i];
+        let target = target.min(t.steps + t.steps_left());
+        if target <= t.steps {
+            return;
+        }
+        let from = from.unwrap_or(t.steps).min(t.steps);
+        let job = spawn(t, target, pool);
+        self.train_news.remove(&t.id);
+        self.solo_runs.push(SoloRun { id: t.id, from, job });
+    }
+
     /// Copy the newest brain and step count from a running session onto the
     /// troop and save it. Safe to call any number of times.
     fn checkpoint_training(&mut self, idx: usize, job: &Job) {
@@ -184,19 +233,55 @@ impl Game {
         self.store.save_troop(&self.troops[idx]);
     }
 
-    /// The game is closing: stop the session and keep what it learned.
-    pub fn quit_training(&mut self, s: &mut TrainState) {
-        if let Some(job) = &s.job {
-            job.stop.store(true, Ordering::Relaxed);
+    /// Called every frame: save running sessions now and then, and wrap up
+    /// the ones that ended, telling the player.
+    pub(crate) fn tick_solo(&mut self) {
+        let mut k = 0;
+        while k < self.solo_runs.len() {
+            let id = self.solo_runs[k].id;
+            let Some(i) = self.index_of(id) else {
+                self.solo_runs[k].stop();
+                self.solo_runs.remove(k);
+                continue;
+            };
+            if self.solo_runs[k].job.shared.lock().unwrap().done {
+                let run = self.solo_runs.remove(k);
+                let msg = self.finish_training(i, run.job);
+                self.toast = Some((msg.clone(), 6.0));
+                self.train_news.insert(id, msg);
+                continue;
+            }
+            if get_time() - self.solo_runs[k].job.saved_at >= CHECKPOINT_SECS {
+                self.solo_runs[k].job.saved_at = get_time();
+                let run = self.solo_runs.remove(k);
+                self.checkpoint_training(i, &run.job);
+                self.solo_runs.insert(k, run);
+            }
+            k += 1;
         }
-        self.finish_training(s);
     }
 
-    fn finish_training(&mut self, s: &mut TrainState) {
-        let Some(job) = s.job.take() else { return };
-        self.checkpoint_training(s.idx, &job);
+    /// Stop every solo session and keep what it learned. Returns what to
+    /// start again later to finish them.
+    pub(crate) fn pause_solo(&mut self) -> Vec<crate::save::Resume> {
+        let mut out = Vec::new();
+        for run in std::mem::take(&mut self.solo_runs) {
+            run.stop();
+            let Some(i) = self.index_of(run.id) else { continue };
+            self.checkpoint_training(i, &run.job);
+            if self.troops[i].steps < run.job.target && self.troops[i].steps_left() > 0 {
+                out.push(crate::save::Resume::Solo { id: run.id, target: run.job.target, from: run.from });
+            }
+        }
+        out
+    }
+
+    /// Wrap up a finished session: keep the brain, count the session and
+    /// say what changed.
+    fn finish_training(&mut self, idx: usize, job: Job) -> String {
+        self.checkpoint_training(idx, &job);
         let sh = job.shared.lock().unwrap();
-        let t = &mut self.troops[s.idx];
+        let t = &mut self.troops[idx];
         let before = job.skills_before;
         if sh.actor.is_some() {
             t.sessions += 1;
@@ -225,33 +310,35 @@ impl Game {
             msg += &format!(". {} mastery: {}", t.weapon().name(), godcore::weapons::MASTERY_TITLES[l as usize]);
         }
         drop(sh);
-        self.store.save_troop(&self.troops[s.idx]);
-        s.finished = Some(msg);
+        self.store.save_troop(&self.troops[idx]);
+        msg
     }
 
     pub fn train(&mut self, mut s: TrainState) -> Screen {
-        let busy = s.job.is_some();
-        if self.header("Training", !busy) {
+        // Training goes on in the background, so the way out is always open.
+        if self.header("Training", true) {
             return Screen::Barracks;
         }
-        if s.job.is_none() {
+        let Some(idx) = self.index_of(s.id) else {
+            return Screen::Barracks;
+        };
+        let run = self.solo_runs.iter().position(|r| r.id == s.id);
+        let in_team = self.team_run_of(s.id).is_some();
+        if run.is_none() && !in_team {
             let label = if s.plan.is_some() { "Close plan" } else { "Training plan" };
             if self.ui.button(Rect::new(760.0, 10.0, 200.0, 32.0), label) {
                 s.plan = match s.plan {
                     Some(_) => None,
-                    None => Some(self.troops[s.idx].spec.plan.unwrap_or_else(|| TrainPlan::default_for(&self.troops[s.idx].spec))),
+                    None => Some(self.troops[idx].spec.plan.unwrap_or_else(|| TrainPlan::default_for(&self.troops[idx].spec))),
                 };
             }
         }
-        let t = &self.troops[s.idx];
+        let t = &self.troops[idx];
         let spec = t.spec.clone();
 
         // ---- Live drill preview (left)
         let view = View::new(Rect::new(20.0, 66.0, 714.0, 714.0));
-        let latest = s
-            .job
-            .as_ref()
-            .and_then(|j| j.shared.lock().unwrap().actor.clone());
+        let latest = run.and_then(|k| self.solo_runs[k].job.shared.lock().unwrap().actor.clone());
         if s.preview.is_none() {
             s.preview_seed = s.preview_seed.wrapping_add(1);
             let mut rng = Rng::new(s.preview_seed);
@@ -378,7 +465,7 @@ impl Game {
         // ---- Right panel
         let rx = 754.0;
         let rw = W - rx - 20.0;
-        let t = &self.troops[s.idx];
+        let t = &self.troops[idx];
         crate::art::draw_portrait(vec2(rx + 24.0, 96.0), 22.0, &t.spec);
         text(&t.name, rx + 56.0, 104.0, 30.0, TEXT);
         text(
@@ -389,12 +476,13 @@ impl Game {
             MUTED,
         );
 
-        let (steps, curve, skills, rate, done) = match &s.job {
+        let job = run.map(|k| &self.solo_runs[k].job);
+        let (steps, curve, skills, rate) = match job {
             Some(j) => {
                 let sh = j.shared.lock().unwrap();
-                (sh.steps, sh.curve.clone(), sh.skills, sh.rate, sh.done)
+                (sh.steps, sh.curve.clone(), sh.skills, sh.rate)
             }
-            None => (t.steps, t.curve.clone(), t.skills, 0.0, false),
+            None => (t.steps, t.curve.clone(), t.skills, 0.0),
         };
         let mut y = 160.0;
         text(
@@ -409,13 +497,14 @@ impl Game {
             steps as f32 / t.cap() as f32,
             SKY,
         );
-        if let Some(j) = &s.job {
-            let f = (steps - j.start) as f32 / (j.target - j.start).max(1) as f32;
+        if let Some(j) = job {
+            let from = self.solo_runs[run.unwrap()].from;
+            let f = (steps.saturating_sub(from)) as f32 / j.target.saturating_sub(from).max(1) as f32;
             bar(Rect::new(rx, y + 30.0, rw, 8.0), f, ACCENT);
             if rate > 0.0 {
                 let eta = (j.target.saturating_sub(steps)) as f32 / rate;
                 text(
-                    &format!("{:.0} steps/s on your CPU, about {:.0}s left", rate, eta),
+                    &format!("{:.0} steps/s, about {} left", rate, fmt_duration(eta)),
                     rx,
                     y + 58.0,
                     18.0,
@@ -497,8 +586,17 @@ impl Game {
         );
         y += 26.0;
 
-        if s.job.is_none() {
-            if let Some(msg) = &s.finished {
+        if in_team {
+            crate::recruit::wrap(
+                &format!("{} is in team training right now. Watch it on the Team training screen; it can train on its own again once that ends.", t.name),
+                rx,
+                y + 20.0,
+                rw,
+                18.0,
+                ACCENT,
+            );
+        } else if run.is_none() {
+            if let Some(msg) = self.train_news.get(&s.id) {
                 crate::recruit::wrap(msg, rx, y + 10.0, rw, 18.0, GOOD);
                 y += 50.0;
             }
@@ -534,8 +632,8 @@ impl Game {
                     }
                     bx += 112.0;
                 }
-                let pool = self.opponents_for(s.idx);
-                let t = &self.troops[s.idx];
+                let pool = self.opponents_for(idx);
+                let t = &self.troops[idx];
                 let share = (t.spec.drills.self_play * 100.0).round();
                 let sp = match &pool {
                     Some(p) if t.spec.role == Role::Defend => format!(
@@ -557,16 +655,24 @@ impl Game {
                     &format!("Start training (+{})", fmt_steps(s.budget)),
                 ) {
                     let target = t.steps + s.budget.min(left);
-                    s.job = Some(spawn(t, target, pool.clone()));
-                    s.finished = None;
+                    self.start_solo(idx, target, None);
                 }
             }
         } else {
+            crate::recruit::wrap(
+                &format!("Training in the background. Go back and raid, build or train others: only {} is busy until it finishes. Closing the game pauses it, and it carries on next time.", t.name),
+                rx,
+                y + 10.0,
+                rw,
+                17.0,
+                MUTED,
+            );
             let stop = Rect::new(rx, H - 80.0, rw, 50.0);
+            let run = &self.solo_runs[run.unwrap()];
             if self.ui.button(stop, "Stop and keep progress") {
-                s.job.as_ref().unwrap().stop.store(true, Ordering::Relaxed);
+                run.stop();
             }
-            if s.job.as_ref().unwrap().stop.load(Ordering::Relaxed) {
+            if run.job.stop.load(Ordering::Relaxed) {
                 text(
                     "Finishing the current update...",
                     rx,
@@ -575,16 +681,8 @@ impl Game {
                     MUTED,
                 );
             }
-            if done {
-                self.finish_training(&mut s);
-            } else if let Some(j) = &mut s.job {
-                if get_time() - j.saved_at >= CHECKPOINT_SECS {
-                    j.saved_at = get_time();
-                    self.checkpoint_training(s.idx, j);
-                }
-            }
         }
-        if s.plan.is_some() && s.job.is_none() {
+        if s.plan.is_some() && run.is_none() && !in_team {
             if self.plan_overlay(&mut s) {
                 s.preview = None;
             }
@@ -605,7 +703,8 @@ impl Game {
         let r = Rect::new(20.0, 66.0, 714.0, 714.0);
         draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.07, 0.075, 0.11, 0.96));
         draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, ACCENT);
-        let t = &self.troops[s.idx];
+        let Some(idx) = self.index_of(s.id) else { return false };
+        let t = &self.troops[idx];
         let (x, w) = (r.x + 30.0, r.w - 60.0);
         text(&format!("Training plan for {}", t.name), x, r.y + 44.0, 28.0, TEXT);
         let mix = t.spec.mix_label();
@@ -626,7 +725,7 @@ impl Game {
         let by = r.y + r.h - 80.0;
         let mut applied = false;
         if self.ui.button_ex(Rect::new(x, by, 250.0, 48.0), "Apply plan", ok, false) {
-            let t = &mut self.troops[s.idx];
+            let t = &mut self.troops[idx];
             let mut ns = ClassSpec::planned(&t.spec.parents, plan).with_gear_of(&t.spec);
             ns.name = t.spec.name.clone();
             t.spec = ns;
@@ -643,6 +742,19 @@ impl Game {
         }
         s.ed.end(&self.ui);
         applied
+    }
+}
+
+/// A wait in words: "40s", "12 min", "2 h 5 min".
+pub fn fmt_duration(secs: f32) -> String {
+    let s = secs.max(0.0).round() as u64;
+    if s < 90 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{} min", (s + 30) / 60)
+    } else {
+        let m = (s + 30) / 60;
+        format!("{} h {} min", m / 60, m % 60)
     }
 }
 

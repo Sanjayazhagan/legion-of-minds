@@ -29,6 +29,32 @@ pub struct Profile {
     /// the tour count as done, so existing players aren't shown it.
     #[serde(default = "yes")]
     pub tour_done: bool,
+    /// Training that was still running when the game closed. It carries on
+    /// in the background the next time the game opens.
+    #[serde(default)]
+    pub training: Vec<Resume>,
+}
+
+/// A background training session to pick up again.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum Resume {
+    /// One troop training until it has `target` steps in all. `from` is
+    /// its step count when the session first started, for the progress bar.
+    Solo {
+        id: u64,
+        target: u64,
+        #[serde(default)]
+        from: u64,
+    },
+    /// Troops training together, each for `left` more steps, after `done`
+    /// steps each before the game closed.
+    Team {
+        ids: Vec<u64>,
+        left: u64,
+        hardness: u8,
+        #[serde(default)]
+        done: u64,
+    },
 }
 
 fn yes() -> bool {
@@ -48,6 +74,7 @@ impl Default for Profile {
             weapons: Vec::new(),
             test: false,
             tour_done: false,
+            training: Vec::new(),
         }
     }
 }
@@ -300,6 +327,22 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn running_training_survives_a_save() {
+        let mut p = Profile::default();
+        p.training = vec![
+            Resume::Solo { id: 3, target: 250_000, from: 50_000 },
+            Resume::Team { ids: vec![1, 2], left: 40_000, hardness: 2, done: 60_000 },
+        ];
+        let back: Profile = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.training, p.training);
+        // Saves from before background training have nothing to carry on with.
+        let mut old = serde_json::to_value(Profile::default()).unwrap();
+        old.as_object_mut().unwrap().remove("training");
+        let old: Profile = serde_json::from_value(old).unwrap();
+        assert!(old.training.is_empty());
+    }
+
     use super::*;
 
     #[test]

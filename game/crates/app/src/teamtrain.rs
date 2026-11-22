@@ -1,6 +1,8 @@
 //! Team training: pick 2 to 5 troops of one side and train them together.
 //! Each keeps its own brain, sees what its teammates are doing, and is
 //! rewarded partly for the team's result, so they learn to cover each other.
+//! Like solo training, a session runs in the background: only its troops
+//! are busy while it goes on.
 
 use crate::barracks::fmt_steps;
 use crate::render::{draw_ground, draw_world, Look, View};
@@ -53,31 +55,77 @@ struct Preview {
     end_hold: f32,
 }
 
+/// Troops training together in the background.
+pub struct TeamRun {
+    pub ids: Vec<u64>,
+    pub side: Role,
+    pub hardness: u8,
+    /// Steps each member trained in this session before a pause.
+    pub done_before: u64,
+    job: Job,
+}
+
+impl TeamRun {
+    /// How far through the session it is, 0 to 1.
+    pub fn progress(&self) -> f32 {
+        let sh = self.job.shared.lock().unwrap();
+        let each = sh.steps.iter().copied().min().unwrap_or(0);
+        (self.done_before + each) as f32 / (self.done_before + self.job.target).max(1) as f32
+    }
+
+    pub fn stop(&self) {
+        self.job.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Steps each member has trained this run, as of the last save.
+    pub fn done(&self) -> u64 {
+        self.job.saved.iter().copied().min().unwrap_or(0)
+    }
+
+    /// Steps each member still has to go, counting from the last save.
+    pub fn left(&self) -> u64 {
+        self.job.target.saturating_sub(self.done())
+    }
+}
+
+/// What the last team session achieved, kept for the Team training screen.
+pub struct TeamNews {
+    pub ids: Vec<u64>,
+    pub msg: String,
+    /// How the team reacted to its calls after the session.
+    pub reactions: Option<[godcore::team::Reaction; godcore::sim::N_CALLS]>,
+}
+
 pub struct TeamState {
     side: Role,
-    members: Vec<usize>,
+    /// The picked troops, by id.
+    members: Vec<u64>,
     budget: u64,
-    job: Option<Job>,
     preview: Option<Preview>,
     seed: u64,
-    finished: Option<String>,
-    /// How the team reacted to its calls after the last session.
-    reactions: Option<[godcore::team::Reaction; godcore::sim::N_CALLS]>,
     /// Drill hardness 1-5, or 0 for auto.
     hardness: u8,
 }
 
 impl TeamState {
+    /// Opens on the selected troop's running team session if it has one.
     pub fn new(g: &Game) -> Self {
-        let side = g.selected.map_or(Role::Attack, |i| g.troops[i].spec.role);
-        TeamState { side, members: Vec::new(), budget: 100_000, job: None, preview: None, seed: 1, finished: None, reactions: None, hardness: 0 }
+        let side = g.selected.and_then(|i| g.troops.get(i)).map_or(Role::Attack, |t| t.spec.role);
+        let mut s = TeamState { side, members: Vec::new(), budget: 100_000, preview: None, seed: 1, hardness: 0 };
+        let mine = g.selected.and_then(|i| g.troops.get(i)).and_then(|t| g.team_run_of(t.id));
+        if let Some(r) = mine.or_else(|| (g.team_runs.len() == 1).then_some(0)).map(|k| &g.team_runs[k]) {
+            s.side = r.side;
+            s.members = r.ids.clone();
+            s.hardness = r.hardness;
+        }
+        s
     }
 
     /// Demo for screenshots: the first troops of the most common side.
     pub fn demo(g: &Game) -> Self {
         let mut s = Self::new(g);
-        let atk: Vec<usize> = (0..g.troops.len()).filter(|&i| g.troops[i].spec.role == Role::Attack).collect();
-        let def: Vec<usize> = (0..g.troops.len()).filter(|&i| g.troops[i].spec.role == Role::Defend).collect();
+        let atk: Vec<u64> = g.troops.iter().filter(|t| t.spec.role == Role::Attack).map(|t| t.id).collect();
+        let def: Vec<u64> = g.troops.iter().filter(|t| t.spec.role == Role::Defend).map(|t| t.id).collect();
         let (side, pick) = if atk.len() >= def.len() { (Role::Attack, atk) } else { (Role::Defend, def) };
         s.side = side;
         s.members = pick.into_iter().take(3).collect();
@@ -136,6 +184,24 @@ impl Game {
         (!v.is_empty()).then(|| Arc::new(v))
     }
 
+    /// Start troops (by index) training together in the background, each
+    /// for `budget` more steps.
+    pub(crate) fn start_team(&mut self, members: &[usize], budget: u64, hardness: u8, done_before: u64) {
+        let Some(&first) = members.first() else { return };
+        let side = self.troops[first].spec.role;
+        let team: Vec<Troop> = members.iter().map(|&i| self.troops[i].clone()).collect();
+        let pool = self.team_opponents(side);
+        let ids: Vec<u64> = team.iter().map(|t| t.id).collect();
+        self.team_news = None;
+        let job = spawn(&team, budget, pool, hardness);
+        self.team_runs.push(TeamRun { ids, side, hardness, done_before, job });
+    }
+
+    /// The team's troops by index, while all of them are still here.
+    fn members_of(&self, ids: &[u64]) -> Option<Vec<usize>> {
+        ids.iter().map(|&id| self.index_of(id)).collect()
+    }
+
     /// Copy the newest brains and steps from a running session onto the
     /// team's troops and save them. Safe to call any number of times.
     fn checkpoint_team(&mut self, members: &[usize], job: &mut Job) {
@@ -158,22 +224,61 @@ impl Game {
         }
     }
 
-    /// The game is closing: stop the session and keep what it learned so far.
-    pub fn quit_team(&mut self, s: &mut TeamState) {
-        if let Some(mut job) = s.job.take() {
-            job.stop.store(true, Ordering::Relaxed);
-            self.checkpoint_team(&s.members, &mut job);
+    /// Called every frame: save running team sessions now and then, and
+    /// wrap up the ones that ended.
+    pub(crate) fn tick_team(&mut self) {
+        let mut k = 0;
+        while k < self.team_runs.len() {
+            let Some(members) = self.members_of(&self.team_runs[k].ids) else {
+                self.team_runs.remove(k).stop();
+                continue;
+            };
+            let done = self.team_runs[k].job.shared.lock().unwrap().done;
+            let due = get_time() - self.team_runs[k].job.saved_at >= crate::training::CHECKPOINT_SECS;
+            if done {
+                let run = self.team_runs.remove(k);
+                if let Some(news) = self.finish_team(&members, run) {
+                    self.toast = Some((news.msg.clone(), 6.0));
+                    self.team_news = Some(news);
+                }
+                continue;
+            }
+            if due {
+                let mut run = self.team_runs.remove(k);
+                run.job.saved_at = get_time();
+                self.checkpoint_team(&members, &mut run.job);
+                self.team_runs.insert(k, run);
+            }
+            k += 1;
         }
     }
 
-    fn finish_team(&mut self, s: &mut TeamState) {
-        let Some(job) = s.job.take() else { return };
+    /// Stop every team session and keep what it learned so far. Returns
+    /// what to start again later to finish them.
+    pub(crate) fn pause_team(&mut self) -> Vec<crate::save::Resume> {
+        let mut out = Vec::new();
+        for mut run in std::mem::take(&mut self.team_runs) {
+            run.stop();
+            let Some(members) = self.members_of(&run.ids) else { continue };
+            self.checkpoint_team(&members, &mut run.job);
+            let done = run.job.saved.iter().copied().min().unwrap_or(0);
+            let left = run.job.target.saturating_sub(done);
+            let room = members.iter().map(|&i| self.troops[i].steps_left()).min().unwrap_or(0);
+            if left > 0 && room > 0 {
+                out.push(crate::save::Resume::Team { ids: run.ids, left: left.min(room), hardness: run.hardness, done: run.done_before + done });
+            }
+        }
+        out
+    }
+
+    fn finish_team(&mut self, members: &[usize], run: TeamRun) -> Option<TeamNews> {
+        let job = run.job;
         let mut sh = job.shared.lock().unwrap();
-        let Some(mut tr) = sh.trainer.take() else { return };
+        let mut tr = sh.trainer.take()?;
         let recent = std::mem::take(&mut sh.recent);
-        s.reactions = sh.reactions.take();
+        let reactions = sh.reactions.take();
         drop(sh);
-        let mut team: Vec<Troop> = s.members.iter().map(|&i| self.troops[i].clone()).collect();
+        let mut team: Vec<Troop> = members.iter().map(|&i| self.troops[i].clone()).collect();
         let steps: Vec<u64> = tr.members.iter().map(|m| m.steps).collect();
         // Checkpoints already counted part of the training.
         for (m, saved) in tr.members.iter_mut().zip(&job.saved) {
@@ -181,45 +286,49 @@ impl Game {
         }
         tr.finish(&mut team, &recent);
         // What the team now means by each signal (stage D).
-        if let Some(rs) = &s.reactions {
+        if let Some(rs) = &reactions {
             let words: Vec<String> = rs.iter().map(|r| r.meaning().unwrap_or("").to_string()).collect();
             for t in team.iter_mut() {
                 t.signals = words.clone();
             }
         }
-        for (k, &i) in s.members.iter().enumerate() {
+        for (k, &i) in members.iter().enumerate() {
             self.troops[i] = team[k].clone();
             self.store.save_troop(&self.troops[i]);
         }
         let won = Skills::from_episodes(&recent).win;
         let names: Vec<&str> = team.iter().map(|t| t.name.as_str()).collect();
-        s.finished = Some(format!(
+        let msg = format!(
             "{} trained together, about {} steps each. Team drill wins in the last {} drills: {:.0}%",
             names.join(", "),
             fmt_steps(steps.iter().sum::<u64>() / steps.len().max(1) as u64),
             recent.len(),
             won * 100.0
-        ));
-        s.preview = None;
+        );
+        Some(TeamNews { ids: run.ids, msg, reactions })
     }
 
     pub fn team_training(&mut self, mut s: TeamState) -> Screen {
-        let busy = s.job.is_some();
-        if self.header("Team training", !busy) {
+        // Training goes on in the background, so the way out is always open.
+        if self.header("Team training", true) {
             return Screen::Barracks;
         }
-        s.members.retain(|&i| i < self.troops.len());
-        let specs: Vec<_> = s.members.iter().map(|&i| self.troops[i].spec.clone()).collect();
+        s.members.retain(|&id| self.index_of(id).is_some());
+        // The picked troops by index, this frame.
+        let mi: Vec<usize> = s.members.iter().filter_map(|&id| self.index_of(id)).collect();
+        let run_k = self.team_runs.iter().position(|r| r.ids == s.members);
+        let busy = run_k.is_some();
+        let specs: Vec<_> = mi.iter().map(|&i| self.troops[i].spec.clone()).collect();
         let ok = team_problem(&specs).is_none();
 
         // ---- Live team drill (left)
         let view = View::new(Rect::new(20.0, 66.0, 714.0, 714.0));
-        let latest: Option<Vec<Mlp>> = s.job.as_ref().map(|j| j.shared.lock().unwrap().actors.clone()).filter(|a| !a.is_empty());
+        let latest: Option<Vec<Mlp>> = run_k.map(|k| self.team_runs[k].job.shared.lock().unwrap().actors.clone()).filter(|a| !a.is_empty());
         if ok {
             if s.preview.is_none() {
                 s.seed = s.seed.wrapping_add(1);
                 let mut rng = Rng::new(s.seed ^ 0x7ea);
-                let level = s.job.as_ref().map_or(s.hardness.max(1), |j| j.shared.lock().unwrap().level.max(1));
+                let level = run_k.map_or(s.hardness.max(1), |k| self.team_runs[k].job.shared.lock().unwrap().level.max(1));
                 let world = if s.side == Role::Defend {
                     let (mut w, from) = build_team_defense(&specs, &mut rng);
                     let n = (specs.len() - 1 + rng.below(2)).max(2) + (level - 1) as usize;
@@ -228,7 +337,7 @@ impl Game {
                 } else {
                     build_team_drill(&specs, level, &mut rng)
                 };
-                let actors = latest.clone().unwrap_or_else(|| s.members.iter().map(|&i| self.troops[i].actor.clone()).collect());
+                let actors = latest.clone().unwrap_or_else(|| mi.iter().map(|&i| self.troops[i].actor.clone()).collect());
                 s.preview = Some(Preview { world, actors, cache: Cache::default(), acc: 0.0, end_hold: 0.0 });
                 self.fx.clear();
             }
@@ -256,7 +365,7 @@ impl Game {
             self.fx.age(dt);
             draw_ground(view, false, true, &p.world);
             let looks: Vec<(crate::art::Figure, String)> =
-                s.members.iter().map(|&i| (crate::art::Figure::of(&self.troops[i].spec), self.troops[i].name.clone())).collect();
+                mi.iter().map(|&i| (crate::art::Figure::of(&self.troops[i].spec), self.troops[i].name.clone())).collect();
             let mine = p.world.units[0].team;
             let all: Vec<usize> = vec![usize::MAX];
             draw_world(view, &p.world, &self.fx, &|i, u| {
@@ -321,8 +430,12 @@ impl Game {
         let max_rows = 9;
         for &i in side_troops.iter().take(max_rows) {
             let t = &self.troops[i];
-            let on = s.members.contains(&i);
+            let on = s.members.contains(&t.id);
+            let id = t.id;
             let r = Rect::new(rx, y, rw, row_h - 4.0);
+            // Busy elsewhere: training alone, or in another team.
+            let away = (!on || !busy).then(|| self.busy_label(i)).flatten();
+            let t = &self.troops[i];
             draw_rectangle(r.x, r.y, r.w, r.h, if on { PANEL_HI } else { PANEL });
             draw_rectangle_lines(r.x, r.y, r.w, r.h, if on { 2.0 } else { 1.0 }, if on { ACCENT } else { LINE });
             crate::art::draw_portrait(vec2(r.x + 18.0, r.y + r.h / 2.0), 14.0, &t.spec);
@@ -330,11 +443,14 @@ impl Game {
             let role = format!("{:?}", godcore::sim::Role::of_spec(&t.spec));
             let left = if t.steps_left() == 0 { "at level cap".to_string() } else { format!("{} left", fmt_steps(t.steps_left())) };
             text(&format!("Lv {} {}  ·  {}  ·  {left}", t.level, t.spec.name, role), r.x + 40.0, r.y + 31.0, 14.0, if t.steps_left() == 0 { ACCENT } else { MUTED });
-            if !busy && self.ui.hover(r) && self.ui.clicked {
+            if let Some(l) = &away {
+                crate::bg::busy_veil(r, l);
+            }
+            if !busy && (on || away.is_none()) && self.ui.hover(r) && self.ui.clicked {
                 if on {
-                    s.members.retain(|&m| m != i);
+                    s.members.retain(|&m| m != id);
                 } else if s.members.len() < MAX_TEAM {
-                    s.members.push(i);
+                    s.members.push(id);
                 }
                 s.preview = None;
             }
@@ -350,8 +466,9 @@ impl Game {
         }
         y += 14.0;
 
-        let left = s.members.iter().map(|&i| self.troops[i].steps_left()).min().unwrap_or(0);
-        if let Some(j) = &s.job {
+        let left = mi.iter().map(|&i| self.troops[i].steps_left()).min().unwrap_or(0);
+        if let Some(k) = run_k {
+            let j = &self.team_runs[k].job;
             let sh = j.shared.lock().unwrap();
             let each = sh.steps.iter().copied().min().unwrap_or(0);
             text(&format!("{} / {} steps each", fmt_steps(each), fmt_steps(j.target)), rx, y + 8.0, 20.0, TEXT);
@@ -365,22 +482,33 @@ impl Game {
             text(&line, rx, y + 48.0, 16.0, MUTED);
             let auto = if s.hardness == 0 { " (auto: harder as the team wins)" } else { "" };
             text(&format!("Drill hardness {} of {MAX_HARDNESS}{auto}", sh.level.max(1)), rx, y + 72.0, 16.0, MUTED);
-            let done = sh.done;
-            drop(sh);
-            let stop = Rect::new(rx, H - 80.0, rw, 50.0);
-            if self.ui.button(stop, "Stop and keep progress") {
-                s.job.as_ref().unwrap().stop.store(true, Ordering::Relaxed);
+            if sh.rate > 0.0 {
+                let each_rate = sh.rate / sh.steps.len().max(1) as f32;
+                let each = sh.steps.iter().copied().min().unwrap_or(0);
+                let eta = j.target.saturating_sub(each) as f32 / each_rate.max(1e-3);
+                text(&format!("About {} left", crate::training::fmt_duration(eta)), rx, y + 96.0, 16.0, MUTED);
             }
-            if done {
-                self.finish_team(&mut s);
-            } else if let Some(j) = &mut s.job {
-                if get_time() - j.saved_at >= crate::training::CHECKPOINT_SECS {
-                    j.saved_at = get_time();
-                    self.checkpoint_team(&s.members, j);
-                }
+            drop(sh);
+            crate::recruit::wrap(
+                "Training in the background. Go back and raid, build or train others: only these troops are busy until it finishes. Closing the game pauses it, and it carries on next time.",
+                rx,
+                y + 124.0,
+                rw,
+                16.0,
+                MUTED,
+            );
+            let stop = Rect::new(rx, H - 80.0, rw, 50.0);
+            let run = &self.team_runs[k];
+            if self.ui.button(stop, "Stop and keep progress") {
+                run.stop();
+            }
+            if run.job.stop.load(Ordering::Relaxed) {
+                text("Finishing the current update...", rx, stop.y - 10.0, 18.0, MUTED);
             }
         } else {
-            if let Some(msg) = &s.finished {
+            let news = self.team_news.as_ref().filter(|n| n.ids == s.members).map(|n| (n.msg.clone(), n.reactions.clone()));
+            let reactions = news.as_ref().and_then(|n| n.1.clone());
+            if let Some((msg, _)) = &news {
                 crate::recruit::wrap(msg, rx, y + 8.0, rw, 17.0, GOOD);
                 y += 60.0;
             }
@@ -388,7 +516,7 @@ impl Game {
                 text(p, rx, y + 10.0, 17.0, MUTED);
             } else if left == 0 {
                 // Name who is capped and fix it right here: level up, or leave out.
-                let capped: Vec<usize> = s.members.iter().copied().filter(|&i| self.troops[i].steps_left() == 0).collect();
+                let capped: Vec<usize> = mi.iter().copied().filter(|&i| self.troops[i].steps_left() == 0).collect();
                 let names: Vec<String> = capped.iter().map(|&i| self.troops[i].name.clone()).collect();
                 let msg = if capped.len() == 1 {
                     let t = &self.troops[capped[0]];
@@ -412,11 +540,12 @@ impl Game {
                     }
                     y += 54.0;
                 }
-                let rest = s.members.len() - capped.len();
+                let rest = mi.len() - capped.len();
                 if rest >= MIN_TEAM {
                     let label = format!("Train without {}", names.join(" and "));
                     if self.ui.button(Rect::new(rx, y, rw, 40.0), &label) {
-                        s.members.retain(|i| !capped.contains(i));
+                        let gone: Vec<u64> = capped.iter().map(|&i| self.troops[i].id).collect();
+                        s.members.retain(|id| !gone.contains(id));
                         s.preview = None;
                     }
                 } else {
@@ -461,7 +590,7 @@ impl Game {
                     hint
                 };
                 text(&hint, rx, y + 152.0, 15.0, MUTED);
-                if let Some(rs) = &s.reactions {
+                if let Some(rs) = &reactions {
                     let used: Vec<(usize, &godcore::team::Reaction)> = rs.iter().enumerate().filter(|(_, r)| r.followed().is_some()).collect();
                     let mut ty = y + 186.0;
                     if ty + 24.0 + 20.0 * used.len() as f32 <= H - 90.0 {
@@ -492,11 +621,9 @@ impl Game {
                         text("Signals start out meaningless; a team decides what each means. 50% is ignoring it.", rx, ty + 6.0, 14.0, MUTED);
                     }
                 }
-                if self.ui.button(Rect::new(rx, H - 80.0, rw, 50.0), &format!("Train together (+{} each)", fmt_steps(s.budget))) {
-                    let team: Vec<Troop> = s.members.iter().map(|&i| self.troops[i].clone()).collect();
-                    let pool = self.team_opponents(s.side);
-                    s.job = Some(spawn(&team, s.budget, pool, s.hardness));
-                    s.finished = None;
+                let free = mi.iter().all(|&i| !self.is_busy(i));
+                if self.ui.button_ex(Rect::new(rx, H - 80.0, rw, 50.0), &format!("Train together (+{} each)", fmt_steps(s.budget)), free, false) {
+                    self.start_team(&mi, s.budget, s.hardness, 0);
                     s.preview = None;
                 }
             }

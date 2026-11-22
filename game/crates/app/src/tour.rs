@@ -152,7 +152,7 @@ fn step(k: usize, g: &Game, screen: &Screen) -> Option<Step> {
                 s(Barracks, "Training", "Training is how a troop gets smarter. Let's give this troop a little more practice: press Train.", Some("train"), Reach(Train), Near, true)
             }
         }
-        8 => s(Train, "Practice drills", "On the left the troop plays practice drills with its newest brain, so you can watch it learn. Press Start training. It runs on your own computer, takes a few seconds here, and you can stop at any time and keep the progress. Press < Back when it is done.", Some("start_training"), Reach(Barracks), At(30.0, 560.0), false),
+        8 => s(Train, "Practice drills", "On the left the troop plays practice drills with its newest brain, so you can watch it learn. Press Start training. It runs on your own computer in the background, so you can press < Back at any time: only this troop is busy until it finishes, and the rest of the game is yours.", Some("start_training"), Reach(Barracks), At(30.0, 560.0), false),
         9 => s(Barracks, "Recruit more troops", "Recruiting costs 50 gold. Pick a class, or mix classes by percentage to make a hybrid, like Mage 50 + Healer 50. Each new troop starts with an untrained brain.", Some("recruit"), Next, Near, true),
         10 => s(Barracks, "Your home base", "Upgrade your Town Hall, place towers and cannons, and train defender troops to protect it against raids.", Some("home"), Next, Near, true),
         11 => s(Barracks, "Tournaments and team training", "Tournament runs your troops through the same raids and ranks them. Team training teaches 2 to 5 troops to fight together and call out to each other.", Some("more"), Next, Near, true),
