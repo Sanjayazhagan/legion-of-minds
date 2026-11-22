@@ -75,32 +75,61 @@ else
   say "No database yet (first deploy): nothing to back up."
 fi
 
-# A Rust release build needs more memory than the smallest VMs have.
+# A Rust release build (and even installing Rust) needs more memory than
+# the smallest VMs have, and the portfolio is using some of it too. Make sure
+# memory plus swap is at least about 5 GB; the kernel otherwise kills the
+# install or build ("Killed").
 mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
 swap_mb=$(awk '/SwapTotal/ {print int($2/1024)}' /proc/meminfo)
-if [ "$mem_mb" -lt 3000 ] && [ "$swap_mb" -lt 1000 ] && [ ! -f /swapfile ]; then
-  say "Only ${mem_mb} MB of memory: adding a 2 GB swap file for the build"
-  $SUDO fallocate -l 2G /swapfile
-  $SUDO chmod 600 /swapfile
-  $SUDO mkswap /swapfile >/dev/null
-  $SUDO swapon /swapfile
-  echo '/swapfile none swap sw 0 0' | $SUDO tee -a /etc/fstab >/dev/null
+want_mb=5000
+if [ $((mem_mb + swap_mb)) -lt $want_mb ] && [ ! -f /swapfile.legion ]; then
+  add_gb=$(( (want_mb - mem_mb - swap_mb + 1023) / 1024 ))
+  [ "$add_gb" -ge 2 ] || add_gb=2
+  free_gb=$(df -BG --output=avail / | tail -n 1 | tr -dc '0-9')
+  if [ "${free_gb:-0}" -lt $((add_gb + 3)) ]; then
+    fail "Only ${mem_mb} MB memory + ${swap_mb} MB swap, and not enough free disk (${free_gb} GB) for a ${add_gb} GB swap file. Free some disk space on the VM."
+  fi
+  say "Only ${mem_mb} MB memory + ${swap_mb} MB swap: adding a ${add_gb} GB swap file for the build"
+  $SUDO fallocate -l "${add_gb}G" /swapfile.legion
+  $SUDO chmod 600 /swapfile.legion
+  $SUDO mkswap /swapfile.legion >/dev/null
+  $SUDO swapon /swapfile.legion
+  echo '/swapfile.legion none swap sw 0 0' | $SUDO tee -a /etc/fstab >/dev/null
 fi
+# Fewer parallel compile jobs on a small VM, so the build doesn't run out of
+# memory: one per 2 GB of RAM, at least 1.
+jobs=$(( mem_mb / 2048 ))
+[ "$jobs" -ge 1 ] || jobs=1
+cpus=$(nproc)
+[ "$jobs" -le "$cpus" ] || jobs=$cpus
 
 # --- Rust ----------------------------------------------------------------
 if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
-if ! command -v cargo >/dev/null 2>&1; then
+if ! command -v rustup >/dev/null 2>&1 && ! command -v cargo >/dev/null 2>&1; then
   say "Installing Rust (rustup, minimal profile)"
-  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null
+  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none >/dev/null
   . "$HOME/.cargo/env"
 fi
-# rustup can be installed without a default toolchain (then every cargo call
-# fails with "rustup could not choose a version of cargo to run").
+# rustup can be left without a working default toolchain: none set ("rustup
+# could not choose a version of cargo to run"), or half installed after an
+# install was killed ("error reading rustc version"). Reinstall stable, small.
 if command -v rustup >/dev/null 2>&1 && ! cargo --version >/dev/null 2>&1; then
-  say "Rust has no default toolchain: installing stable and making it the default"
+  say "Setting up Rust stable (minimal profile)"
+  rustup set profile minimal >/dev/null 2>&1 || true
+  if ! rustup toolchain install stable --profile minimal >/dev/null; then
+    rustup toolchain uninstall stable >/dev/null 2>&1 || true
+    rustup toolchain install stable --profile minimal >/dev/null
+  fi
   rustup default stable >/dev/null
+  if ! cargo --version >/dev/null 2>&1; then
+    # Still broken (for example a half-installed toolchain): start it over.
+    rustup toolchain uninstall stable >/dev/null 2>&1 || true
+    rustup toolchain install stable --profile minimal >/dev/null
+    rustup default stable >/dev/null
+  fi
 fi
-cargo --version >/dev/null 2>&1 || fail "cargo doesn't run on the VM. Try 'rustup default stable' there, then deploy again."
+cargo --version >/dev/null 2>&1 || fail "cargo doesn't run on the VM. Run 'rustup toolchain uninstall stable' there, then deploy again."
+say "Using $(cargo --version), building with $jobs job(s)"
 
 # --- Source and build ----------------------------------------------------
 mkdir -p "$APP/src"
@@ -109,7 +138,7 @@ tar -xzf /tmp/legion-deploy.tar.gz -C "$APP/src"
 rm -f /tmp/legion-deploy.tar.gz
 say "Building the server (the first build takes several minutes)..."
 # The target folder lives outside src so later builds only redo what changed.
-(cd "$APP/src/backend" && CARGO_TARGET_DIR="$APP/target" cargo build --release --locked -p bag-server)
+(cd "$APP/src/backend" && CARGO_TARGET_DIR="$APP/target" CARGO_BUILD_JOBS="$jobs" cargo build --release --locked -j "$jobs" -p bag-server)
 install -m 755 "$APP/target/release/bag-server" "$APP/bag-server.new"
 # Keep the last working server, in case the new one needs rolling back.
 [ -f "$APP/bag-server" ] && cp -f "$APP/bag-server" "$APP/bag-server.prev"
