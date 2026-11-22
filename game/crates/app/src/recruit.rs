@@ -256,7 +256,7 @@ impl Game {
             let i = self.troops.len() - 1;
             self.selected = Some(i);
             self.save_all();
-            return Screen::Train(crate::training::TrainState::new(i, &self.troops[i]));
+            return Screen::Train(crate::training::TrainState::new(&self.troops[i]));
         }
         let why = if !afford {
             Some("Not enough gold. Win battles to earn more.")

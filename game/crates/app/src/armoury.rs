@@ -55,6 +55,10 @@ impl Game {
     }
 
     pub fn armoury(&mut self, s: ArmouryState) -> Screen {
+        if self.is_busy(s.idx) {
+            self.toast("That troop is training. Change its gear once it's done.");
+            return Screen::Barracks;
+        }
         if self.header("Armoury", true) || s.idx >= self.troops.len() {
             return Screen::Barracks;
         }

@@ -757,13 +757,15 @@ fn base_defenders(g: &Game, paid: &Upgrades) -> (Vec<(Troop, (f32, f32))>, usize
 }
 
 /// The army for an online raid: your best attackers that your online
-/// Town Hall allows and that are paid for online.
+/// Town Hall allows, that are paid for online and that aren't training.
 pub(crate) fn raid_army(g: &Game, paid: &Upgrades) -> Vec<(Troop, (f32, f32))> {
     let cap = max_troop_level(paid.town_hall);
     let mut v: Vec<&Troop> = g
         .troops
         .iter()
-        .filter(|t| t.spec.role == Role::Attack && t.level <= cap && paid.blocker(t).is_none() && t.hidden() <= ONLINE_BRAIN_MAX)
+        .enumerate()
+        .filter(|(i, t)| t.spec.role == Role::Attack && t.level <= cap && paid.blocker(t).is_none() && !g.is_busy(*i) && t.hidden() <= ONLINE_BRAIN_MAX)
+        .map(|(_, t)| t)
         .collect();
     v.sort_by(|a, b| {
         b.skills
@@ -1157,7 +1159,10 @@ impl Game {
             .unwrap_or(0);
         match &s.found {
             None => {
-                let line = if borrowed.is_empty() {
+                let training = (0..self.troops.len()).filter(|&i| self.troops[i].spec.role == Role::Attack && self.is_busy(i)).count();
+                let line = if training > 0 && borrowed.is_empty() {
+                    format!("Your army: your best {} attackers ({training} training)", army.len())
+                } else if borrowed.is_empty() {
                     format!("Your army: your best {} attackers", army.len())
                 } else {
                     format!(
@@ -1183,9 +1188,12 @@ impl Game {
                 }
                 if army.is_empty() {
                     let none = !self.troops.iter().any(|t| t.spec.role == Role::Attack);
+                    let all_busy = (0..self.troops.len()).any(|i| self.troops[i].spec.role == Role::Attack && self.is_busy(i));
                     text(
                         if none {
                             "Recruit and train an attacker first."
+                        } else if all_busy {
+                            "Your attackers are training. Raid once one is done."
                         } else {
                             "Your attackers need online upgrades first."
                         },

@@ -49,7 +49,7 @@ pub struct HomeState {
 impl HomeState {
     pub fn new(g: &Game) -> Self {
         let mut picked: Vec<usize> = (0..g.troops.len())
-            .filter(|&i| g.troops[i].spec.role == Role::Defend)
+            .filter(|&i| g.troops[i].spec.role == Role::Defend && !g.is_busy(i))
             .collect();
         picked.truncate(MAX_DEFENDERS);
         let wave = g.profile.waves_held.iter().position(|&h| !h).unwrap_or(0);
@@ -350,6 +350,11 @@ impl Game {
 
     fn home_defend(&mut self, v: View, mut s: HomeState) -> Screen {
         s.picked.retain(|&i| i < self.troops.len());
+        // A defender that started training since it was picked steps out.
+        if s.picked.iter().any(|&i| self.is_busy(i)) {
+            s.picked.retain(|&i| !self.is_busy(i));
+            s.spots.clear();
+        }
         s.spots.truncate(s.picked.len());
         for (k, &(x, y)) in s.spots.iter().enumerate() {
             let t = &self.troops[s.picked[k]];
@@ -437,7 +442,9 @@ impl Game {
                 14.0,
                 MUTED,
             );
-            if self.ui.hover(r) && self.ui.clicked {
+            if let Some(l) = self.busy_label(i) {
+                crate::bg::busy_veil(r, &l);
+            } else if self.ui.hover(r) && self.ui.clicked {
                 toggled = Some(i);
             }
         }
@@ -514,7 +521,7 @@ impl Game {
             }
         }
         let army: Vec<usize> = (0..self.troops.len())
-            .filter(|&i| self.troops[i].spec.role == Role::Attack)
+            .filter(|&i| self.troops[i].spec.role == Role::Attack && !self.is_busy(i))
             .take(MAX_ARMY)
             .collect();
         let ar = Rect::new(rx, y + 120.0, rw, 52.0);

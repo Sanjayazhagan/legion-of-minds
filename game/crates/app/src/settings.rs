@@ -273,8 +273,10 @@ impl Game {
             }
         }
         let br = Rect::new(c.x + c.w - 190.0, c.y + 20.0, 166.0, 40.0);
-        let label = if fresh.is_some() { "Test again" } else { "Test my PC" };
-        if self.ui.button_ex(br, label, running.is_none(), false) {
+        // Training shares the CPU and would make the test read low.
+        let training = self.training_count() > 0;
+        let label = if training { "Training running" } else if fresh.is_some() { "Test again" } else { "Test my PC" };
+        if self.ui.button_ex(br, label, running.is_none() && !training, false) {
             crate::pc_check::start();
         }
     }
@@ -331,10 +333,14 @@ impl Game {
     /// Switch between the real save and the test save.
     #[cfg(feature = "cheats")]
     pub fn set_test_mode(&mut self, on: bool) {
+        // Training belongs to the save it started in: pause it there, and
+        // carry on with the other save's.
+        self.pause_all_training();
         self.save_all();
         self.store = if on { self.store.test_store() } else { self.store.real_store() };
         self.profile = self.store.load_profile();
         self.troops = self.store.load_troops();
+        self.resume_training();
         self.selected = if self.troops.is_empty() { None } else { Some(0) };
         self.settings.test_mode = on;
         self.settings.save(&self.store.home);
