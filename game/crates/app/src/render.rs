@@ -262,7 +262,7 @@ impl Effects {
         }
         // Who got hit this tick: a flash and a small push away from the blow.
         for e in &w.events {
-            if !matches!(e.kind, EventKind::Melee | EventKind::GuardHit | EventKind::Arrow | EventKind::TowerShot | EventKind::Blast) {
+            if !matches!(e.kind, EventKind::Melee | EventKind::GuardHit | EventKind::Arrow | EventKind::TowerShot | EventKind::Blast | EventKind::Shove | EventKind::Throw | EventKind::Rock) {
                 continue;
             }
             if let Some(i) = w.units.iter().position(|u| u.alive && (u.x - e.to.0).abs() < 1e-3 && (u.y - e.to.1).abs() < 1e-3) {
@@ -276,9 +276,10 @@ impl Effects {
         // Who acted this tick: the unit standing where the event started.
         for e in &w.events {
             // Rolls and blinks end where the unit now stands.
-            let moved = matches!(e.kind, EventKind::Dodge | EventKind::Blink | EventKind::Charge | EventKind::Skill(Skill::Shadowstep));
+            let moved = matches!(e.kind, EventKind::Dodge | EventKind::Blink | EventKind::Charge | EventKind::Jump | EventKind::Skill(Skill::Shadowstep));
             let at = match e.kind {
-                EventKind::Death | EventKind::Stun | EventKind::Blocked | EventKind::TrapHit => continue,
+                // A throw starts where the thrown one stood, not the thrower.
+                EventKind::Death | EventKind::Stun | EventKind::Blocked | EventKind::TrapHit | EventKind::Throw => continue,
                 _ if moved => e.to,
                 _ => e.from,
             };
@@ -290,7 +291,7 @@ impl Effects {
                 if matches!(e.kind, EventKind::Blink | EventKind::Skill(Skill::Shadowstep)) {
                     a.jumped = true;
                 }
-                if matches!(e.kind, EventKind::Melee | EventKind::Arrow | EventKind::GuardHit | EventKind::Heal) {
+                if matches!(e.kind, EventKind::Melee | EventKind::Arrow | EventKind::GuardHit | EventKind::Heal | EventKind::Shove | EventKind::Feint | EventKind::Rock) {
                     // Basic hits keep one swing going rather than restarting it.
                     if now - a.last_hit > FIGHT_LINGER + 0.6 {
                         // Start part-way in, so the first blow lands right away.
@@ -305,7 +306,7 @@ impl Effects {
                 }
                 a.acted = now;
                 (a.special, a.skill) = match e.kind {
-                    EventKind::Dodge | EventKind::Blink => (1, None),
+                    EventKind::Dodge | EventKind::Blink | EventKind::Jump => (1, None),
                     EventKind::Skill(s) => (2, Some(s)),
                     EventKind::Ward => (2, Some(Skill::HealingNova)),
                     _ => (0, None),
@@ -543,6 +544,24 @@ impl Effects {
                 EventKind::TrapHit => {
                     sfx::play(Sfx::Trap, tx, 0.9, 0.0);
                     self.burst(PKind::Spark, e.to, 0.2, 8, 3.0, 2.0, 0.3, 0.05, SPARK);
+                }
+                EventKind::Shove => {
+                    sfx::play(Sfx::BluntHit, tx, 0.7, 0.0);
+                    self.burst(PKind::Dust, e.to, 0.1, 3, 1.2, 0.2, 0.6, 0.35, Color::new(0.75, 0.68, 0.55, 1.0));
+                }
+                EventKind::Jump => {
+                    sfx::play(Sfx::Dodge, fx, 0.6, 0.0);
+                    self.burst(PKind::Dust, e.to, 0.1, 4, 1.0, 0.2, 0.6, 0.35, Color::new(0.75, 0.68, 0.55, 1.0));
+                }
+                EventKind::Feint => sfx::play(Sfx::Dodge, fx, 0.35, 0.0),
+                EventKind::Throw => {
+                    sfx::play(Sfx::BluntHit, tx, 0.9, 0.1);
+                    self.shake = self.shake.max(0.12);
+                    self.burst(PKind::Dust, e.to, 0.2, 6, 1.6, 0.3, 0.8, 0.45, Color::new(0.7, 0.64, 0.52, 1.0));
+                }
+                EventKind::Rock => {
+                    sfx::play(Sfx::BowRelease, fx, 0.35, 0.0);
+                    sfx::play(Sfx::StoneHit, tx, 0.5, 0.25);
                 }
                 EventKind::Death => {}
             }
@@ -1940,7 +1959,9 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             let k = ((now - a.born) as f32 / 0.45).clamp(0.0, 1.0);
             1.0 - (-6.0 * k).exp() * (11.0 * k).cos() * (1.0 - k)
         };
-        if !draw_character_ex(lib, &fig, npc, pos, heading, pose, CHAR_SCALE * pop.max(0.05), extra, Some(&mut blends[i])) {
+        // A crouching troop is drawn a little smaller (rules v11).
+        let crouch = if u.crouch > 0 && u.alive { 0.8 } else { 1.0 };
+        if !draw_character_ex(lib, &fig, npc, pos, heading, pose, CHAR_SCALE * pop.max(0.05) * crouch, extra, Some(&mut blends[i])) {
             flat.push(i);
         }
     }
@@ -1957,6 +1978,7 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
                     Some(1) => (3.0, "ball", 0.25),
                     _ => (3.6, "arrow", 0.2),
                 },
+                EventKind::Rock => (1.4, "ball", 0.3),
                 _ => continue,
             };
             let k = (age / dur).min(1.0);
@@ -1970,7 +1992,12 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             if let Some(m) = lib.models.get(model) {
                 let d = (b - a).normalize_or_zero();
                 let rot = Quat::from_rotation_arc(Vec3::Y, d);
-                m.draw_static(Mat4::from_scale_rotation_translation(Vec3::splat(if model == "ball" { 1.6 } else { 0.9 }), rot, p), WHITE);
+                let size = match (model, e.kind) {
+                    (_, EventKind::Rock) => 0.6,
+                    ("ball", _) => 1.6,
+                    _ => 0.9,
+                };
+                m.draw_static(Mat4::from_scale_rotation_translation(Vec3::splat(size), rot, p), WHITE);
             }
         }
     }
@@ -2232,7 +2259,7 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
                 let p = v.p3(e.to.0, e.to.1, 0.5);
                 draw_circle_lines(p.x, p.y, 6.0 + 30.0 * age, 3.0, Color::new(1.0, 0.8, 0.4, a));
             }
-            EventKind::Dodge => {
+            EventKind::Dodge | EventKind::Jump => {
                 // Dust puffs along the roll.
                 for j in 0..5 {
                     let q = v.p3(e.from.0 + (e.to.0 - e.from.0) * j as f32 / 4.0, e.from.1 + (e.to.1 - e.from.1) * j as f32 / 4.0, 0.1);

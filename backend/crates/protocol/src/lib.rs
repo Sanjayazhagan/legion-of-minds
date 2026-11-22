@@ -1125,7 +1125,7 @@ mod tests {
 
     #[test]
     fn team_training_is_kept_and_raids_match() {
-        assert_eq!(godcore::sim::SIM_VERSION, 10);
+        assert_eq!(godcore::sim::SIM_VERSION, 11);
         let mut a = army();
         a[0].troop.team_steps = 120_000;
         let c = canonical_army(&a, 1).unwrap();
@@ -1167,7 +1167,12 @@ mod tests {
         for h in HIDDEN_SIZES.into_iter().filter(|&h| h <= LEVEL_BRAIN_MAX) {
             let mut a = army();
             assert!(a[0].troop.set_brain(h), "{h}");
-            let c = canonical_army(&a, 1).unwrap();
+            // The human moves a troop may use come from its brain, not
+            // from whatever its file says.
+            let mut forged = a.clone();
+            forged[0].troop.spec.move_tier = 4;
+            let c = canonical_army(&forged, 1).unwrap();
+            assert_eq!(c[0].troop.spec.move_tier, godcore::human_moves::tier_for_brain(h));
             assert_eq!(c[0].troop.actor.dims[1], h);
             assert_eq!(c[0].troop.brain, Some(h));
             assert_eq!(run_raid(&s, &a), run_raid(&s, &c), "{h}");

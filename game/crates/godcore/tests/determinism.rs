@@ -78,9 +78,10 @@ fn golden_fingerprint() {
     );
 }
 
-/// Sim version 10 (human limits: stamina, wear, pain and class bodies;
-/// injuries, supplies, traits, weapon weight, light, terrain, noise, blank signals; 154 inputs, 28 actions).
-const GOLDEN: u64 = 0x18d3_34d2_82f1_c567;
+/// Sim version 11 (human moves unlocked by brain size: sprint, sneak,
+/// back-step, strafe, shove, crouch, jump, parry, feint, grab, rock; 162
+/// inputs, 40 actions). Version 10 added human limits.
+const GOLDEN: u64 = 0xf364_bd8a_6945_819e;
 
 /// The battle rules are locked at the launch version. Online bases, server
 /// re-checks and every player's trained brains depend on them, so a change
@@ -91,7 +92,7 @@ fn rules_are_locked() {
     use godcore::sim::{N_ACTIONS, OBS_DIM, SIM_VERSION};
     assert_eq!(
         (SIM_VERSION, OBS_DIM, N_ACTIONS, GOLDEN),
-        (10, 154, 28, 0x18d3_34d2_82f1_c567),
+        (11, 162, 40, 0xf364_bd8a_6945_819e),
         "battle rules changed: bump SIM_VERSION and read docs/RELEASING.md first"
     );
 }

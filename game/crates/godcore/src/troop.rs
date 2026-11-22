@@ -443,6 +443,7 @@ impl Troop {
         self.spec.talents = talents_for_level(self.level);
         self.spec.conditioning = conditioning_of(self.steps);
         self.spec.traits = self.traits();
+        self.spec.move_tier = crate::human_moves::tier_for_brain(self.hidden());
         for m in Move::ALL {
             self.spec.move_practice[m as usize] = if self.spec.has_move(m) { self.move_practice(m) } else { 0.0 };
         }
@@ -477,6 +478,8 @@ impl Troop {
         // An old pick the level has caught up with is just the level's size
         // now; keeping it would make the server think the brain doesn't match.
         self.brain = self.brain.filter(|&b| b > hidden_for_level(self.level));
+        // The human moves the brain unlocks follow its size.
+        self.spec.move_tier = crate::human_moves::tier_for_brain(self.hidden());
         changed
     }
 

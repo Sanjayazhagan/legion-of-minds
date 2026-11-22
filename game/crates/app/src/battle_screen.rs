@@ -882,6 +882,16 @@ pub fn action_name(a: u8) -> &'static str {
         9 => "fighting",
         10 => "hitting a building",
         11 => "healing",
+        28 => "sprinting",
+        29 => "sneaking",
+        30..=32 => "moving",
+        33 => "shoving",
+        34 => "crouching",
+        35 => "jumping",
+        36 => "parrying",
+        37 => "feinting",
+        38 => "grappling",
+        39 => "throwing a rock",
         _ => "",
     }
 }

@@ -90,6 +90,18 @@ pub fn action_words(w: &World, t: &Thought, a: u8, who: &dyn Fn(usize) -> String
         sim::ACT_CALL_FOCUS..=sim::ACT_CALL_WATCH => {
             format!("Shout \"{}\"", call_words(a - sim::ACT_CALL_FOCUS))
         }
+        sim::ACT_SPRINT => "Break into a sprint".into(),
+        sim::ACT_SNEAK => "Sneak quietly".into(),
+        sim::ACT_BACKSTEP => format!("Step back from{}, still facing it", on(target)),
+        sim::ACT_STRAFE_L => format!("Circle left around{}", on(target)),
+        sim::ACT_STRAFE_R => format!("Circle right around{}", on(target)),
+        sim::ACT_SHOVE => format!("Shove{}", on(target)),
+        sim::ACT_CROUCH => "Crouch low".into(),
+        sim::ACT_JUMP => "Jump forward".into(),
+        sim::ACT_PARRY => "Get ready to parry".into(),
+        sim::ACT_FEINT => format!("Fake a swing at{}", on(target)),
+        sim::ACT_GRAB => format!("Grab and throw{}", on(target)),
+        sim::ACT_ROCK => format!("Throw a rock at{}", on(target)),
         _ => "?".into(),
     }
 }
