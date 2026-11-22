@@ -271,6 +271,13 @@ impl Game {
         let kit = t.spec.moves();
         let moves: Vec<String> = kit.iter().map(|m| format!("{} {:.0}%", m.name(), t.move_practice(*m) * 100.0)).collect();
         text(&format!("Moves practised: {}", if moves.is_empty() { "none".to_string() } else { moves.join(", ") }), x, y + 8.0, 18.0, TEXT);
+        // Human moves its brain has unlocked (rules v11).
+        let have = godcore::human_moves::unlocked(t.hidden()).len();
+        let human = match godcore::human_moves::next_unlock(t.hidden()) {
+            Some((need, next)) => format!("Human moves: {have} of {} (next {} at {need} neurons)", godcore::sim::N_HUMAN, next.len()),
+            None => format!("Human moves: all {}", godcore::sim::N_HUMAN),
+        };
+        text(&human, d.x + d.w - 24.0 - text_width(&human, 16.0), y + 8.0, 16.0, MUTED);
         y += 24.0;
         // The body training has built (human limits, rules v10).
         let b = godcore::body::Body::of(&t.spec);

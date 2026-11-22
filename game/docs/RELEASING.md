@@ -2,7 +2,7 @@
 
 ## The battle rules are locked
 
-Since launch, the battle rules are frozen at **SIM_VERSION 10** (v10 added human limits: stamina, wear, pain and class bodies). Players' trained troops, every published base and the server's raid checks all depend on them: a battle has to replay bit for bit on the player's machine and on the server.
+The battle rules are frozen at **SIM_VERSION 11** (v10 added human limits: stamina, wear, pain and class bodies; v11 added human moves unlocked by brain size: sprint, sneak, back-step, strafe, shove, crouch, jump, parry, feint, grab and throw, throwing rocks). Players' trained troops, every published base and the server's raid checks all depend on them: a battle has to replay bit for bit on the player's machine and on the server.
 
 A change counts as a rules change if it changes any battle result (the golden fingerprint in `crates/godcore/tests/determinism.rs`), what a troop sees (`OBS_DIM`) or what it can do (`N_ACTIONS`). The `rules_are_locked` test fails on any of these.
 

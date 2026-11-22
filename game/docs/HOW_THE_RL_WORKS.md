@@ -72,6 +72,15 @@ Past level 5 the brain can keep growing up to 2048 neurons, limited only by how 
 
 Time per step fits fixed cost + cost per brain number within about 10%, which is how the game predicts sizes it doesn't time. Memory is never the limit (a 2048 brain trains in under half a GB); time is.
 
+**Human moves (rules v11).** Bigger brains unlock new moves (see the README). Measured with `cargo run --release -p godcore --example movecost` (a 256-neuron Fighter, drills, same seed both ways):
+
+| | +100k | +200k | +300k steps |
+|---|---|---|---|
+| Still locked | 12.0% wins | 15.4% | 16.7% |
+| Strafe, shove, crouch (+ sprint, sneak, back-step) unlocked | 12.7% | 16.4% | 18.1% |
+
+Unlocking costs nothing: the troop doesn't get worse first, because new outputs start at a low score and locked moves were never in its way. It picks the new moves up on its own (about 10% of its turns after 300k steps), and drill wins were 1 to 2 points higher, which is inside the noise of ~500 drills. Against the drill bases' scripted guards the moves don't make a big difference yet; feints, parries and strafing matter most against other trained troops (raids against trained defenders, wars, the cup). With only Sprint/Sneak/Back-step unlocked it used them on about 1% of turns after 500k steps.
+
 A second network of the same size, the "critic", guesses how well things are going. It is only used during training, to judge whether a move turned out better or worse than expected.
 
 The game uses no machine-learning library. The network, its learning and the battle simulation are all plain Rust in the game itself, and run on the CPU.
