@@ -271,7 +271,15 @@ fn main() {
             let team: Vec<_> = troops.iter().map(|t| (t.spec.clone(), t.actor.clone())).collect();
             for (k, r) in godcore::team::call_reactions(&team, hardness, n).iter().enumerate() {
                 let f = r.followed().map_or("-".to_string(), |f| format!("{:.0}%", f * 100.0));
-                println!("{:<16} heard {:>5}  toward {:>5}  away {:>5}  followed {f}", godcore::sim::CALL_WORDS[k], r.heard, r.toward, r.away);
+                println!(
+                    "{:<6} used {:?} (enemy/building/ahead/hurt)  heard {:>5}  toward {:>5}  away {:>5}  followed {f}  means {}",
+                    godcore::sim::CALL_WORDS[k],
+                    r.used,
+                    r.heard,
+                    r.toward,
+                    r.away,
+                    r.meaning().unwrap_or("-")
+                );
             }
         }
         Some("teameval") => {

@@ -41,6 +41,11 @@ pub struct Placement {
     pub troop: Troop,
     pub x: f32,
     pub y: f32,
+    /// Share of its stamina the troop starts the raid without, carried from
+    /// earlier raids (stage C). The server sets it from its own record;
+    /// whatever a client sends is replaced.
+    #[serde(default)]
+    pub fatigue: f32,
 }
 
 /// A published home base: layout plus the defenders' brains. Attacks always
@@ -261,6 +266,25 @@ pub struct Match {
     /// gold from the server, the defender loses nothing) or "revenge".
     #[serde(default = "raid_kind")]
     pub kind: String,
+    /// How tired the attacker's troops are for this raid (stage C), as the
+    /// server counts it. Troops not listed are fresh.
+    #[serde(default)]
+    pub rest: Vec<TroopFatigue>,
+}
+
+/// One troop's carried tiredness for a raid: the share of its stamina
+/// pool it starts without.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TroopFatigue {
+    pub troop_id: u64,
+    pub fatigue: f32,
+}
+
+/// Fill in each placed troop's tiredness from the raid's list.
+pub fn apply_rest(army: &mut [Placement], rest: &[TroopFatigue]) {
+    for p in army.iter_mut() {
+        p.fatigue = rest.iter().find(|r| r.troop_id == p.troop.id).map_or(0.0, |r| r.fatigue);
+    }
 }
 
 pub const KIND_RAID: &str = "raid";
@@ -303,6 +327,10 @@ pub struct AttackOutcome {
     #[serde(default)]
     pub event_bonus: i64,
     pub attacker: User,
+    /// How tired each of the attacker's own troops went home (stage C), as
+    /// the server counted it: `fatigue` is the share of the pool carried.
+    #[serde(default)]
+    pub carried: Vec<TroopFatigue>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -525,6 +553,11 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
         // battles don't read it.
         level_from: t.level_from,
         plateaued: t.plateaued,
+        born: t.born,
+        // The server keeps its own record of how tired each troop is.
+        rest: Default::default(),
+        // Learned signal meanings are only for the player's own screens.
+        signals: Vec::new(),
     };
     // Move practice comes from the troop's own practice record, never from
     // the client's copy in the spec.
@@ -578,6 +611,7 @@ pub fn canonical_snapshot(s: &BaseSnapshot) -> Result<BaseSnapshot, Invalid> {
                 troop: canonical_troop(&p.troop, Role::Defend, max_troop_level(th))?,
                 x: p.x,
                 y: p.y,
+                fatigue: 0.0,
             })
         })
         .collect::<Result<_, _>>()?;
@@ -598,6 +632,7 @@ pub fn canonical_army(army: &[Placement], town_hall: u32) -> Result<Vec<Placemen
                 troop: canonical_troop(&p.troop, Role::Attack, max_troop_level(town_hall))?,
                 x: p.x,
                 y: p.y,
+                fatigue: 0.0,
             })
         })
         .collect()
@@ -607,7 +642,18 @@ pub fn canonical_army(army: &[Placement], town_hall: u32) -> Result<Vec<Placemen
 
 pub fn raid_battle(snapshot: &BaseSnapshot, army: &[Placement]) -> Battle {
     let place = |v: &[Placement]| v.iter().map(|p| (p.troop.clone(), (p.x, p.y))).collect();
-    Battle::defense(&snapshot.base, place(&snapshot.defenders), None, place(army))
+    let mut b = Battle::defense(&snapshot.base, place(&snapshot.defenders), None, place(army));
+    b.tire_attackers(&army.iter().map(|p| p.fatigue).collect::<Vec<_>>());
+    b
+}
+
+/// Run a raid and also return how tired each placed troop went home
+/// (stage C), in army order.
+pub fn run_raid_rested(snapshot: &BaseSnapshot, army: &[Placement]) -> (RaidResult, Vec<f32>) {
+    let mut b = raid_battle(snapshot, army);
+    b.run();
+    let carried = b.carried_home();
+    (raid_result(&b), carried)
 }
 
 /// Run a raid to the end. Pass canonical inputs (see `canonical_*`) so the
@@ -615,6 +661,10 @@ pub fn raid_battle(snapshot: &BaseSnapshot, army: &[Placement]) -> Battle {
 pub fn run_raid(snapshot: &BaseSnapshot, army: &[Placement]) -> RaidResult {
     let mut b = raid_battle(snapshot, army);
     b.run();
+    raid_result(&b)
+}
+
+fn raid_result(b: &Battle) -> RaidResult {
     debug_assert_ne!(b.outcome(), Outcome::Running);
     let w = &b.world;
     RaidResult {
@@ -722,6 +772,19 @@ mod tests {
         Troop::new(id, format!("t{id}"), spec, 100 + id)
     }
 
+    /// A troop's conditioning (rules v10) comes from its training record,
+    /// never from the copy the client sends.
+    #[test]
+    fn conditioning_comes_from_training() {
+        let mut t = troop(9, BaseClass::Fighter.spec());
+        t.add_training(200_000);
+        let honest = t.spec.conditioning;
+        assert!(honest > 0.0);
+        t.spec.conditioning = 1.0;
+        let c = canonical_troop(&t, Role::Attack, 1).unwrap();
+        assert_eq!(c.spec.conditioning, honest);
+    }
+
     fn snapshot() -> BaseSnapshot {
         let spots = home_spots(2);
         BaseSnapshot {
@@ -731,11 +794,13 @@ mod tests {
                     troop: troop(1, BaseClass::Guard.spec()),
                     x: spots[0].0,
                     y: spots[0].1,
+                    fatigue: 0.0,
                 },
                 Placement {
                     troop: troop(2, BaseClass::Sentry.spec()),
                     x: spots[1].0,
                     y: spots[1].1,
+                    fatigue: 0.0,
                 },
             ],
         }
@@ -747,6 +812,7 @@ mod tests {
                 troop: troop(10 + k, BaseClass::Fighter.spec()),
                 x: RAID_ENTRY.0 + k as f32,
                 y: RAID_ENTRY.1,
+                fatigue: 0.0,
             })
             .collect()
     }
@@ -908,6 +974,28 @@ mod tests {
     }
 
     #[test]
+    fn carried_tiredness_is_the_servers_to_set() {
+        let s = canonical_snapshot(&snapshot()).unwrap();
+        let mut a = army();
+        // A client claiming its troops are fresh, or anything else, is ignored.
+        a[0].fatigue = 0.9;
+        let c = canonical_army(&a, 1).unwrap();
+        assert!(c.iter().all(|p| p.fatigue == 0.0));
+        // The raid's list sets it by troop id.
+        let mut tired = c.clone();
+        apply_rest(&mut tired, &[TroopFatigue { troop_id: c[1].troop.id, fatigue: 0.3 }]);
+        assert_eq!(tired.iter().map(|p| p.fatigue).collect::<Vec<_>>(), vec![0.0, 0.3, 0.0]);
+        // A tired troop fights differently, and a replay of the stored army
+        // (fatigue included) gives the same raid.
+        let (r, home) = run_raid_rested(&s, &tired);
+        assert_ne!(r.fingerprint, run_raid(&s, &c).fingerprint);
+        let stored: Vec<Placement> = serde_json::from_str(&serde_json::to_string(&tired).unwrap()).unwrap();
+        assert_eq!(run_raid(&s, &stored), r);
+        assert_eq!(home.len(), 3);
+        assert!(home[1] >= 0.3 - 1e-6 && home.iter().all(|h| (0.0..=0.4).contains(h)));
+    }
+
+    #[test]
     fn weapons_and_mastery_come_from_training() {
         use godcore::weapons::Weapon;
         let mut a = army();
@@ -917,6 +1005,8 @@ mod tests {
         t.mastery.insert(Weapon::Greataxe, 40_000);
         t.mastery.insert(Weapon::Daggers, 160_000);
         t.equip(Weapon::Daggers);
+        // As the game does after training: conditioning follows the steps.
+        t.sync_moves();
         let level = t.spec.mastery;
         assert!(level > 0);
         let c = canonical_army(&a, 1).unwrap();
@@ -980,7 +1070,7 @@ mod tests {
 
     #[test]
     fn team_training_is_kept_and_raids_match() {
-        assert_eq!(godcore::sim::SIM_VERSION, 9);
+        assert_eq!(godcore::sim::SIM_VERSION, 10);
         let mut a = army();
         a[0].troop.team_steps = 120_000;
         let c = canonical_army(&a, 1).unwrap();

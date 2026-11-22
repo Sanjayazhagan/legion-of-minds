@@ -648,7 +648,7 @@ enum Busy {
     Publish(Task<(Published, User)>),
     Find(Task<Match>),
     /// The raid's replay and any bonus gold the server paid.
-    Raid(Task<(User, Replay, i64)>),
+    Raid(Task<(User, Replay, i64, Vec<bag_client::bag_protocol::TroopFatigue>)>),
     Replay(Task<Replay>),
     /// Entering the weekly cup.
     Cup(Task<CupStandings>),
@@ -883,8 +883,16 @@ impl Game {
                 Busy::Raid(t) => {
                     if let Some(r) = t.poll() {
                         match r {
-                            Ok((u, replay, bonus)) => {
+                            Ok((u, replay, bonus, carried)) => {
                                 self.account.user = Some(u);
+                                // The squad comes home as tired as the server counted.
+                                let now = godcore::troop::unix_now();
+                                for c in carried {
+                                    if let Some(t) = self.troops.iter_mut().find(|t| t.id == c.troop_id) {
+                                        t.after_raid(c.fatigue, now);
+                                        self.store.save_troop(t);
+                                    }
+                                }
                                 s.busy = None;
                                 s.found = None;
                                 if bonus > 0 {
@@ -1205,10 +1213,13 @@ impl Game {
                     format!("Up to {} gold to loot", m.max_loot)
                 };
                 text(&offer, mx, mid.y + 122.0, 16.0, MUTED);
-                let names: Vec<&str> = army
+                let names: Vec<String> = army
                     .iter()
-                    .map(|(t, _)| t.name.as_str())
-                    .chain(borrowed.iter().map(|(l, _)| l.troop.name.as_str()))
+                    .map(|(t, _)| match m.rest.iter().find(|r| r.troop_id == t.id) {
+                        Some(r) => format!("{} (tired {:.0}%)", t.name, r.fatigue * 100.0),
+                        None => t.name.clone(),
+                    })
+                    .chain(borrowed.iter().map(|(l, _)| l.troop.name.clone()))
                     .collect();
                 text(
                     &format!("Sending: {}", names.join(", ")),
@@ -1231,7 +1242,7 @@ impl Game {
                     s.busy = Some(Busy::Raid(Task::spawn(move || {
                         let (_, out) = c.attack_with(&m, army, &borrowed).map_err(err)?;
                         let replay = c.replay(out.attack_id).map_err(err)?;
-                        Ok((out.attacker, replay, out.bonus_gold + out.event_bonus))
+                        Ok((out.attacker, replay, out.bonus_gold + out.event_bonus, out.carried))
                     })));
                 }
                 if self.ui.button_ex(

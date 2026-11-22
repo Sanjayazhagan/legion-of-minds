@@ -150,7 +150,7 @@ pub fn draw_on_map(v: View, w: &World, t: &Thought, who: &dyn Fn(usize) -> Strin
     let edge = |k: usize| {
         let a = base - half + 2.0 * half * k as f32 / n as f32;
         let (dx, dy) = (a.cos(), a.sin());
-        let mut r = sim::SIGHT_RANGE;
+        let mut r = me.sight;
         for (d, p) in [(dx, me.x), (dy, me.y)] {
             if d > 1e-4 {
                 r = r.min((sim::ARENA - p) / d);
@@ -355,7 +355,13 @@ pub fn draw_panel(r: Rect, w: &World, t: &Thought, name: &str, who: &dyn Fn(usiz
         hears = format!("{hears}; team: {}", calls.join(" "));
     }
     line("Hears", hears, HEAR, y);
-    y += 26.0;
+    y += 20.0;
+    let u = &w.units[t.unit];
+    if u.pool > 0.0 {
+        line("Body", body_words(u), crate::ui::BREATH, y);
+        y += 20.0;
+    }
+    y += 6.0;
     text(
         "Its options (how much its brain leans to each)",
         x,
@@ -395,4 +401,40 @@ pub fn draw_panel(r: Rect, w: &World, t: &Thought, name: &str, who: &dyn Fn(usiz
         );
         y += 22.0;
     }
+}
+
+/// How the troop's body is holding up, in words.
+fn body_words(u: &godcore::sim::Unit) -> String {
+    let breath = u.breath();
+    let mut s = if u.stamina < 1.0 {
+        "out of breath".to_string()
+    } else if breath < 0.25 {
+        format!("exhausted ({:.0}% stamina)", breath * 100.0)
+    } else if breath < 0.5 {
+        format!("tired ({:.0}% stamina)", breath * 100.0)
+    } else {
+        format!("fresh ({:.0}% stamina)", breath * 100.0)
+    };
+    let worn = 1.0 - u.max_stamina / u.pool;
+    if worn >= 0.05 {
+        s += &format!(", worn down {:.0}%", worn * 100.0);
+    }
+    if godcore::body::pain(u.hp, u.max_hp) > 0.0 {
+        s += ", in pain";
+    }
+    if godcore::body::injury(u.legs) >= 0.25 {
+        s += ", limping";
+    }
+    if godcore::body::injury(u.arms) >= 0.25 {
+        s += ", hurt arm";
+    }
+    if u.bleed > 0.0 {
+        s += ", bleeding";
+    }
+    if u.arrows_max > 0.0 {
+        s += &format!(", {:.0} arrows", u.arrows);
+    } else if u.mana_max > 0.0 {
+        s += &format!(", {:.0} mana", u.mana);
+    }
+    s
 }

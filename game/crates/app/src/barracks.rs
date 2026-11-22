@@ -268,6 +268,42 @@ impl Game {
         let kit = t.spec.moves();
         let moves: Vec<String> = kit.iter().map(|m| format!("{} {:.0}%", m.name(), t.move_practice(*m) * 100.0)).collect();
         text(&format!("Moves practised: {}", if moves.is_empty() { "none".to_string() } else { moves.join(", ") }), x, y + 8.0, 18.0, TEXT);
+        y += 24.0;
+        // The body training has built (human limits, rules v10).
+        let b = godcore::body::Body::of(&t.spec);
+        text(
+            &format!(
+                "Body {:.0}% conditioned: stamina {:.0}, recovers {:.1}/tick, armour weight {:.1}, reacts in {} ticks",
+                t.spec.conditioning * 100.0,
+                b.stamina,
+                b.recovery,
+                b.load,
+                b.react
+            ),
+            x,
+            y + 8.0,
+            18.0,
+            BREATH,
+        );
+        let born = t.traits().words();
+        if !born.is_empty() {
+            y += 22.0;
+            let supply = if b.arrows > 0.0 {
+                format!("  ·  carries {:.0} arrows", b.arrows)
+            } else if b.mana > 0.0 {
+                format!("  ·  {:.0} mana", b.mana)
+            } else {
+                String::new()
+            };
+            text(&format!("Born: {born}{supply}"), x, y + 8.0, 18.0, MUTED);
+        }
+        // Tiredness carried home from the last raid (stage C).
+        let now = godcore::troop::unix_now();
+        let tired = t.fatigue_at(now);
+        if tired > 0.0 {
+            y += 22.0;
+            text(&rest_words(tired, t.rest_left(now)), x, y + 8.0, 18.0, BREATH);
+        }
         y += 30.0;
         text(
             &format!(
@@ -566,4 +602,16 @@ pub fn fmt_steps(s: u64) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// "Resting: starts a raid 18% tired, fresh in 2h 15m".
+pub fn rest_words(tired: f32, secs_left: u64) -> String {
+    let (h, m) = (secs_left / 3600, (secs_left % 3600 + 59) / 60);
+    let when = match (h, m) {
+        (0, m) => format!("{m}m"),
+        (h, 60) => format!("{}h", h + 1),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h {m}m"),
+    };
+    format!("Resting: starts a raid {:.0}% tired, fresh in {when}", tired * 100.0)
 }

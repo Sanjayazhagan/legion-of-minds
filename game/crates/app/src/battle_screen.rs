@@ -10,6 +10,7 @@ use godcore::classes::Role;
 use godcore::scenario::{build_base, can_deploy, BASES, DEPLOY_RADIUS, HOME_NAME, WAVES};
 use godcore::mind::think;
 use godcore::sim::{Control, Kind, Outcome, Team, World, ARENA};
+use godcore::troop::Troop;
 use macroquad::prelude::*;
 
 pub const MAX_SQUAD: usize = 5;
@@ -149,17 +150,27 @@ impl BattleState {
             .enumerate()
             .map(|(k, &i)| (g.troops[i].clone(), (4.0 + 1.5 * k as f32, 4.0)))
             .collect();
-        BattleState::start(
-            Mode::Raid(base),
-            Box::new(move || Battle::new(&BASES[base], deploy.clone())),
-        )
+        BattleState::start(Mode::Raid(base), raid_maker(base, deploy))
     }
+}
+
+/// Builds a raid on an offline base. Each troop starts as tired as it is
+/// now (carried from earlier raids, stage C); that is fixed here so replays
+/// and clips match.
+fn raid_maker(base: usize, deploy: Vec<(Troop, (f32, f32))>) -> Box<dyn Fn() -> Battle> {
+    let now = godcore::troop::unix_now();
+    let fatigue: Vec<f32> = deploy.iter().map(|(t, _)| t.fatigue_at(now)).collect();
+    Box::new(move || {
+        let mut b = Battle::new(&BASES[base], deploy.clone());
+        b.tire_attackers(&fatigue);
+        b
+    })
 }
 
 /// Sim ticks shown per second at 1x. Playing all 20 ticks of a sim second
 /// made troops sprint and hit five times a second; at 6 they move at a
 /// Clash-of-Clans-like pace, a fighter strikes about every 0.7 s, and a full
-/// battle (900 ticks) lasts 2.5 minutes. Only playback changes: results are
+/// battle (1080 ticks) lasts 3 minutes. Only playback changes: results are
 /// the same.
 pub const WATCH_TPS: f32 = 6.0;
 
@@ -262,6 +273,12 @@ impl Game {
                 16.0,
                 MUTED,
             );
+            // Carried tiredness from the last raid (stage C).
+            let tired = t.fatigue_at(godcore::troop::unix_now());
+            if tired > 0.0 {
+                let w = format!("tired {:.0}%", tired * 100.0);
+                text(&w, r.x + r.w - 12.0 - text_width(&w, 16.0), r.y + 28.0, 16.0, BREATH);
+            }
             if let Some(l) = self.busy_label(i) {
                 crate::bg::busy_veil(r, &l);
             } else if self.ui.hover(r) && self.ui.clicked {
@@ -434,10 +451,7 @@ impl Game {
                 .collect();
             self.fx.clear();
             let b = s.base;
-            return Screen::Battle(BattleState::start(
-                Mode::Raid(b),
-                Box::new(move || Battle::new(&BASES[b], deploy.clone())),
-            ));
+            return Screen::Battle(BattleState::start(Mode::Raid(b), raid_maker(b, deploy)));
         }
         Screen::Deploy(s)
     }
@@ -618,6 +632,7 @@ impl Game {
             let act = match said {
                 Some(c) => format!("says \"{}\"", crate::render::call_words(c.kind)),
                 None if !u.alive => "down".to_string(),
+                None if u.pool > 0.0 && u.stamina < 1.0 => format!("{}, out of breath", action_name(u.last_action)),
                 None => action_name(u.last_action).to_string(),
             };
             text(
@@ -632,6 +647,9 @@ impl Game {
                 u.hp / u.max_hp,
                 GOOD,
             );
+            if u.alive {
+                stamina_bar(Rect::new(r.x + 44.0, r.y + 42.0, r.w - 56.0, 4.0), u);
+            }
             y += 56.0;
         }
         if let (Some(t), Some(f)) = (&thought, s.focus) {
@@ -648,9 +666,16 @@ impl Game {
             text("Team talk", rx, y + 14.0, 18.0, TEXT);
             y += 24.0;
             for c in self.fx.calls.iter().rev().take(((H - 110.0 - y) / 22.0).max(0.0) as usize) {
+                // What the caller's team has learned the signal means (stage D).
+                let means = w
+                    .units
+                    .get(c.from)
+                    .filter(|u| u.tag < troops.len() && u.control == Control::External)
+                    .and_then(|u| troops[u.tag].signal_meaning(c.kind))
+                    .map_or(String::new(), |m| format!(" = \"{m}\""));
                 let line = match c.target {
-                    Some(t) => format!("{}: {} ({})", who(c.from), crate::render::call_words(c.kind), who(t)),
-                    None => format!("{}: {}", who(c.from), crate::render::call_words(c.kind)),
+                    Some(t) => format!("{}: {}{means} ({})", who(c.from), crate::render::call_words(c.kind), who(t)),
+                    None => format!("{}: {}{means}", who(c.from), crate::render::call_words(c.kind)),
                 };
                 text(&line, rx + 6.0, y + 14.0, 16.0, crate::render::call_color(c.kind));
                 y += 22.0;
@@ -807,6 +832,14 @@ impl Game {
             self.profile.victories += 1;
         }
         self.store.save_profile(&self.profile);
+        // The squad goes home as tired as the raid left it.
+        let now = godcore::troop::unix_now();
+        for (t, c) in s.battle.troops.iter().zip(s.battle.carried_home()) {
+            if let Some(mine) = self.troops.iter_mut().find(|m| m.id == t.id) {
+                mine.after_raid(c, now);
+                self.store.save_troop(mine);
+            }
+        }
         (stars, gold, new_stars > 0)
     }
 }

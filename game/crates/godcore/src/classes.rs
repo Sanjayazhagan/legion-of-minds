@@ -158,6 +158,8 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Archer => ClassSpec {
@@ -186,6 +188,8 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Healer => ClassSpec {
@@ -214,6 +218,8 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Guard => ClassSpec {
@@ -235,6 +241,8 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Sentry => ClassSpec {
@@ -256,6 +264,8 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Keeper => ClassSpec {
@@ -281,6 +291,8 @@ impl BaseClass {
                 weapon: None,
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
+                conditioning: 0.0,
+                traits: Default::default(),
                 talents: TALENT_MAX,
             },
             BaseClass::Mage => ClassSpec {
@@ -535,6 +547,13 @@ pub struct ClassSpec {
     /// Ward, splash and area skills) can reach, set from the troop's level.
     #[serde(default = "talent_max")]
     pub talents: u8,
+    /// How conditioned (0 to 1) the troop's body is, set from its training
+    /// (see `body`): more stamina, faster recovery, steadier nerve.
+    #[serde(default)]
+    pub conditioning: f32,
+    /// What the troop was born with, set from the troop (see `body::Traits`).
+    #[serde(default)]
+    pub traits: crate::body::Traits,
 }
 
 /// Most units a multi-target talent can reach (a level 5 troop).
@@ -570,6 +589,8 @@ impl ClassSpec {
             weapon: None,
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
+            conditioning: 0.0,
+            traits: Default::default(),
             talents: TALENT_MAX,
         }
     }
@@ -638,6 +659,8 @@ impl ClassSpec {
             weapon: None,
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
+            conditioning: 0.0,
+            traits: Default::default(),
             talents: TALENT_MAX,
         }
     }
@@ -717,6 +740,8 @@ impl ClassSpec {
             weapon: None,
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
+            conditioning: 0.0,
+            traits: Default::default(),
             talents: TALENT_MAX,
         }
     }
@@ -743,6 +768,8 @@ impl ClassSpec {
         self.mastery = other.mastery;
         self.move_practice = other.move_practice;
         self.talents = other.talents;
+        self.conditioning = other.conditioning;
+        self.traits = other.traits;
         self
     }
 

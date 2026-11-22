@@ -310,6 +310,7 @@ pub fn with_borrowed(
             troop,
             x: b.x,
             y: b.y,
+            fatigue: 0.0,
         });
     }
     if army.is_empty() {
