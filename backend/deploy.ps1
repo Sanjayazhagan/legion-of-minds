@@ -12,14 +12,24 @@ param(
     [string]$Domain = "",
     # Deploy without deploy.env (no sign-in keys, no admin page). Only for a
     # quick test: players can't sign in with Google or Discord without it.
-    [switch]$NoSecrets
+    [switch]$NoSecrets,
+    # The server is normally built by GitHub (Actions > "Server build") and
+    # downloaded with the GitHub CLI (gh), so the VM never compiles.
+    # -BuildOnVm skips that and builds on the VM like before (slow, needs swap).
+    [switch]$BuildOnVm,
+    # A server build you downloaded yourself instead of using gh: the
+    # legion-server-linux.zip artifact from a "Server build" run on GitHub,
+    # or the folder it unzips to.
+    [string]$Binary = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 # Same flow as the portfolio's deploy.ps1: pack a tarball, upload it over scp
-# with keepalives, then run the VM side as one base64 script over ssh. The VM
-# builds the server itself, because a build made on Windows can't run on Linux.
+# with keepalives, then run the VM side as one base64 script over ssh. The
+# server itself comes ready-made from GitHub Actions (.github/workflows/
+# server.yml builds it for the VM's ARM processor), so the VM doesn't compile.
+# If that build can't be had, the VM builds it from the uploaded source.
 $Backend = $PSScriptRoot
 $Root = Split-Path -Parent $Backend
 $Archive = Join-Path $Backend "deploy.tar.gz"
@@ -69,8 +79,184 @@ Write-Host "  to $VmUser@$VmHost" -ForegroundColor Cyan
 Write-Host "=====================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ─── Step 1: Pack the source ─────────────────────────────────────
-Write-Host "[1/4] Packing the server source..." -ForegroundColor Yellow
+# ─── Step 1: Get the server GitHub built ─────────────────────────
+# The ready-made servers go in backend/deploy-bin (gitignored), which is
+# packed with the source; the VM uses the one for its processor.
+$BinDir = Join-Path $Backend "deploy-bin"
+if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
+# Everything the server is built from. A GitHub build of a commit with the
+# same files here is the same server.
+$ServerPaths = @("backend", "game/crates/godcore", "game/Cargo.toml", "game/Cargo.lock")
+
+function Clear-DeployFiles {
+    if (Test-Path $Archive) { Remove-Item -Force $Archive }
+    if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
+}
+
+# Checks a downloaded build against its SHA256SUMS. Returns what's wrong, or
+# nothing when it's complete.
+function Test-ServerBuild([string]$Dir) {
+    $sums = Join-Path $Dir "SHA256SUMS"
+    if (-not (Test-Path $sums)) { return "SHA256SUMS is missing" }
+    foreach ($line in Get-Content $sums) {
+        if ($line -match '^([0-9a-fA-F]{64})\s+\*?(\S+)$') {
+            $want = $Matches[1].ToLower(); $name = $Matches[2]
+            $f = Join-Path $Dir $name
+            if (-not (Test-Path $f)) { return "$name is missing" }
+            if ((Get-FileHash -Algorithm SHA256 $f).Hash.ToLower() -ne $want) { return "$name is damaged (checksum differs)" }
+        }
+    }
+    if (-not (Test-Path (Join-Path $Dir "bag-server-aarch64"))) { return "bag-server-aarch64 is missing" }
+    return $null
+}
+
+# Downloads the "Server build" artifact made from the same server source as
+# this checkout. Returns $true when $BinDir holds a checked build.
+function Get-GitHubBuild {
+    # git and gh report "not found" on stderr; that's an answer here, not an
+    # error that should stop the deploy (Windows PowerShell 5.1 would stop).
+    $ErrorActionPreference = "Continue"
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        Write-Host "  The GitHub CLI (gh) isn't installed, so the server can't be downloaded." -ForegroundColor DarkYellow
+        Write-Host "  Install it once with:  winget install --id GitHub.cli   then:  gh auth login" -ForegroundColor DarkYellow
+        return $false
+    }
+    gh auth status *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  gh isn't signed in to GitHub. Run once:  gh auth login" -ForegroundColor DarkYellow
+        return $false
+    }
+    $head = (git rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $head) {
+        Write-Host "  This folder isn't a git checkout, so the matching GitHub build can't be found." -ForegroundColor DarkYellow
+        return $false
+    }
+    $head = $head.Trim()
+    $changed = git status --porcelain -- @ServerPaths
+    if ($changed) {
+        Write-Host "  You have uncommitted changes to the server code, which GitHub's build doesn't have:" -ForegroundColor DarkYellow
+        $changed | Select-Object -First 5 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkYellow }
+        Write-Host "  Commit and push them (GitHub then builds them), or deploy with -BuildOnVm." -ForegroundColor DarkYellow
+        return $false
+    }
+
+    # Newest first. Pull request runs are skipped: they build the PR merged
+    # into its target branch, which isn't exactly any commit here.
+    $runs = gh api "repos/{owner}/{repo}/actions/workflows/server.yml/runs?per_page=50" `
+        --jq '.workflow_runs[] | [.id, .head_sha, .status, .conclusion, .event] | @tsv' 2>$null
+    if ($LASTEXITCODE -ne 0) { $runs = @() }
+    foreach ($line in @($runs)) {
+        if (-not $line) { continue }
+        $id, $sha, $status, $conclusion, $event = "$line" -split "`t"
+        if ($event -eq "pull_request") { continue }
+        # A run of a commit this checkout doesn't have yet can't be compared.
+        git cat-file -e "$sha^{commit}" 2>$null
+        if ($LASTEXITCODE -ne 0) { continue }
+        git diff --quiet $sha $head -- @ServerPaths
+        if ($LASTEXITCODE -ne 0) { continue }
+        $short = $sha.Substring(0, 7)
+        if ($status -ne "completed") {
+            Write-Host "  GitHub is still building the server for commit $short. Waiting for it (a few minutes)..." -ForegroundColor Yellow
+            gh run watch $id --exit-status --interval 15 | Out-Host
+            if ($LASTEXITCODE -ne 0) { Write-Host "  That build failed on GitHub." -ForegroundColor DarkYellow; continue }
+        } elseif ($conclusion -ne "success") {
+            continue
+        }
+        Write-Host "  Downloading the server GitHub built for commit $short..." -ForegroundColor Yellow
+        if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
+        gh run download $id -n legion-server-linux -D $BinDir | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  Download failed (GitHub keeps these builds for 30 days)." -ForegroundColor DarkYellow
+            continue
+        }
+        $bad = Test-ServerBuild $BinDir
+        if ($bad) { Write-Host "  The download isn't usable: $bad" -ForegroundColor DarkYellow; continue }
+        return $true
+    }
+
+    Write-Host "  GitHub has no server build for this code yet." -ForegroundColor DarkYellow
+    $branch = (git rev-parse --abbrev-ref HEAD 2>$null)
+    if ($branch) { $branch = $branch.Trim() }
+    $pushed = $false
+    if ($branch -and $branch -ne "HEAD") {
+        git fetch -q origin $branch 2>$null
+        git merge-base --is-ancestor $head "origin/$branch" 2>$null
+        $pushed = ($LASTEXITCODE -eq 0)
+    }
+    if ($pushed) {
+        Write-Host "  Asking GitHub to build $branch now..." -ForegroundColor Yellow
+        gh workflow run server.yml --ref $branch 2>$null | Out-Host
+        if ($LASTEXITCODE -eq 0) {
+            for ($i = 0; $i -lt 12; $i++) {
+                Start-Sleep -Seconds 5
+                $id = $null
+                $new = gh api "repos/{owner}/{repo}/actions/workflows/server.yml/runs?event=workflow_dispatch&per_page=5" `
+                    --jq '.workflow_runs[] | [.id, .head_sha] | @tsv' 2>$null
+                foreach ($r in @($new)) {
+                    $rid, $rsha = "$r" -split "`t"
+                    if ($rsha -eq $head) { $id = $rid; break }
+                }
+                if ($id) {
+                    Write-Host "  Waiting for GitHub's build (a few minutes)..." -ForegroundColor Yellow
+                    gh run watch $id --exit-status --interval 15 | Out-Host
+                    if ($LASTEXITCODE -ne 0) { Write-Host "  That build failed on GitHub." -ForegroundColor DarkYellow; return $false }
+                    gh run download $id -n legion-server-linux -D $BinDir | Out-Host
+                    if ($LASTEXITCODE -ne 0) { return $false }
+                    $bad = Test-ServerBuild $BinDir
+                    if ($bad) { Write-Host "  The download isn't usable: $bad" -ForegroundColor DarkYellow; return $false }
+                    return $true
+                }
+            }
+        }
+        Write-Host "  Couldn't start a build. On GitHub: Actions > Server build > Run workflow ($branch)." -ForegroundColor DarkYellow
+    } else {
+        Write-Host "  Push your commits so GitHub builds them, then run .\deploy.ps1 again." -ForegroundColor DarkYellow
+    }
+    return $false
+}
+
+Write-Host "[1/5] Getting the server GitHub built..." -ForegroundColor Yellow
+$HaveBuild = $false
+if ($BuildOnVm) {
+    Write-Host "  -BuildOnVm: the VM builds the server from source." -ForegroundColor DarkYellow
+} elseif ($Binary) {
+    if (-not (Test-Path $Binary)) {
+        Write-Host "Not found: $Binary" -ForegroundColor Red
+        exit 1
+    }
+    New-Item -ItemType Directory -Force $BinDir | Out-Null
+    if ((Get-Item $Binary).PSIsContainer) {
+        Copy-Item -Force (Join-Path $Binary "*") $BinDir
+    } else {
+        Expand-Archive -Force $Binary $BinDir
+    }
+    $bad = Test-ServerBuild $BinDir
+    if ($bad) {
+        Write-Host "$Binary isn't a usable server build: $bad" -ForegroundColor Red
+        Write-Host "Use the legion-server-linux artifact of a 'Server build' run on GitHub." -ForegroundColor Yellow
+        Clear-DeployFiles
+        exit 1
+    }
+    $HaveBuild = $true
+} else {
+    Push-Location $Root
+    # Only the last value counts: anything else a function writes out would
+    # also land in its result.
+    try { $HaveBuild = ((Get-GitHubBuild) | Select-Object -Last 1) -eq $true } finally { Pop-Location }
+}
+if ($HaveBuild) {
+    $Commit = (Get-Content (Join-Path $BinDir "COMMIT") -ErrorAction SilentlyContinue | Select-Object -First 1)
+    $Short = if ($Commit) { $Commit.Substring(0, [Math]::Min(7, $Commit.Length)) } else { "unknown" }
+    Write-Host "  Got the server built by GitHub (commit $Short)." -ForegroundColor Green
+} elseif (-not $BuildOnVm) {
+    if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
+    Write-Host "  Falling back to building on the VM (slow on a small VM)." -ForegroundColor DarkYellow
+    Write-Host "  Press Ctrl+C now to stop instead; continuing in 10 seconds..." -ForegroundColor DarkYellow
+    Start-Sleep -Seconds 10
+}
+
+# ─── Step 2: Pack the source ─────────────────────────────────────
+Write-Host "[2/5] Packing the server..." -ForegroundColor Yellow
 if (Test-Path $Archive) { Remove-Item -Force $Archive }
 # The server needs backend/ and the game's battle code (game/crates/godcore,
 # plus game/Cargo.toml, which godcore takes its version from).
@@ -88,12 +274,12 @@ if ($LASTEXITCODE -ne 0) {
 $SizeMb = [math]::Round((Get-Item $Archive).Length / 1MB, 1)
 Write-Host "  Archive created ($SizeMb MB)." -ForegroundColor Green
 
-# ─── Step 2: Upload ──────────────────────────────────────────────
-Write-Host "[2/4] Uploading to the VM..." -ForegroundColor Yellow
+# ─── Step 3: Upload ──────────────────────────────────────────────
+Write-Host "[3/5] Uploading to the VM..." -ForegroundColor Yellow
 scp -i $SshKey @SshOpts $Archive "${VmUser}@${VmHost}:/tmp/legion-deploy.tar.gz"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Upload failed (scp exit $LASTEXITCODE). Re-run .\deploy.ps1 to retry." -ForegroundColor Red
-    Remove-Item -Force $Archive
+    Clear-DeployFiles
     exit 1
 }
 Write-Host "  Upload complete." -ForegroundColor Green
@@ -104,7 +290,7 @@ if (Test-Path $DeployEnv) {
     scp -i $SshKey @SshOpts $DeployEnv "${VmUser}@${VmHost}:/tmp/legion-deploy.env"
     if ($LASTEXITCODE -ne 0) {
         Write-Host "Secrets upload failed (scp exit $LASTEXITCODE). Re-run .\deploy.ps1 to retry." -ForegroundColor Red
-        Remove-Item -Force $Archive
+        Clear-DeployFiles
         exit 1
     }
     Write-Host "  Server secrets uploaded (deploy.env)." -ForegroundColor Green
@@ -112,8 +298,9 @@ if (Test-Path $DeployEnv) {
     Write-Host "  -NoSecrets: deploying without deploy.env (no sign-in keys, no admin page)." -ForegroundColor DarkYellow
 }
 
-# ─── Step 3: Back up, build and restart on the VM ────────────────
-Write-Host "[3/4] Backing up the database, building and restarting on the VM (the first deploy takes several minutes)..." -ForegroundColor Yellow
+# ─── Step 4: Back up, install and restart on the VM ────────────────
+$What = if ($HaveBuild) { "installing the new server" } else { "building the server (several minutes)" }
+Write-Host "[4/5] Backing up the database, $What and restarting on the VM..." -ForegroundColor Yellow
 # The VM side is deploy/server.sh with its arguments set at the top. Like the
 # portfolio, it travels as one base64 token, so Windows can't mangle its
 # quotes, and with LF line endings, so bash doesn't choke on `\r`.
@@ -129,13 +316,13 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "Build or restart on the VM failed (ssh exit $LASTEXITCODE)." -ForegroundColor Red
     Write-Host "If the build failed, the server that was running before keeps running." -ForegroundColor Yellow
     Write-Host "Re-run .\deploy.ps1 to retry." -ForegroundColor Yellow
-    Remove-Item -Force $Archive
+    Clear-DeployFiles
     exit 1
 }
-Remove-Item -Force $Archive
+Clear-DeployFiles
 
-# ─── Step 4: Check from here ─────────────────────────────────────
-Write-Host "[4/4] Checking the server from this computer..." -ForegroundColor Yellow
+# ─── Step 5: Check from here ─────────────────────────────────────
+Write-Host "[5/5] Checking the server from this computer..." -ForegroundColor Yellow
 $Url = if ($Domain) { "https://$Domain" } else { "http://${VmHost}:$Port" }
 try {
     Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 "$Url/health" | Out-Null
