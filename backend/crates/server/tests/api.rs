@@ -263,7 +263,9 @@ async fn raid_flow_is_checked_and_scored() {
         assert_eq!(out.attacker.gold, 500 + gold + out.bonus_gold);
         assert_eq!(out.attacker.trophies, swing.max(0));
         let a = alice.me().unwrap();
-        assert_eq!(a.gold, 500 - gold);
+        // Holding the raid to no stars pays the defender (30 by default).
+        let held = if out.result.stars == 0 { 30 } else { 0 };
+        assert_eq!(a.gold, 500 - gold + held);
         assert_eq!(a.trophies, (-swing).max(0));
         assert_eq!(a.shield_until.is_some(), out.result.stars > 0);
 
