@@ -42,7 +42,7 @@ pub struct HeardCall {
     /// Unit index of the caller.
     pub from: usize,
     pub kind: u8,
-    /// The enemy a "focus" call points at.
+    /// What the signal points at, if it is a unit.
     pub target: Option<usize>,
     pub at: f64,
 }
@@ -531,7 +531,8 @@ impl Effects {
                     sfx::play(Sfx::Click, fx, 0.5, 0.0);
                     let find = |p: (f32, f32)| w.units.iter().position(|u| u.alive && (u.x - p.0).abs() < 1e-3 && (u.y - p.1).abs() < 1e-3);
                     if let Some(from) = find(e.from) {
-                        let target = if matches!(kind, 0 | 3 | 6) && e.to != e.from { find(e.to) } else { None };
+                        // Every signal points at what the caller looks at (rules v10).
+                        let target = if e.to != e.from { find(e.to) } else { None };
                         self.calls.push(HeardCall { from, kind, target, at: crate::record::now() });
                         let cut = self.calls.len().saturating_sub(8);
                         self.calls.drain(..cut);
@@ -640,6 +641,27 @@ thread_local! {
     static ZOOM: Cell<f32> = const { Cell::new(0.8) };
     /// Camera jolt for this frame (impacts, collapses).
     static SHAKE: Cell<Vec3> = const { Cell::new(Vec3::ZERO) };
+    /// Off-screen picture being drawn instead of the window (battle clips).
+    static TARGET: std::cell::RefCell<Option<RenderTarget>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Draw into `rt` instead of the window until called with `None`. The 2D
+/// camera passed to `set_screen` must draw into the same target.
+pub fn set_target(rt: Option<RenderTarget>) {
+    TARGET.with(|t| *t.borrow_mut() = rt);
+}
+
+fn target() -> Option<RenderTarget> {
+    TARGET.with(|t| t.borrow().clone())
+}
+
+/// Map camera distance (the mouse wheel's zoom), for clips to pick their own.
+pub fn zoom() -> f32 {
+    ZOOM.with(|z| z.get())
+}
+
+pub fn set_zoom(z: f32) {
+    ZOOM.with(|c| c.set(z));
 }
 
 /// Mouse wheel over the map zooms the camera in and out.
@@ -667,7 +689,7 @@ pub fn set_screen(vx: f32, vy: f32, s: f32, cam: &Camera2D) {
             zoom: cam.zoom,
             target: cam.target,
             offset: cam.offset,
-            render_target: None,
+            render_target: cam.render_target.clone(),
             viewport: cam.viewport,
         })
     });
@@ -684,7 +706,10 @@ fn restore_ui_camera() {
 /// Pixel viewport (GL origin bottom-left) for a rect in UI coordinates.
 fn viewport_px(r: Rect) -> (i32, i32, i32, i32) {
     let (vx, vy, s) = SCREEN.with(|c| c.get());
-    let (sh, d) = (screen_height(), screen_dpi_scale());
+    let (sh, d) = match target() {
+        Some(rt) => (rt.texture.height(), 1.0),
+        None => (screen_height(), screen_dpi_scale()),
+    };
     let x = vx + r.x * s;
     let y = sh - (vy + (r.y + r.h) * s);
     // In real pixels (see Ui::begin).
@@ -700,10 +725,19 @@ fn begin_3d(r: Rect, mut cam: Camera3D, clear_depth: bool) {
     cam.viewport = Some(viewport_px(r));
     crate::scene::set_view(cam.position, cam.fovy, viewport_px(r).3 as f32);
     cam.aspect = Some(r.w / r.h);
+    let rt = target();
+    cam.render_target = rt.clone();
     let mut gl = unsafe { get_internal_gl() };
     gl.flush();
     if clear_depth {
-        gl.quad_context.clear(None, Some(1.0), None);
+        match rt {
+            Some(rt) => {
+                let pass = rt.render_pass.raw_miniquad_id();
+                gl.quad_context.begin_pass(Some(pass), miniquad::PassAction::Clear { color: None, depth: Some(1.0), stencil: None });
+                gl.quad_context.end_render_pass();
+            }
+            None => gl.quad_context.clear(None, Some(1.0), None),
+        }
     }
     set_camera(&cam);
 }
@@ -956,6 +990,20 @@ pub fn draw_ground(v: View, show_deploy: bool, show_ranges: bool, w: &World) {
         draw_sight(w);
     }
     end_3d();
+    // Mud and hills (rules v10).
+    for p in &w.terrain {
+        match p.ground {
+            godcore::sim::Ground::Mud => {
+                v.disc(p.x, p.y, p.r, Color::new(0.36, 0.25, 0.13, 0.75));
+                v.disc(p.x + 0.3, p.y - 0.2, p.r * 0.55, Color::new(0.28, 0.19, 0.10, 0.6));
+            }
+            godcore::sim::Ground::Hill => {
+                v.disc(p.x, p.y, p.r, Color::new(0.42, 0.62, 0.28, 0.85));
+                v.disc(p.x, p.y, p.r * 0.6, Color::new(0.50, 0.70, 0.33, 0.85));
+                v.ring(p.x, p.y, p.r, 1.5, Color::new(0.25, 0.4, 0.15, 0.8));
+            }
+        }
+    }
     if show_deploy {
         v.disc(C, C, DEPLOY_RADIUS, Color::new(0.6, 0.1, 0.1, 0.22));
         v.ring(C, C, DEPLOY_RADIUS, 2.0, Color::new(0.95, 0.4, 0.4, 0.8));
@@ -977,11 +1025,11 @@ fn draw_sight(w: &World) {
     let fill: [u8; 4] = [255, 255, 215, 22];
     let edge = Color::new(1.0, 1.0, 0.85, 0.3);
     let half = godcore::sim::SIGHT_COS.acos();
-    let r = godcore::sim::SIGHT_RANGE;
     for (i, u) in w.units.iter().enumerate() {
         if !u.alive || !w.has_senses(i) {
             continue;
         }
+        let r = u.sight;
         let base = u.facing.1.atan2(u.facing.0);
         let n = 16;
         let at = |k: usize| {
@@ -1041,77 +1089,86 @@ fn loadout(c: godcore::classes::BaseClass, raider: bool) -> Loadout {
     match c {
         Fighter => Loadout {
             model: "Barbarian",
-            show: &["2H_Axe", "Barbarian_Hat", "Barbarian_Cape"],
+            show: &[
+                "2H_Axe", "Barbarian_Hat", "Barbarian_Cape", "Fighter_Horns", "Fighter_Pauldron_L", "Fighter_Pauldron_R",
+                "Fighter_Belt",
+            ],
             idle: "2H_Melee_Idle",
             attack: "2H_Melee_Attack_Chop",
             props: &[],
         },
         Archer => Loadout {
             model: "Rogue_Hooded",
-            show: &["2H_Crossbow", "Rogue_Cape"],
+            show: &["2H_Crossbow", "Rogue_Cape", "Archer_Quiver", "Archer_Feather"],
             idle: "Idle",
             attack: "2H_Ranged_Shoot",
             props: &[],
         },
         Healer => Loadout {
             model: "Mage",
-            show: &["2H_Staff", "Mage_Hat", "Mage_Cape"],
+            show: &["2H_Staff", "Mage_Hat", "Mage_Cape", "Healer_Charm"],
             idle: "Idle",
             attack: "Spellcast_Shoot",
             props: &[],
         },
         Guard => Loadout {
             model: "Knight",
-            show: &["1H_Sword", "Badge_Shield", "Knight_Helmet", "Knight_Cape"],
+            show: &[
+                "1H_Sword", "Badge_Shield", "Knight_Helmet", "Knight_Cape", "Guard_Plume", "Guard_Pauldron_L", "Guard_Pauldron_R",
+            ],
             idle: "Idle",
             attack: "1H_Melee_Attack_Chop",
             props: &[],
         },
         Sentry => Loadout {
             model: "Rogue",
-            show: &["1H_Crossbow", "Knife_Offhand", "Rogue_Cape"],
+            show: &[
+                "1H_Crossbow", "Knife_Offhand", "Rogue_Cape", "Sentry_Goggles", "Sentry_Pauldron_L", "Sentry_Pauldron_R",
+            ],
             idle: "Idle",
             attack: "1H_Ranged_Shoot",
             props: &[],
         },
         Keeper => Loadout {
             model: "Mage",
-            show: &["Spellbook_open", "1H_Wand", "Mage_Cape"],
+            show: &["Spellbook_open", "1H_Wand", "Mage_Cape", "Keeper_Lantern", "Keeper_Collar"],
             idle: "Idle",
             attack: "Spellcast_Raise",
             props: &[],
         },
         Mage => Loadout {
             model: "Mage",
-            show: &["1H_Wand", "Spellbook", "Mage_Hat"],
+            show: &["1H_Wand", "Spellbook", "Mage_Hat", "Mage_Orbs"],
             idle: "Idle",
             attack: "Spellcast_Shoot",
             props: &[],
         },
         Assassin => Loadout {
             model: "Rogue_Hooded",
-            show: &["Knife", "Knife_Offhand"],
+            show: &["Knife", "Knife_Offhand", "Assassin_Mask", "Assassin_Sash"],
             idle: "Idle",
             attack: "1H_Melee_Attack_Stab",
             props: &[],
         },
         Paladin => Loadout {
             model: "Knight",
-            show: &["2H_Sword", "Knight_Helmet", "Knight_Cape"],
+            show: &[
+                "2H_Sword", "Knight_Helmet", "Knight_Cape", "Paladin_Wings", "Paladin_Pauldron_L", "Paladin_Pauldron_R",
+            ],
             idle: "2H_Melee_Idle",
             attack: "2H_Melee_Attack_Chop",
             props: &[],
         },
         Warlock => Loadout {
             model: "Mage",
-            show: &["2H_Staff", "Mage_Cape"],
+            show: &["2H_Staff", "Mage_Cape", "Warlock_Horns", "Warlock_Collar"],
             idle: "Idle",
             attack: "Spellcast_Shoot",
             props: &[],
         },
         Hunter => Loadout {
             model: "Barbarian",
-            show: &["1H_Axe", "1H_Axe_Offhand", "Barbarian_Cape"],
+            show: &["1H_Axe", "1H_Axe_Offhand", "Barbarian_Cape", "Hunter_Pelt", "Hunter_Necklace"],
             idle: "Idle",
             attack: "1H_Melee_Attack_Chop",
             props: &[],
@@ -1149,6 +1206,25 @@ fn skill_clip(s: Skill) -> &'static str {
         Skill::Volley => "2H_Ranged_Shoot",
         Skill::Fireball => "Spellcast_Long",
         Skill::HealingNova => "Spellcast_Raise",
+    }
+}
+
+/// Each class's own special-move clip (made in Blender, see
+/// tools/blender/troops.py). Models without it fall back to `skill_clip`.
+fn special_clip(c: godcore::classes::BaseClass) -> &'static str {
+    use godcore::classes::BaseClass::*;
+    match c {
+        Fighter => "Special_Fighter",
+        Archer => "Special_Archer",
+        Healer => "Special_Healer",
+        Guard => "Special_Guard",
+        Sentry => "Special_Sentry",
+        Keeper => "Special_Keeper",
+        Mage => "Special_Mage",
+        Assassin => "Special_Assassin",
+        Paladin => "Special_Paladin",
+        Warlock => "Special_Warlock",
+        Hunter => "Special_Hunter",
     }
 }
 
@@ -1335,6 +1411,9 @@ fn draw_character_ex(
         3 => first_clip(m, &[pick(&["Death_A", "Death_B"]), "Death_A"]).unwrap_or("Death_A"),
         4 => "Dodge_Backward",
         5 => "Blocking",
+        6 if !skeleton && pose.skill.is_some() => {
+            first_clip(m, &[special_clip(fig.main)]).unwrap_or_else(|| pose.skill.map_or(lo.attack, skill_clip))
+        }
         6 => pose.skill.map_or(lo.attack, skill_clip),
         7 => "Hit_A",
         9 => first_clip(m, &[pick(&["Hit_A", "Hit_B"]), "Hit_A"]).unwrap_or("Hit_A"),
@@ -1634,6 +1713,25 @@ pub fn draw_world(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit) 
     SHAKE.with(|c| c.set(vec3((t * 53.0).sin() + (t * 31.0).sin() * 0.5, 0.0, (t * 47.0 + 1.0).sin()) * k * 0.6));
     draw_world_inner(v, w, fx, look);
     SHAKE.with(|c| c.set(Vec3::ZERO));
+    // Light and weather over the whole field (rules v10).
+    let tint = match w.light {
+        godcore::sim::Light::Day => None,
+        godcore::sim::Light::Dusk => Some(Color::new(0.55, 0.25, 0.1, 0.16)),
+        godcore::sim::Light::Night => Some(Color::new(0.02, 0.04, 0.16, 0.42)),
+        godcore::sim::Light::Fog => Some(Color::new(0.82, 0.84, 0.86, 0.38)),
+    };
+    if let Some(c) = tint {
+        draw_rectangle(v.r.x, v.r.y, v.r.w, v.r.h, c);
+        if w.light == godcore::sim::Light::Night {
+            // Torches on the buildings.
+            for u in w.units.iter().filter(|u| u.alive && u.kind.is_building()) {
+                let p = v.p(u.x, u.y);
+                draw_circle(p.x, p.y, 26.0, Color::new(1.0, 0.7, 0.3, 0.12));
+                draw_circle(p.x, p.y, 10.0, Color::new(1.0, 0.75, 0.35, 0.25));
+            }
+        }
+        draw_text(w.light.name(), v.r.x + 10.0, v.r.y + 24.0, 22.0, Color::new(1.0, 1.0, 1.0, 0.85));
+    }
     if std::env::var_os("BAG_PROFILE").is_some() {
         eprintln!("draw_world {:.2} ms, {} units", t0.elapsed().as_secs_f64() * 1000.0, w.units.len());
     }
@@ -1962,6 +2060,11 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             let col = if u.team == friendly { GOOD } else { BAD };
             draw_rectangle(top.x - bw / 2.0 - 1.0, top.y - 7.0, bw + 2.0, 6.0, Color::new(0.0, 0.0, 0.0, 0.6));
             bar(Rect::new(top.x - bw / 2.0, top.y - 6.0, bw, 4.0), u.hp / u.max_hp, col);
+        }
+        // A tired troop shows its stamina under its health.
+        if u.pool > 0.0 && u.stamina < u.pool * 0.5 {
+            let bw = s * 1.1;
+            crate::ui::stamina_bar(Rect::new(top.x - bw / 2.0, top.y - 1.0, bw, 3.0), u);
         }
     }
 

@@ -157,6 +157,21 @@ pub fn bar(r: Rect, frac: f32, fg: Color) {
     draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, LINE);
 }
 
+/// Stamina colour (a tired troop's bar).
+pub const BREATH: Color = Color::new(0.98, 0.84, 0.30, 1.0);
+
+/// A troop's stamina: yellow for what it has, dark red for what wear has
+/// taken away for the rest of the battle. Nothing for tireless units.
+pub fn stamina_bar(r: Rect, u: &godcore::sim::Unit) {
+    if u.pool <= 0.0 {
+        return;
+    }
+    draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.08, 0.09, 0.12, 1.0));
+    let worn = (1.0 - u.max_stamina / u.pool).clamp(0.0, 1.0);
+    draw_rectangle(r.x + r.w * (1.0 - worn), r.y, r.w * worn, r.h, Color::new(0.45, 0.12, 0.12, 1.0));
+    draw_rectangle(r.x, r.y, r.w * u.breath().clamp(0.0, 1.0), r.h, BREATH);
+}
+
 pub fn rgb(c: [f32; 3]) -> Color {
     Color::new(c[0], c[1], c[2], 1.0)
 }

@@ -66,6 +66,36 @@ impl Battle {
         }
     }
 
+    /// The attacking troops (trained, External) in the order they were
+    /// placed.
+    fn attackers(&self) -> Vec<usize> {
+        (0..self.world.units.len())
+            .filter(|&i| {
+                let u = &self.world.units[i];
+                u.team == Team::Attack && u.control == Control::External && u.kind == Kind::Troop
+            })
+            .collect()
+    }
+
+    /// Start each attacking troop with the tiredness it carried in from
+    /// earlier raids (stage C), in placement order.
+    pub fn tire_attackers(&mut self, fatigue: &[f32]) {
+        for (i, f) in self.attackers().into_iter().zip(fatigue) {
+            self.world.units[i].start_tired(*f);
+        }
+    }
+
+    /// How tired each attacking troop goes home, in placement order.
+    pub fn carried_home(&self) -> Vec<f32> {
+        self.attackers()
+            .into_iter()
+            .map(|i| {
+                let u = &self.world.units[i];
+                crate::body::carried(u.pool, u.max_stamina)
+            })
+            .collect()
+    }
+
     pub fn outcome(&self) -> Outcome {
         self.world.outcome()
     }

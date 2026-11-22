@@ -18,8 +18,6 @@ pub struct RecruitState {
     plan_touched: bool,
     ed: NumEdit,
     name: String,
-    /// Neurons per layer the player picked.
-    brain: usize,
 }
 
 fn classes(side: Role) -> Vec<BaseClass> {
@@ -39,7 +37,6 @@ impl RecruitState {
             plan_touched: false,
             ed: NumEdit::default(),
             name,
-            brain: godcore::ppo::HIDDEN,
         };
         s.set_side(Role::Attack);
         s
@@ -232,16 +229,15 @@ impl Game {
                 )
             };
             text(&note, pr.x + 116.0, pr.y + 120.0, 16.0, if kit.len() > 3 { ACCENT } else { TEXT });
-            // Brain size
+            // Brain size: set by level now.
             let by = pr.y + 134.0;
-            text("Brain:", pr.x + 116.0, by + 19.0, 17.0, TEXT);
-            for (k, h) in godcore::ppo::HIDDEN_SIZES.into_iter().enumerate() {
-                let b = Rect::new(pr.x + 176.0 + k as f32 * 62.0, by, 56.0, 26.0);
-                if self.ui.button_ex(b, &h.to_string(), true, s.brain == h) {
-                    s.brain = h;
-                }
-            }
-            text(brain_note(s.brain), pr.x + 556.0, by + 18.0, 15.0, MUTED);
+            text(
+                "Brain: 64 neurons per layer. It grows each level, once training has plateaued.",
+                pr.x + 116.0,
+                by + 19.0,
+                17.0,
+                MUTED,
+            );
         }
 
         let afford = self.profile.gold >= RECRUIT_COST;
@@ -255,8 +251,7 @@ impl Game {
             let id = self.store.free_troop_id(self.profile.next_id);
             self.profile.next_id = id + 1;
             let seed = self.rng.next_u64();
-            let mut t = Troop::new(id, s.name.trim().to_string(), spec, seed);
-            t.set_brain(s.brain);
+            let t = Troop::new(id, s.name.trim().to_string(), spec, seed);
             self.troops.push(t);
             let i = self.troops.len() - 1;
             self.selected = Some(i);
@@ -300,15 +295,5 @@ pub fn wrap(s: &str, x: f32, y: f32, w: f32, size: f32, c: Color) {
     }
     if !line.is_empty() {
         text(&line, x, yy, size, c);
-    }
-}
-
-/// What the brain size means for the player.
-pub fn brain_note(h: usize) -> &'static str {
-    match h {
-        0..=64 => "neurons per layer. Fastest to train.",
-        65..=128 => "neurons per layer. Trains a bit slower.",
-        129..=192 => "neurons per layer. Slower; needs long training.",
-        _ => "neurons per layer. 2x slower; needs the longest training.",
     }
 }

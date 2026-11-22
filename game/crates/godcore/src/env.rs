@@ -82,6 +82,7 @@ fn become_troop(w: &mut World, i: usize, spec: &ClassSpec) {
     u.cd_max = spec.cooldown;
     u.heal = spec.heal;
     u.heal_range = spec.heal_range;
+    u.give_body(spec);
 }
 
 /// One step's result for every agent slot.

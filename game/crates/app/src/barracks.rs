@@ -8,6 +8,19 @@ use macroquad::prelude::*;
 
 impl Game {
     pub fn barracks(&mut self) -> Screen {
+        if crate::stat_panel::is_open() {
+            // The Barracks stays in view behind the stat panel, without input.
+            let (mouse, clicked) = (self.ui.mouse, self.ui.clicked);
+            (self.ui.mouse, self.ui.clicked) = (vec2(-1000.0, -1000.0), false);
+            let next = self.barracks_screen();
+            (self.ui.mouse, self.ui.clicked) = (mouse, clicked);
+            self.stat_panel();
+            return next;
+        }
+        self.barracks_screen()
+    }
+
+    fn barracks_screen(&mut self) -> Screen {
         self.header("Barracks", false);
         // Which chip draws the game, so players can check it is the fast one.
         if let Some(g) = crate::gpu_name() {
@@ -185,6 +198,9 @@ impl Game {
             );
             return Screen::Barracks;
         };
+        if self.ui.button(Rect::new(d.x + d.w - 184.0, d.y + 14.0, 160.0, 34.0), "Stats") || is_key_pressed(KeyCode::S) {
+            crate::stat_panel::set_open(true);
+        }
         let t = &self.troops[i];
         let (x, mut y) = (d.x + 24.0, d.y + 44.0);
         crate::art::draw_showcase(vec2(x + 30.0, y - 6.0), 34.0, &t.spec);
@@ -221,18 +237,10 @@ impl Game {
             18.0,
             MUTED,
         );
-        if let Some(next) = t.next_brain() {
-            let gb = Rect::new(d.x + d.w - 184.0, y - 12.0, 160.0, 28.0);
-            if self.ui.button(gb, &format!("Grow to {next}")) {
-                self.troops[i].set_brain(next);
-                self.save_all();
-                let t = &self.troops[i];
-                self.toast(format!(
-                    "{}'s brain grew to {next} neurons per layer. It keeps what it learned, trains slower, and needs more practice to use the extra room.",
-                    t.name
-                ));
-                return Screen::Barracks;
-            }
+        if t.level < MAX_LEVEL {
+            let next = godcore::ppo::hidden_for_level(t.level + 1).max(t.hidden());
+            let note = if next > t.hidden() { format!("Grows to {next} at level {}", t.level + 1) } else { format!("Stays {next} at level {}", t.level + 1) };
+            text(&note, d.x + d.w - 24.0 - text_width(&note, 16.0), y + 16.0, 16.0, MUTED);
         }
         y += 36.0;
         // Weapon and mastery
@@ -250,6 +258,42 @@ impl Game {
         let kit = t.spec.moves();
         let moves: Vec<String> = kit.iter().map(|m| format!("{} {:.0}%", m.name(), t.move_practice(*m) * 100.0)).collect();
         text(&format!("Moves practised: {}", if moves.is_empty() { "none".to_string() } else { moves.join(", ") }), x, y + 8.0, 18.0, TEXT);
+        y += 24.0;
+        // The body training has built (human limits, rules v10).
+        let b = godcore::body::Body::of(&t.spec);
+        text(
+            &format!(
+                "Body {:.0}% conditioned: stamina {:.0}, recovers {:.1}/tick, armour weight {:.1}, reacts in {} ticks",
+                t.spec.conditioning * 100.0,
+                b.stamina,
+                b.recovery,
+                b.load,
+                b.react
+            ),
+            x,
+            y + 8.0,
+            18.0,
+            BREATH,
+        );
+        let born = t.traits().words();
+        if !born.is_empty() {
+            y += 22.0;
+            let supply = if b.arrows > 0.0 {
+                format!("  ·  carries {:.0} arrows", b.arrows)
+            } else if b.mana > 0.0 {
+                format!("  ·  {:.0} mana", b.mana)
+            } else {
+                String::new()
+            };
+            text(&format!("Born: {born}{supply}"), x, y + 8.0, 18.0, MUTED);
+        }
+        // Tiredness carried home from the last raid (stage C).
+        let now = godcore::troop::unix_now();
+        let tired = t.fatigue_at(now);
+        if tired > 0.0 {
+            y += 22.0;
+            text(&rest_words(tired, t.rest_left(now)), x, y + 8.0, 18.0, BREATH);
+        }
         y += 30.0;
         text(
             &format!(
@@ -268,10 +312,24 @@ impl Game {
             t.steps as f32 / t.cap() as f32,
             SKY,
         );
-        y += 52.0;
+        if t.level < MAX_LEVEL {
+            let (line, frac, col) = plateau_line(t);
+            text(&line, x, y + 50.0, 17.0, col);
+            if let Some(f) = frac {
+                bar(Rect::new(x + d.w - 48.0 - 160.0, y + 40.0, 160.0, 8.0), f, col);
+            }
+        }
+        y += 74.0;
 
         // Skill badges
         text("Skills seen in drills", x, y, 20.0, TEXT);
+        // A video of this troop raiding with a blank brain, then its own.
+        if t.spec.role == godcore::classes::Role::Attack && t.steps > 0 {
+            let rb = Rect::new(d.x + d.w - 254.0, y - 22.0, 230.0, 30.0);
+            if self.ui.button(rb, "Before/after video") {
+                return Screen::Clip(crate::clip::ClipState::reel(t, Screen::Barracks));
+            }
+        }
         y += 10.0;
         let mut bx = x;
         if t.skills.episodes == 0 {
@@ -400,6 +458,14 @@ impl Game {
                 16.0,
                 MUTED,
             );
+        } else if level < MAX_LEVEL && !self.troops[i].plateau().ready() {
+            text(
+                "Level up unlocks once its training plateaus (see above)",
+                x + 180.0,
+                y + 64.0,
+                16.0,
+                MUTED,
+            );
         } else if level < MAX_LEVEL && !can_level {
             text(
                 &format!("Earn gold in battles to level up (need {cost})"),
@@ -423,6 +489,8 @@ impl Game {
             ("Max level".to_string(), false)
         } else if level >= th_cap {
             ("Needs Town Hall".to_string(), false)
+        } else if !self.troops[i].plateau().ready() {
+            ("Still learning".to_string(), false)
         } else {
             (format!("Level up ({cost}g)"), self.profile.gold >= cost)
         }
@@ -437,6 +505,8 @@ impl Game {
             Some(format!("{} is at the top level.", t.name))
         } else if t.level >= max_troop_level(th) {
             Some(format!("Level {} troops need Town Hall {}. Upgrade it in Home.", t.level + 1, t.level))
+        } else if !t.plateau().ready() {
+            Some(format!("{} is still improving with its current brain. Keep training until its score levels off.", t.name))
         } else if self.profile.gold < cost {
             Some(format!("Levelling {} costs {cost} gold; you have {}.", t.name, self.profile.gold))
         } else {
@@ -463,6 +533,33 @@ impl Game {
     }
 }
 
+/// The plateau check in words for the Barracks: (line, progress bar while
+/// it is still gathering training to judge, colour).
+pub fn plateau_line(t: &godcore::troop::Troop) -> (String, Option<f32>, Color) {
+    use godcore::troop::Plateau;
+    let w = fmt_steps(godcore::troop::plateau_window(t.level));
+    match t.plateau() {
+        Plateau::Grandfathered => ("Older troop: its next level-up skips the plateau check".into(), None, GOOD),
+        Plateau::AtCap => ("Used all training for this level: ready to level up".into(), None, GOOD),
+        Plateau::Warming { done, need } => (
+            format!("Plateau check: train {} more at this level to judge", fmt_steps(need - done)),
+            Some(done as f32 / need as f32),
+            MUTED,
+        ),
+        Plateau::Starting { .. } => ("Not learning much yet. Keep training: it often takes a while to click".into(), None, MUTED),
+        Plateau::Improving { gain } => (
+            format!("Still improving: +{:.0} points over the last {w} steps. Keep training", gain * 100.0),
+            None,
+            ACCENT,
+        ),
+        Plateau::Reached { .. } => (
+            format!("Plateaued: its score stopped rising over the last {w} steps. Brain is full, ready to level up"),
+            None,
+            GOOD,
+        ),
+    }
+}
+
 pub fn fmt_steps(s: u64) -> String {
     if s >= 1_000_000 {
         format!("{:.1}M", s as f32 / 1e6)
@@ -471,4 +568,16 @@ pub fn fmt_steps(s: u64) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// "Resting: starts a raid 18% tired, fresh in 2h 15m".
+pub fn rest_words(tired: f32, secs_left: u64) -> String {
+    let (h, m) = (secs_left / 3600, (secs_left % 3600 + 59) / 60);
+    let when = match (h, m) {
+        (0, m) => format!("{m}m"),
+        (h, 60) => format!("{}h", h + 1),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h {m}m"),
+    };
+    format!("Resting: starts a raid {:.0}% tired, fresh in {when}", tired * 100.0)
 }

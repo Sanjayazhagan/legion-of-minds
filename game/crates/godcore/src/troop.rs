@@ -1,6 +1,7 @@
 //! A trained troop as the player owns it: class, level, brain and history.
 //! Saved as one small JSON file, which is also what gets shared for wars.
 
+use crate::body::{conditioning_of, Traits};
 use crate::classes::{talents_for_level, ClassSpec};
 use crate::env::EpisodeInfo;
 use crate::nn::Mlp;
@@ -27,6 +28,53 @@ pub fn level_cap(level: u32) -> u64 {
 
 pub fn level_up_cost(level: u32) -> u32 {
     100 * level * level
+}
+
+/// Training steps in each half of the plateau check at a level: the score of
+/// the last `window` steps is compared with the `window` before it.
+pub fn plateau_window(level: u32) -> u64 {
+    (level_cap(level) / 8).max(60_000)
+}
+
+/// A troop has plateaued when its drill score rose by less than this (on a
+/// 0 to 1 scale, so 0.03 = 3 points) between the two halves of the check.
+pub const PLATEAU_GAIN: f32 = 0.03;
+
+/// A flat score only counts as a plateau once the troop has learned
+/// something at this level: its score rose at least this much since the
+/// level began (or it is already near the top). Before that, RL troops often
+/// sit flat for a while before it clicks, and that isn't a full brain.
+pub const PLATEAU_RISE: f32 = 0.10;
+
+/// Has the troop learned all its current brain can hold? Levelling up (which
+/// grows the brain) is only allowed once it has.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Plateau {
+    /// A troop from before the check existed: its next level-up skips it.
+    Grandfathered,
+    /// Not enough training at this level to judge yet.
+    Warming { done: u64, need: u64 },
+    /// Flat, but it hasn't learned anything yet at this level: often RL just
+    /// hasn't clicked. `rise` is the score rise since the level began.
+    Starting { rise: f32 },
+    /// Still getting better. `gain` is the score rise between the halves.
+    Improving { gain: f32 },
+    /// Its score has gone flat: the brain is full.
+    Reached { gain: f32 },
+    /// It used every training step this level allows.
+    AtCap,
+}
+
+impl Plateau {
+    /// May the troop level up (as far as training goes)?
+    pub fn ready(&self) -> bool {
+        matches!(self, Plateau::Grandfathered | Plateau::Reached { .. } | Plateau::AtCap)
+    }
+}
+
+/// One number for how well a troop does in drills: mostly wins, some survival.
+pub fn drill_score(p: &CurvePoint) -> f32 {
+    0.75 * p.win + 0.25 * (1.0 - p.died)
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -95,6 +143,22 @@ impl Skills {
     }
 }
 
+/// Tiredness a troop carries between raids (stage C).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Rest {
+    /// Share of the stamina pool missing when the last raid ended.
+    pub carried: f32,
+    /// When that raid ended, in unix seconds.
+    pub since: u64,
+}
+
+/// Unix seconds now (0 if the clock is before 1970).
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Troop {
     pub id: u64,
@@ -122,6 +186,29 @@ pub struct Troop {
     /// Training steps spent in team training (also counted in `steps`).
     #[serde(default)]
     pub team_steps: u64,
+    /// Total steps when the troop reached its current level; the plateau
+    /// check only looks at training since then. None for troops saved before
+    /// the check existed: their next level-up skips it.
+    #[serde(default)]
+    pub level_from: Option<u64>,
+    /// The plateau check passed at some point during this level. It stays
+    /// passed until the next level-up, so a lucky stretch of drills afterwards
+    /// can't take "ready to level up" away again.
+    #[serde(default)]
+    pub plateaued: bool,
+    /// Born with traits rolled from its seed (rules v10). Troops recruited
+    /// before traits existed are average in everything.
+    #[serde(default)]
+    pub born: bool,
+    /// Tiredness carried home from the last raid and when it ended (unix
+    /// seconds). Only this player's own record; online, the server keeps
+    /// its own.
+    #[serde(default)]
+    pub rest: Rest,
+    /// What its team came to mean by each signal (stage D), from the last
+    /// team session it trained in; empty for none, "" where unknown.
+    #[serde(default)]
+    pub signals: Vec<String>,
 }
 
 /// Starting score for actions a grown brain has never tried (dodge, block,
@@ -147,8 +234,49 @@ impl Troop {
             sessions: 0,
             mastery: BTreeMap::new(),
             move_xp: BTreeMap::new(),
-            brain: Some(crate::ppo::HIDDEN),
+            brain: None,
             team_steps: 0,
+            level_from: Some(0),
+            plateaued: false,
+            born: true,
+            rest: Rest::default(),
+            signals: Vec::new(),
+        }
+        .synced()
+    }
+
+    fn synced(mut self) -> Self {
+        self.sync_moves();
+        self
+    }
+
+    /// How tired (share of the pool) this troop would start a raid at
+    /// `now` (unix seconds).
+    pub fn fatigue_at(&self, now: u64) -> f32 {
+        crate::body::rested(self.rest.carried, now.saturating_sub(self.rest.since))
+    }
+
+    /// Seconds until this troop is fully rested.
+    pub fn rest_left(&self, now: u64) -> u64 {
+        crate::body::rest_left(self.rest.carried, now.saturating_sub(self.rest.since))
+    }
+
+    /// What this troop's team means by signal `k`, if it has learned one.
+    pub fn signal_meaning(&self, k: u8) -> Option<&str> {
+        self.signals.get(k as usize).map(String::as_str).filter(|m| !m.is_empty())
+    }
+
+    /// Record how tired a raid that ended at `now` left it.
+    pub fn after_raid(&mut self, carried: f32, now: u64) {
+        self.rest = Rest { carried, since: now };
+    }
+
+    /// What this troop was born with (average for troops from before traits).
+    pub fn traits(&self) -> Traits {
+        if self.born {
+            Traits::roll_for(self.seed, &self.spec)
+        } else {
+            Traits::default()
         }
     }
 
@@ -157,10 +285,57 @@ impl Troop {
         self.actor.dims[1]
     }
 
-    /// Neurons per layer the brain should have: the player's pick, or for
-    /// older troops with no pick, the size for their level.
+    /// Neurons per layer the brain should have: the size for its level, or
+    /// a bigger size picked back when players chose brain sizes.
     pub fn target_hidden(&self) -> usize {
-        self.brain.unwrap_or_else(|| hidden_for_level(self.level))
+        self.brain.unwrap_or(0).max(hidden_for_level(self.level))
+    }
+
+    /// Has it learned all its current brain can hold? See [`Plateau`].
+    pub fn plateau(&self) -> Plateau {
+        if self.level >= MAX_LEVEL || self.steps_left() == 0 {
+            return Plateau::AtCap;
+        }
+        let Some(from) = self.level_from else { return Plateau::Grandfathered };
+        let w = plateau_window(self.level);
+        // Two windows to compare, plus a quarter window so the check can be
+        // made twice in a row (see below).
+        let need = 2 * w + w / 4;
+        let done = self.steps.saturating_sub(from);
+        if done < need || self.curve.is_empty() {
+            return Plateau::Warming { done: done.min(need), need };
+        }
+        // The curve is thinned and team sessions add one point each, so
+        // sample the score evenly through each half instead of counting points.
+        let score_at = |s: u64| {
+            let p = self.curve.iter().rev().find(|p| p.steps <= s).unwrap_or(&self.curve[0]);
+            drill_score(p)
+        };
+        let mean = |a: u64| (1..=8).map(|k| score_at(a + w * k / 8)).sum::<f32>() / 8.0;
+        let gain_at = |end: u64| mean(end - w) - mean(end - 2 * w);
+        let now = mean(self.steps - w);
+        // Flat now and a quarter window ago, so one lucky stretch of drills
+        // doesn't flip the troop between "ready" and "still improving".
+        let gain = gain_at(self.steps);
+        let gain_then = gain_at(self.steps - w / 4);
+        let rise = now.max(mean(self.steps - 2 * w)) - mean(from);
+        if self.plateaued {
+            Plateau::Reached { gain }
+        } else if gain.max(gain_then) >= PLATEAU_GAIN {
+            Plateau::Improving { gain: gain.max(gain_then) }
+        } else if rise < PLATEAU_RISE && now < 0.85 {
+            Plateau::Starting { rise }
+        } else {
+            Plateau::Reached { gain }
+        }
+    }
+
+    /// Call after training adds to the curve: remembers a passed plateau
+    /// check for the rest of the level.
+    pub fn note_plateau(&mut self) {
+        if matches!(self.plateau(), Plateau::Reached { .. }) {
+            self.plateaued = true;
+        }
     }
 
     /// The player picks a brain size. Brains can grow (keeping what they
@@ -226,9 +401,12 @@ impl Troop {
         practice_of(self.move_xp.get(&m).copied().unwrap_or(0))
     }
 
-    /// Copy move practice and the level's talent reach into the spec the sim reads.
+    /// Copy move practice, the level's talent reach and the body's
+    /// conditioning into the spec the sim reads.
     pub fn sync_moves(&mut self) {
         self.spec.talents = talents_for_level(self.level);
+        self.spec.conditioning = conditioning_of(self.steps);
+        self.spec.traits = self.traits();
         for m in Move::ALL {
             self.spec.move_practice[m as usize] = if self.spec.has_move(m) { self.move_practice(m) } else { 0.0 };
         }
@@ -257,12 +435,19 @@ impl Troop {
                 changed = true;
             }
         }
+        // An old pick the level has caught up with is just the level's size
+        // now; keeping it would make the server think the brain doesn't match.
+        self.brain = self.brain.filter(|&b| b > hidden_for_level(self.level));
         changed
     }
 
-    /// Level up (the caller pays). Troops with no brain pick grow with level.
+    /// Level up (the caller pays and checks [`Troop::plateau`]). The brain
+    /// grows to the size for the new level, keeping what it learned, and the
+    /// plateau check starts again.
     pub fn level_up(&mut self) {
         self.level += 1;
+        self.level_from = Some(self.steps);
+        self.plateaued = false;
         self.sync_moves();
         self.upgrade_brain();
     }

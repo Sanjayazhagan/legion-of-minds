@@ -1,31 +1,111 @@
-# Pushing a tag like v0.2.0 builds the Windows zip and installer and
-# attaches them to a GitHub Release (what the launch page links to).
+# Every push to main publishes a new GitHub Release (what the launch page's
+# Download button links to):
+#   1. picks the next version (.github/scripts/next-version.sh: latest v* tag
+#      with the last number + 1, or game/Cargo.toml when that is ahead),
+#   2. builds the Windows zip and installer with that version,
+#   3. creates the tag and the release, with notes listing the merged PRs.
+# The tag is created by the release itself, so a failed build leaves no tag
+# behind and the next push to main reuses the same number. Tags made this way
+# do not start this workflow again (GitHub does not run workflows for events
+# made with the workflow's own token), so there is one release per push.
+#
+# Pushing a tag like v1.0.0 by hand still releases exactly that version.
+# Pull requests that change this file or the installer get a dry run: the
+# same build, uploaded as a workflow artifact, with no tag or release.
 # The online server address comes from the repository variable BAG_SERVER.
 name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+    paths-ignore:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/scripts/next-version.sh"
+      - "game/installer/**"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+# One release at a time, in push order; never cancel a release half way.
+concurrency:
+  group: release-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      publish: ${{ steps.pick.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: pick
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          elif here=$(git tag --points-at HEAD --list 'v[0-9]*' | sort -V | tail -n1) && [ -n "$here" ]; then
+            # Re-run on a commit that already has a release: keep its number.
+            version="${here#v}"
+          else
+            version=$(.github/scripts/next-version.sh)
+          fi
+          publish=true
+          [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && publish=false
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "### Version $version (publish: $publish)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Online server address
+        if: vars.BAG_SERVER == ''
+        run: echo "::warning title=BAG_SERVER not set::This release looks for the online server on localhost:8080. Set the repository variable BAG_SERVER (Settings > Secrets and variables > Actions > Variables)."
+
   windows:
+    needs: version
     runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: game
       - name: Inno Setup
         run: if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
       - name: Build zip and installer
         working-directory: game/installer
+        run: .\build-installer.ps1 -Server "${{ vars.BAG_SERVER }}" -Version $env:VERSION
+      - name: Check both files exist
+        working-directory: game/dist
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          .\build-installer.ps1 -Server "${{ vars.BAG_SERVER }}" -Version $version
-      - uses: softprops/action-gh-release@v2
+          foreach ($f in "LegionOfMinds-$env:VERSION-windows.zip", "LegionOfMinds-$env:VERSION-setup.exe") {
+            if (-not (Test-Path $f)) { throw "missing $f" }
+            Write-Host "$f  $((Get-Item $f).Length) bytes"
+          }
+      - uses: actions/upload-artifact@v4
         with:
+          name: LegionOfMinds-${{ env.VERSION }}
+          path: |
+            game/dist/*.zip
+            game/dist/*-setup.exe
+          retention-days: 7
+      - name: Publish release v${{ env.VERSION }}
+        if: needs.version.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          name: Legion of Minds v${{ env.VERSION }}
+          make_latest: true
+          generate_release_notes: true
           files: |
             game/dist/*.zip
             game/dist/*-setup.exe
-          generate_release_notes: true

@@ -100,6 +100,9 @@ pub fn season_reset(trophies: i32) -> i32 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Season {
     pub number: i32,
+    /// Optional name the operator gave it, like "Season of Frost".
+    #[serde(default)]
+    pub name: String,
     pub started_at: String,
     pub ends_at: String,
 }
@@ -307,6 +310,7 @@ pub fn with_borrowed(
             troop,
             x: b.x,
             y: b.y,
+            fatigue: 0.0,
         });
     }
     if army.is_empty() {

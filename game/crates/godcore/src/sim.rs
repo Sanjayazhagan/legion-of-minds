@@ -6,22 +6,34 @@
 //! (all exactly rounded by IEEE 754), and randomness comes from the seeded
 //! `Rng`. The same layout, models and actions give the same battle anywhere.
 
+use crate::body::{self, Body};
 use crate::classes::ClassSpec;
 use crate::moves::{Move, N_MOVES};
 use crate::weapons::{mastery_dmg, mastery_skill_cd, mastery_skill_power, Skill, Weapon};
 use serde::{Deserialize, Serialize};
 
 pub const ARENA: f32 = 32.0;
+/// Share of damage a blessed troop is spared (see `World::blessed`).
+pub const BLESSING: f32 = 0.15;
+/// Extra damage a spellcaster (a unit whose attacks splash) takes from
+/// troops. Towers and cannons hit it like anyone else.
+pub const CASTER_EXPOSED: f32 = 0.25;
+/// Share of an attack's damage its splash does to buildings near the target
+/// (troops near the target take half).
+pub const SPLASH_BUILDING: f32 = 0.25;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
-pub const SIM_VERSION: u32 = 8;
-pub const OBS_DIM: usize = 121;
+pub const SIM_VERSION: u32 = 10;
+pub const OBS_DIM: usize = 154;
 /// Where the teamwork part of the view starts (the two allies' roles,
 /// threats and actions, sim version 4).
 pub const OBS_TEAM: usize = 74;
 /// Where the senses part starts (sim version 6), and the calls part (7).
 pub const OBS_SENSES: usize = 90;
 pub const OBS_CALLS: usize = 100;
+/// Where the body part starts (sim version 10): stamina, wear, and how
+/// tired the nearest enemies and allies look.
+pub const OBS_BODY: usize = 121;
 pub const N_ACTIONS: usize = 28;
 /// The first observation features and actions, as they were before dodge,
 /// block and skills (brains from older saves are grown from these).
@@ -46,23 +58,23 @@ pub const ACT_BLINK: u8 = 17;
 pub const ACT_SNARE: u8 = 18;
 pub const ACT_WARD: u8 = 19;
 pub const ACT_HEAL_2: u8 = 20;
-/// Calls to teammates (sim version 7). What each one comes to mean is up to
-/// the team: troops learn it in training. "Focus" points at the enemy the
-/// caller is looking at; "fall back" and "help" point at the caller.
+/// Signals to teammates. Since rules v10 (stage D) they are blank: each
+/// carries where the caller stands and what it is looking at, and a team
+/// learns in training what each one means. The constant names are kept from
+/// the fixed calls of versions 7 and 8.
 pub const ACT_CALL_FOCUS: u8 = 21;
 pub const ACT_CALL_BACK: u8 = 22;
 pub const ACT_CALL_HELP: u8 = 23;
-/// More calls (sim version 8): "hit the tower" points at the nearest
-/// building the caller sees, "wait" at the caller, "go that way" a few steps
-/// ahead of where the caller faces, and "watch out" at the enemy closest to
-/// the caller's nearest teammate.
 pub const ACT_CALL_TOWER: u8 = 24;
 pub const ACT_CALL_WAIT: u8 = 25;
 pub const ACT_CALL_GO: u8 = 26;
 pub const ACT_CALL_WATCH: u8 = 27;
 pub const N_CALLS: usize = 7;
-/// What each call says, as shown on screen.
-pub const CALL_WORDS: [&str; N_CALLS] = ["Focus!", "Fall back!", "Help!", "Hit the tower!", "Wait!", "Go that way!", "Watch out!"];
+/// What each signal sounds like, as shown on screen. Meaningless until a
+/// team gives it a meaning (see `team::call_reactions`).
+pub const CALL_WORDS: [&str; N_CALLS] = ["Hey!", "Ho!", "Hup!", "Oi!", "Psst!", "Yah!", "Hai!"];
+/// A troop looks at things within 30 degrees of where it faces.
+const LOOK_COS: f32 = 0.866_025_4;
 
 const DODGE_DIST: f32 = 2.4;
 const DODGE_INVULN: u32 = 6;
@@ -201,6 +213,13 @@ pub struct UnitStats {
     pub missed: u32,
     /// Calls made to teammates.
     pub calls: u32,
+    /// Ticks spent tired (below half stamina), and out of breath (empty).
+    pub tired: u32,
+    pub winded: u32,
+    /// Health lost to bleeding.
+    pub bled: f32,
+    /// Hits taken from an attacker it hadn't noticed.
+    pub surprised: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -256,9 +275,107 @@ pub struct Unit {
     pub invuln: u32,
     /// Which way the unit looks (unit length). Trained troops only see ahead.
     pub facing: (f32, f32),
+    /// Human limits (sim version 10, see `body`). A pool of 0 means a unit
+    /// that never tires (guards, towers, scripted fighters).
+    pub stamina: f32,
+    /// Most stamina the troop can get back to now (wear lowers it).
+    pub max_stamina: f32,
+    /// Stamina at the start of the battle.
+    pub pool: f32,
+    pub recovery: f32,
+    pub load: f32,
+    pub wear: f32,
+    /// Ticks to react to something new.
+    pub react: u32,
+    /// Last tick it exerted itself (struck, dodged, cast...). It only gets
+    /// its breath back fully once it stops for a moment.
+    pub effort: u32,
+    /// Damage taken (share of max health) to the legs and to the arms, and
+    /// health lost to bleeding each tick (sim version 10).
+    pub legs: f32,
+    pub arms: f32,
+    pub bleed: f32,
+    /// Arrows left and carried (crossbows), mana left and most (fire staffs).
+    pub arrows: f32,
+    pub arrows_max: f32,
+    pub mana: f32,
+    pub mana_max: f32,
+    /// Stamina cost of each attack (weapon weight).
+    pub swing: f32,
+    /// How far it sees, and extra chance to miss a shot (born traits).
+    pub sight: f32,
+    pub aim: f32,
+    /// Reach, damage and splash with its weapon working (with no arrows or
+    /// mana left it fights in close instead).
+    pub full_range: f32,
+    pub full_dmg: f32,
+    pub full_splash: f32,
 }
 
 impl Unit {
+    /// Give a troop the body of its class mix and conditioning.
+    pub fn give_body(&mut self, spec: &ClassSpec) {
+        let b = Body::of(spec);
+        self.pool = b.stamina;
+        self.stamina = b.stamina;
+        self.max_stamina = b.stamina;
+        self.recovery = b.recovery;
+        self.load = b.load;
+        self.wear = b.wear;
+        self.react = b.react;
+        self.arrows = b.arrows;
+        self.arrows_max = b.arrows;
+        self.mana = b.mana;
+        self.mana_max = b.mana;
+        self.swing = b.swing;
+        let t = b.traits;
+        self.max_hp *= 1.0 + t.toughness;
+        self.hp = self.max_hp;
+        self.dmg *= 1.0 + t.strength;
+        self.speed *= 1.0 + t.speed;
+        self.sight = SIGHT_RANGE + t.eyesight;
+        self.aim = t.aim;
+        self.full_range = self.range;
+        self.full_dmg = self.dmg;
+        self.full_splash = self.splash;
+    }
+
+    /// Start a raid already tired: `fatigue` of the pool is missing from
+    /// both the ceiling and the stamina (stage C). Tireless units ignore it.
+    pub fn start_tired(&mut self, fatigue: f32) {
+        if self.pool <= 0.0 {
+            return;
+        }
+        let f = fatigue.clamp(0.0, body::CARRY_MAX);
+        self.max_stamina = self.pool * (1.0 - f);
+        self.stamina = self.max_stamina;
+    }
+
+    /// Ammunition left as a share (1 for troops that need none).
+    pub fn supply(&self) -> f32 {
+        if self.arrows_max > 0.0 {
+            self.arrows / self.arrows_max
+        } else if self.mana_max > 0.0 {
+            self.mana / self.mana_max
+        } else {
+            1.0
+        }
+    }
+
+    /// How tired (0 fresh to 1 empty). Tireless units are never tired.
+    pub fn tiredness(&self) -> f32 {
+        body::tiredness(self.stamina, self.pool)
+    }
+
+    /// Stamina as a share of the starting pool (1 for tireless units).
+    pub fn breath(&self) -> f32 {
+        if self.pool > 0.0 {
+            self.stamina / self.pool
+        } else {
+            1.0
+        }
+    }
+
     pub fn dist(&self, o: &Unit) -> f32 {
         let dx = o.x - self.x;
         let dy = o.y - self.y;
@@ -300,6 +417,75 @@ pub enum EventKind {
     /// caller, `to` the spot it points at.
     Call(u8),
 }
+
+/// Light and weather (sim version 10): how far trained troops can see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Light {
+    #[default]
+    Day,
+    Dusk,
+    /// Dark, but buildings have torches and are seen from as far as by day.
+    Night,
+    /// Thick fog: short sight, and sound carries further.
+    Fog,
+}
+
+impl Light {
+    pub const ALL: [Light; 4] = [Light::Day, Light::Dusk, Light::Night, Light::Fog];
+
+    /// Share of normal sight range.
+    pub fn sight(self) -> f32 {
+        match self {
+            Light::Day => 1.0,
+            Light::Dusk => 11.0 / 14.0,
+            Light::Night => 8.0 / 14.0,
+            Light::Fog => 6.0 / 14.0,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Light::Day => "Day",
+            Light::Dusk => "Dusk",
+            Light::Night => "Night",
+            Light::Fog => "Fog",
+        }
+    }
+}
+
+/// Ground that isn't flat grass (sim version 10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ground {
+    /// Slow and tiring to cross.
+    Mud,
+    /// A rise: slower to climb, but troops on top see further and shoot harder.
+    Hill,
+}
+
+/// A round patch of mud or hill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Patch {
+    pub ground: Ground,
+    pub x: f32,
+    pub y: f32,
+    pub r: f32,
+}
+
+pub const MUD_SPEED: f32 = 0.75;
+pub const MUD_EFFORT: f32 = 1.3;
+pub const HILL_SPEED: f32 = 0.85;
+pub const HILL_SIGHT: f32 = 2.0;
+pub const HILL_SHOT: f32 = 1.1;
+/// How far away a troop notices the edge of mud or a hill.
+pub const GROUND_FEEL: f32 = 6.0;
+/// How far a troop's footsteps carry (heavy armour carries further).
+pub const STEP_SOUND: f32 = 4.0;
+pub const HEAVY_STEP_SOUND: f32 = 6.0;
+/// Fog carries sound this much further.
+pub const FOG_HEARING: f32 = 1.25;
+/// A blow from an attacker the target hasn't noticed hits this much harder,
+/// and can't be dodged or blocked.
+pub const SURPRISE: f32 = 1.3;
 
 /// A hidden snare on the ground.
 #[derive(Clone, Copy, Debug)]
@@ -368,8 +554,14 @@ pub struct World {
     total_building_hp: f32,
     /// What each trained troop remembers of each unit, `n * n` entries.
     mem: Vec<Mem>,
-    /// Where fights could be heard last tick.
-    noise: Vec<(f32, f32)>,
+    /// What could be heard last tick: where, how far it carries, and whose
+    /// it is (None for a fight, which everyone hears).
+    noise: Vec<(f32, f32, f32, Option<Team>)>,
+    /// Footsteps and shouts made this tick (they join `noise`).
+    sounds: Vec<(f32, f32, f32, Option<Team>)>,
+    /// Light and weather, and mud and hills (sim version 10).
+    pub light: Light,
+    pub terrain: Vec<Patch>,
     /// Recent calls to teammates.
     calls: Vec<Call>,
 }
@@ -437,6 +629,9 @@ impl World {
             total_building_hp: 0.0,
             mem: Vec::new(),
             noise: Vec::new(),
+            sounds: Vec::new(),
+            light: Light::Day,
+            terrain: Vec::new(),
             calls: Vec::new(),
         }
     }
@@ -489,6 +684,27 @@ impl World {
             stun: 0,
             invuln: 0,
             facing: (0.0, 1.0),
+            stamina: 0.0,
+            max_stamina: 0.0,
+            pool: 0.0,
+            recovery: 0.0,
+            load: 1.0,
+            wear: 0.0,
+            react: REACT,
+            effort: 0,
+            legs: 0.0,
+            arms: 0.0,
+            bleed: 0.0,
+            arrows: 0.0,
+            arrows_max: 0.0,
+            mana: 0.0,
+            mana_max: 0.0,
+            swing: 1.0,
+            sight: SIGHT_RANGE,
+            aim: 0.0,
+            full_range: 0.0,
+            full_dmg: 0.0,
+            full_splash: 0.0,
         }
     }
 
@@ -548,6 +764,7 @@ impl World {
         // A mixed-in block keeps less of the weapon's protection.
         u.block_taken = 1.0 - (1.0 - ws.block_taken) * u.moves[Move::Block as usize];
         u.tag = tag;
+        u.give_body(spec);
         // Raiders look towards the middle of the map, defenders out from it.
         let c = ARENA * 0.5;
         let (dx, dy) = if team == Team::Attack { (c - x, c - y) } else { (x - c, y - c) };
@@ -742,6 +959,19 @@ impl World {
                 && self.traps.iter().filter(|t| t.owner == i).count() < MAX_SNARES
                 && self.nearest_noticed(i, |u| u.team != me.team && !u.kind.is_building()).is_some_and(|(_, d)| d <= 8.0);
             m[ACT_WARD as usize] = ready(Move::Ward) && self.ward_useful(i);
+            // Out of breath: no rolls, rushes, spells or raised guards.
+            for (a, cost) in [
+                (ACT_DODGE, body::COST_DODGE),
+                (ACT_BLOCK, body::COST_BLOCK),
+                (ACT_SKILL, body::COST_SKILL),
+                (ACT_CHARGE, body::COST_CHARGE),
+                (ACT_CLOAK, body::COST_FOCUS),
+                (ACT_BLINK, body::COST_FOCUS),
+                (ACT_SNARE, body::COST_FOCUS),
+                (ACT_WARD, body::COST_FOCUS),
+            ] {
+                m[a as usize] = m[a as usize] && self.can_afford(i, cost);
+            }
             let tick = self.tick;
             if self.anyone_to_call(i) && !self.calls.iter().any(|c| c.from == i && tick - c.tick < CALL_GAP) {
                 for a in ACT_CALL_FOCUS..ACT_CALL_FOCUS + N_CALLS as u8 {
@@ -816,11 +1046,15 @@ impl World {
         let (team, x, y) = (me.team, me.x, me.y);
         match me.skill {
             None => false,
-            Some(Skill::ShieldBash) | Some(Skill::Volley) => self.unit_target(i).is_some(),
+            Some(Skill::ShieldBash) => self.unit_target(i).is_some(),
+            Some(Skill::Volley) => self.unit_target(i).is_some() && (me.arrows_max == 0.0 || me.arrows >= 1.0),
             Some(Skill::Whirlwind) => !self.enemies_near(team, x, y, 2.2, true).is_empty(),
             Some(Skill::GroundSlam) => !self.enemies_near(team, x, y, 2.0, false).is_empty(),
             Some(Skill::Shadowstep) => self.shadowstep_target(i).is_some(),
-            Some(Skill::Fireball) => self.unit_target(i).is_some() || self.building_target(i).is_some(),
+            Some(Skill::Fireball) => {
+                (self.unit_target(i).is_some() || self.building_target(i).is_some())
+                    && (me.mana_max == 0.0 || me.mana >= 3.0 * crate::body::SPELL_MANA)
+            }
             Some(Skill::HealingNova) => self.units.iter().any(|u| {
                 u.alive && u.team == team && u.kind == Kind::Troop && u.max_hp - u.hp >= 5.0 && me.dist(u) <= 3.5
             }),
@@ -831,6 +1065,141 @@ impl World {
 
     /// Trained troops have senses; towers, guards and scripted troops still
     /// know where everyone is.
+    /// Whether unit `i` has human limits: a trained troop with a body.
+    pub fn human(&self, i: usize) -> bool {
+        self.has_senses(i) && self.units[i].pool > 0.0
+    }
+
+    /// Spend stamina on an action. What is spent also wears the body down a
+    /// little for the rest of the battle.
+    fn spend(&mut self, i: usize, cost: f32) {
+        if !self.human(i) {
+            return;
+        }
+        let tick = self.tick;
+        let u = &mut self.units[i];
+        u.effort = tick;
+        u.max_stamina = (u.max_stamina - cost * u.wear).max(u.pool * body::WEAR_FLOOR);
+        u.stamina = (u.stamina - cost).max(0.0).min(u.max_stamina);
+    }
+
+    /// Whether troop `i` has the breath for something costing `cost`.
+    fn can_afford(&self, i: usize, cost: f32) -> bool {
+        !self.human(i) || self.units[i].stamina >= cost
+    }
+
+    /// Speed left after tiredness and pain (1 for tireless units).
+    fn vigour(&self, i: usize) -> f32 {
+        if !self.human(i) {
+            return 1.0;
+        }
+        let u = &self.units[i];
+        (1.0 - (1.0 - body::TIRED_SPEED) * u.tiredness())
+            * (1.0 - body::PAIN_SLOW * body::pain(u.hp, u.max_hp))
+            * (1.0 - (1.0 - body::LAME_SPEED) * body::injury(u.legs))
+    }
+
+    /// Damage left after tiredness (1 for tireless units).
+    fn force(&self, i: usize) -> f32 {
+        if !self.human(i) {
+            return 1.0;
+        }
+        let u = &self.units[i];
+        (1.0 - (1.0 - body::TIRED_DMG) * u.tiredness()) * (1.0 - (1.0 - body::ARM_DMG) * body::injury(u.arms))
+    }
+
+    /// Attack cooldown after tiredness.
+    fn tired_cd(&self, i: usize) -> u32 {
+        let u = &self.units[i];
+        if !self.human(i) {
+            return u.cd_max;
+        }
+        (u.cd_max as f32
+            * (1.0 + (body::TIRED_COOLDOWN - 1.0) * u.tiredness())
+            * (1.0 + (body::ARM_COOLDOWN - 1.0) * body::injury(u.arms)))
+            .round() as u32
+    }
+
+    /// Get breath back after acting: most when standing still, little when
+    /// fighting, none behind a raised guard (holding it costs). Pain slows it.
+    fn breathe(&mut self, i: usize) {
+        if !self.human(i) || !self.units[i].alive {
+            return;
+        }
+        let u = &self.units[i];
+        let rest = if u.block_ticks > 0 {
+            0.0
+        } else if (u.stun > 0 || u.last_action == ACT_IDLE) && self.tick >= u.effort + body::BREATHER {
+            1.0
+        } else if matches!(u.last_action, 1..=8) {
+            body::REST_WALKING
+        } else {
+            body::REST_FIGHTING
+        };
+        if u.block_ticks > 0 {
+            self.spend(i, body::COST_HOLD);
+        }
+        let u = &mut self.units[i];
+        let gain = u.recovery * rest * (1.0 - body::PAIN_SLOW * body::pain(u.hp, u.max_hp));
+        u.stamina = (u.stamina + gain).min(u.max_stamina);
+        let t = u.tiredness();
+        u.stats.tired += (t > 0.0) as u32;
+        u.stats.winded += (u.stamina < 1.0) as u32;
+        u.mana = (u.mana + body::MANA_REGEN).min(u.mana_max);
+        if u.bleed > 0.0 {
+            u.stats.bled += u.bleed.min(u.hp);
+            u.hp -= u.bleed;
+            if u.hp <= 0.0 {
+                u.hp = 0.0;
+                u.alive = false;
+                let p = (u.x, u.y);
+                self.events.push(Event { kind: EventKind::Death, from: p, to: p });
+                return;
+            }
+        }
+        self.arm(i);
+    }
+
+    /// With arrows or mana a troop uses its weapon; without, it fights in
+    /// close with whatever it has.
+    fn arm(&mut self, i: usize) {
+        let u = &mut self.units[i];
+        let empty = (u.arrows_max > 0.0 && u.arrows < 1.0) || (u.mana_max > 0.0 && u.mana < body::SPELL_MANA);
+        if empty {
+            u.range = body::MAKESHIFT_RANGE;
+            u.dmg = u.full_dmg * body::MAKESHIFT_DMG;
+            u.splash = 0.0;
+        } else {
+            u.range = u.full_range;
+            u.dmg = u.full_dmg;
+            u.splash = u.full_splash;
+        }
+    }
+
+    /// Use up what an attack needs: an arrow, or mana for a spell.
+    fn use_supply(&mut self, i: usize, times: f32) {
+        if !self.human(i) {
+            return;
+        }
+        let u = &mut self.units[i];
+        if u.arrows_max > 0.0 && u.arrows >= 1.0 {
+            u.arrows = (u.arrows - times).max(0.0);
+        } else if u.mana_max > 0.0 && u.mana >= body::SPELL_MANA {
+            u.mana = (u.mana - body::SPELL_MANA * times).max(0.0);
+        }
+    }
+
+    /// Heals stop bleeding and mend injuries a little.
+    fn mend(&mut self, j: usize, amount: f32) {
+        let u = &mut self.units[j];
+        if u.max_hp > 0.0 {
+            let m = body::MEND * amount / u.max_hp;
+            u.legs = (u.legs - m).max(0.0);
+            u.arms = (u.arms - m).max(0.0);
+        }
+        u.bleed = 0.0;
+    }
+
     pub fn has_senses(&self, i: usize) -> bool {
         let u = &self.units[i];
         u.kind == Kind::Troop && u.control == Control::External
@@ -849,7 +1218,12 @@ impl World {
         if c - edge <= TOUCH {
             return true;
         }
-        if c - edge > SIGHT_RANGE || me.facing.0 * dx + me.facing.1 * dy < SIGHT_COS * c - edge {
+        let mut sight = me.sight + if self.ground(me.x, me.y) == Some(Ground::Hill) { HILL_SIGHT } else { 0.0 };
+        // Torches keep buildings in view at night.
+        if !(self.light == Light::Night && u.kind.is_building()) {
+            sight *= self.light.sight();
+        }
+        if c - edge > sight || me.facing.0 * dx + me.facing.1 * dy < SIGHT_COS * c - edge {
             return false;
         }
         for (k, b) in self.units.iter().enumerate() {
@@ -877,6 +1251,7 @@ impl World {
             self.mem = vec![FORGOTTEN; n * n];
         }
         let tick = self.tick;
+        let react: Vec<u32> = self.units.iter().map(|u| u.react).collect();
         for i in 0..n {
             if !self.units[i].alive || !self.has_senses(i) {
                 continue;
@@ -891,7 +1266,7 @@ impl World {
                 // Something new (or long forgotten) takes a moment to react to;
                 // what is in view when the battle starts is already noticed.
                 if m.seen == NEVER || (!building && tick > m.seen + MEMORY) {
-                    m.ready = if first_look { 0 } else { tick + REACT };
+                    m.ready = if first_look { 0 } else { tick + react[i] };
                 }
                 *m = Mem { x, y, hp, seen: tick, ready: m.ready };
             }
@@ -976,15 +1351,44 @@ impl World {
         best
     }
 
+    /// What troop `i` is looking at: the nearest enemy or enemy building it
+    /// has noticed within 30 degrees of its facing, or a spot 6 steps ahead.
+    pub fn look_point(&self, i: usize) -> (f32, f32) {
+        let me = &self.units[i];
+        let (fx, fy) = me.facing;
+        let mut best: Option<(usize, f32)> = None;
+        for (j, u) in self.units.iter().enumerate() {
+            if u.team == me.team || !u.alive || u.cloak > 0 || !self.noticed(i, j) {
+                continue;
+            }
+            let (dx, dy) = (u.x - me.x, u.y - me.y);
+            let d = (dx * dx + dy * dy).sqrt();
+            if d < 1e-3 || (dx * fx + dy * fy) / d < LOOK_COS {
+                continue;
+            }
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((j, d));
+            }
+        }
+        match best {
+            Some((j, _)) => (self.units[j].x, self.units[j].y),
+            None => ((me.x + fx * 6.0).clamp(0.5, ARENA - 0.5), (me.y + fy * 6.0).clamp(0.5, ARENA - 0.5)),
+        }
+    }
+
     /// The nearest fight troop `i` can hear (not one it is standing in):
     /// where, and how far.
     fn heard(&self, i: usize) -> Option<((f32, f32), f32)> {
         let me = &self.units[i];
         let mut best: Option<((f32, f32), f32)> = None;
-        for &(x, y) in &self.noise {
+        let carry = if self.light == Light::Fog { FOG_HEARING } else { 1.0 };
+        for &(x, y, range, team) in &self.noise {
+            if team == Some(me.team) {
+                continue;
+            }
             let (dx, dy) = (x - me.x, y - me.y);
             let d = (dx * dx + dy * dy).sqrt();
-            if d > TOUCH && d <= HEAR_RANGE && best.map_or(true, |(_, bd)| d < bd) {
+            if d > TOUCH && d <= range * carry && best.map_or(true, |(_, bd)| d < bd) {
                 best = Some(((dx, dy), d));
             }
         }
@@ -1041,7 +1445,8 @@ impl World {
 
     /// The freshest call of each kind troop `i` has heard and had time to
     /// take in: where it points, and how fresh it is.
-    fn heard_calls(&self, i: usize) -> [Option<(f32, f32, f32)>; N_CALLS] {
+    /// Also where the caller stood (rules v10).
+    fn heard_calls(&self, i: usize) -> [Option<(f32, f32, f32, f32, f32)>; N_CALLS] {
         let me = &self.units[i];
         let mut out = [None; N_CALLS];
         let mut best = [0u32; N_CALLS];
@@ -1054,7 +1459,7 @@ impl World {
             let k = c.kind as usize;
             if out[k].is_none() || c.tick > best[k] {
                 best[k] = c.tick;
-                out[k] = Some((c.x, c.y, 1.0 - age as f32 / CALL_LIFE as f32));
+                out[k] = Some((c.x, c.y, 1.0 - age as f32 / CALL_LIFE as f32, c.cx, c.cy));
             }
         }
         out
@@ -1275,9 +1680,10 @@ impl World {
         }
         // Calls from teammates (sim versions 7 and 8): for each kind, where
         // the freshest one points and how fresh it is.
-        for c in self.heard_calls(i) {
+        let heard = self.heard_calls(i);
+        for c in heard {
             match c {
-                Some((x, y, fresh)) => {
+                Some((x, y, fresh, _, _)) => {
                     put(&mut o, (x - me.x) / CALL_RANGE);
                     put(&mut o, (y - me.y) / CALL_RANGE);
                     put(&mut o, fresh);
@@ -1288,6 +1694,55 @@ impl World {
                     }
                 }
             }
+        }
+        // Body (sim version 10): its own breath and how far wear has
+        // brought its ceiling down, how tired the three enemies above look
+        // (1 if fresh or tireless, 0 if not in sight), and the two nearest
+        // allies (0 if none).
+        let me = &self.units[i];
+        put(&mut o, me.breath());
+        put(&mut o, if me.pool > 0.0 { me.max_stamina / me.pool } else { 1.0 });
+        for s in 0..3 {
+            put(&mut o, es.get(s).filter(|e| e.fresh >= 1.0).map_or(0.0, |e| self.units[e.j].breath()));
+        }
+        for s in 0..2 {
+            put(&mut o, al.get(s).map_or(0.0, |&(j, _)| self.units[j].breath()));
+        }
+        // Injuries and supplies: how hurt its legs and arms are, how fast it
+        // bleeds, and how much ammunition or mana it has left.
+        let me = &self.units[i];
+        put(&mut o, body::injury(me.legs));
+        put(&mut o, body::injury(me.arms));
+        put(&mut o, me.bleed / body::BLEED_MAX);
+        put(&mut o, me.supply());
+        // The battlefield: how far it can see in this light, fog, the ground
+        // under it, and which way the nearest mud and hill are (stronger the
+        // closer their edge), so a troop backing away knows what's behind it.
+        put(&mut o, self.light.sight());
+        put(&mut o, (self.light == Light::Fog) as u8 as f32);
+        let g = self.ground(me.x, me.y);
+        put(&mut o, (g == Some(Ground::Mud)) as u8 as f32);
+        put(&mut o, (g == Some(Ground::Hill)) as u8 as f32);
+        for ground in [Ground::Mud, Ground::Hill] {
+            let mut best: Option<(f32, f32, f32)> = None;
+            for p in self.terrain.iter().filter(|p| p.ground == ground) {
+                let (dx, dy) = (p.x - me.x, p.y - me.y);
+                let d = (dx * dx + dy * dy).sqrt();
+                let edge = (d - p.r).max(0.0);
+                if edge < GROUND_FEEL && best.map_or(true, |b| edge < b.0) {
+                    let (ux, uy) = if d > 1e-3 { (dx / d, dy / d) } else { (0.0, 0.0) };
+                    best = Some((edge, ux, uy));
+                }
+            }
+            let (ux, uy, near) = best.map_or((0.0, 0.0, 0.0), |(e, ux, uy)| (ux, uy, 1.0 - e / GROUND_FEEL));
+            put(&mut o, ux * near);
+            put(&mut o, uy * near);
+        }
+        // Blank signals (stage D): where each one's caller stood.
+        for c in heard {
+            let (dx, dy) = c.map_or((0.0, 0.0), |(_, _, _, cx, cy)| ((cx - me.x) / CALL_RANGE, (cy - me.y) / CALL_RANGE));
+            put(&mut o, dx);
+            put(&mut o, dy);
         }
         debug_assert_eq!(k, OBS_DIM);
         o
@@ -1386,19 +1841,59 @@ impl World {
         // What could be heard this tick, then what everyone saw.
         self.noise.clear();
         for e in &self.events {
-            if !matches!(e.kind, EventKind::Heal | EventKind::Cloak | EventKind::Ward | EventKind::TrapSet) {
-                self.noise.push(e.to);
+            if !matches!(e.kind, EventKind::Heal | EventKind::Cloak | EventKind::Ward | EventKind::TrapSet | EventKind::Call(_)) {
+                self.noise.push((e.to.0, e.to.1, HEAR_RANGE, None));
             }
         }
+        self.noise.append(&mut self.sounds);
         self.update_senses();
+    }
+
+    /// What the ground is like here (None for flat grass).
+    pub fn ground(&self, x: f32, y: f32) -> Option<Ground> {
+        self.terrain.iter().find(|p| {
+            let (dx, dy) = (x - p.x, y - p.y);
+            dx * dx + dy * dy <= p.r * p.r
+        }).map(|p| p.ground)
     }
 
     fn pos(&self, i: usize) -> (f32, f32) {
         (self.units[i].x, self.units[i].y)
     }
 
+    /// A troop standing within reach of a living healer on its side (not
+    /// itself) is blessed: it takes less damage. This is what makes a healer
+    /// worth a place in an army or a defence even when nobody is hurt yet.
+    pub fn blessed(&self, i: usize) -> bool {
+        let me = &self.units[i];
+        if me.kind.is_building() {
+            return false;
+        }
+        self.units.iter().enumerate().any(|(k, h)| {
+            k != i
+                && h.alive
+                && h.team == me.team
+                && !h.kind.is_building()
+                && h.heal >= 5.0
+                && h.dist(me) <= h.heal_range
+        })
+    }
+
     fn damage(&mut self, from: usize, to: usize, amount: f32) {
-        if self.units[to].invuln > 0 {
+        // Caught from behind by someone it never noticed: no dodging or
+        // blocking that, and it hurts more.
+        let surprise = from != to
+            && self.human(to)
+            && !self.units[from].kind.is_building()
+            && self.units[from].team != self.units[to].team
+            && !self.noticed(to, from);
+        let amount = if surprise {
+            self.units[to].stats.surprised += 1;
+            amount * SURPRISE
+        } else {
+            amount
+        };
+        if self.units[to].invuln > 0 && !surprise {
             self.units[to].stats.evaded += 1;
             return;
         }
@@ -1406,7 +1901,15 @@ impl World {
         if self.units[to].ward > 0 {
             amount *= 1.0 - self.units[to].ward_power;
         }
-        if self.units[to].block_ticks > 0 {
+        if self.blessed(to) {
+            amount *= 1.0 - BLESSING;
+        }
+        // Spellcasters hit a whole group at once, and pay for it when a
+        // troop gets to them.
+        if self.units[to].splash > 0.0 && !self.units[from].kind.is_building() {
+            amount *= 1.0 + CASTER_EXPOSED;
+        }
+        if self.units[to].block_ticks > 0 && !surprise {
             let kept = amount * self.units[to].block_taken;
             self.units[to].stats.blocked += amount - kept;
             amount = kept;
@@ -1415,6 +1918,20 @@ impl World {
         }
         let hit = amount.min(self.units[to].hp);
         self.units[to].hp -= hit;
+        if self.human(to) && hit > 0.0 {
+            // Where the blow landed (sim version 10).
+            let r = self.roll(to, from ^ 0x5bd1);
+            let u = &mut self.units[to];
+            let share = hit / u.max_hp;
+            if r < body::HIT_LEGS {
+                u.legs += share;
+            } else if r < body::HIT_LEGS + body::HIT_ARMS {
+                u.arms += share;
+            }
+            if share >= body::WOUND {
+                u.bleed = (u.bleed + body::BLEED).min(body::BLEED_MAX);
+            }
+        }
         let to_building = self.units[to].kind.is_building();
         let s = &mut self.units[from].stats;
         if to_building {
@@ -1436,6 +1953,11 @@ impl World {
     }
 
     fn troop_act(&mut self, i: usize, a: u8) {
+        self.troop_do(i, a);
+        self.breathe(i);
+    }
+
+    fn troop_do(&mut self, i: usize, a: u8) {
         {
             let u = &mut self.units[i];
             for t in [&mut u.cd, &mut u.skill_cd, &mut u.block_ticks, &mut u.invuln, &mut u.cloak, &mut u.ward] {
@@ -1463,8 +1985,22 @@ impl World {
             1..=8 => {
                 let (dx, dy) = DIRS[(a - 1) as usize];
                 let u = &self.units[i];
-                let sp = if u.block_ticks > 0 { u.speed * 0.5 } else { u.speed };
+                let g = self.ground(u.x, u.y);
+                let slow = match g {
+                    Some(Ground::Mud) => MUD_SPEED,
+                    Some(Ground::Hill) => HILL_SPEED,
+                    None => 1.0,
+                };
+                let sp = if u.block_ticks > 0 { u.speed * 0.5 } else { u.speed } * self.vigour(i) * slow;
+                let cost = body::COST_WALK * u.load * if g == Some(Ground::Mud) { MUD_EFFORT } else { 1.0 };
+                let sound = if u.load > 1.2 { HEAVY_STEP_SOUND } else { STEP_SOUND };
+                self.sounds.push((u.x, u.y, sound, Some(u.team)));
                 self.move_unit(i, dx * sp, dy * sp);
+                // Walking doesn't wear the body down, it just costs breath.
+                if self.human(i) {
+                    let u = &mut self.units[i];
+                    u.stamina = (u.stamina - cost).max(0.0);
+                }
                 self.turn_toward(i, dx, dy);
             }
             ACT_DODGE if m[ACT_DODGE as usize] => {
@@ -1478,6 +2014,7 @@ impl World {
                 u.invuln = DODGE_INVULN;
                 u.move_cd[Move::Dodge as usize] = move_cd(DODGE_CD, u.moves[Move::Dodge as usize]);
                 u.stats.dodges += 1;
+                self.spend(i, body::COST_DODGE);
                 let to = self.pos(i);
                 self.events.push(Event { kind: EventKind::Dodge, from, to });
             }
@@ -1485,6 +2022,7 @@ impl World {
                 let u = &mut self.units[i];
                 u.block_ticks = BLOCK_TICKS;
                 u.move_cd[Move::Block as usize] = move_cd(BLOCK_CD, u.moves[Move::Block as usize]);
+                self.spend(i, body::COST_BLOCK);
             }
             ACT_CHARGE if m[ACT_CHARGE as usize] => self.charge(i),
             ACT_CLOAK if m[ACT_CLOAK as usize] => {
@@ -1492,6 +2030,7 @@ impl World {
                 let p = u.moves[Move::Cloak as usize];
                 u.cloak = (CLOAK_TICKS as f32 * p).round() as u32;
                 u.move_cd[Move::Cloak as usize] = move_cd(CLOAK_CD, p);
+                self.spend(i, body::COST_FOCUS);
                 let at = self.pos(i);
                 self.events.push(Event { kind: EventKind::Cloak, from: at, to: at });
             }
@@ -1508,6 +2047,7 @@ impl World {
                 u.invuln = BLINK_INVULN;
                 u.move_cd[Move::Blink as usize] = move_cd(BLINK_CD, p);
                 u.stats.dodges += 1;
+                self.spend(i, body::COST_FOCUS);
                 let to = self.pos(i);
                 self.events.push(Event { kind: EventKind::Blink, from, to });
             }
@@ -1516,6 +2056,7 @@ impl World {
                 let p = self.units[i].moves[Move::Snare as usize];
                 self.traps.push(Trap { x, y, team, owner: i, power: p, ttl: SNARE_LIFE });
                 self.units[i].move_cd[Move::Snare as usize] = move_cd(SNARE_CD, p);
+                self.spend(i, body::COST_FOCUS);
                 self.events.push(Event { kind: EventKind::TrapSet, from: (x, y), to: (x, y) });
             }
             ACT_WARD if m[ACT_WARD as usize] => {
@@ -1533,6 +2074,7 @@ impl World {
                     self.units[k].ward_power = 0.5 * p;
                 }
                 self.units[i].move_cd[Move::Ward as usize] = move_cd(WARD_CD, p);
+                self.spend(i, body::COST_FOCUS);
                 let at = self.pos(i);
                 self.events.push(Event { kind: EventKind::Ward, from: at, to: at });
             }
@@ -1563,7 +2105,9 @@ impl World {
                     .min(self.units[j].max_hp - self.units[j].hp);
                 self.units[j].hp += amount;
                 self.units[i].stats.heal += amount;
-                self.units[i].cd = self.units[i].cd_max;
+                self.mend(j, amount);
+                self.units[i].cd = self.tired_cd(i);
+                self.spend(i, body::COST_SHOT);
                 let (from, to) = (self.pos(i), self.pos(j));
                 self.events.push(Event {
                     kind: EventKind::Heal,
@@ -1576,38 +2120,31 @@ impl World {
     }
 
     /// Shout to the team. Calling gives away a cloaked troop.
+    ///
+    /// Signals are blank (rules v10, stage D): every one carries where the
+    /// caller stands and what it is looking at (the nearest enemy or enemy
+    /// building it has noticed within 30 degrees of where it faces, or a
+    /// spot 6 steps ahead). What each signal means is whatever the team learns it means.
     fn call(&mut self, i: usize, kind: u8) {
         let (team, cx, cy) = (self.units[i].team, self.units[i].x, self.units[i].y);
-        let enemy = |u: &Unit| u.team != team;
-        let (x, y) = match kind {
-            0 => self.nearest_noticed(i, enemy).map_or((cx, cy), |(j, _)| self.pos(j)),
-            3 => self.nearest_noticed(i, |u| u.team != team && u.kind.is_building()).map_or((cx, cy), |(j, _)| self.pos(j)),
-            5 => {
-                let (fx, fy) = self.units[i].facing;
-                ((cx + fx * 6.0).clamp(0.5, ARENA - 0.5), (cy + fy * 6.0).clamp(0.5, ARENA - 0.5))
-            }
-            6 => {
-                // The danger closest to the nearest teammate.
-                let mate = self.nearest_noticed(i, |u| u.team == team && u.kind == Kind::Troop);
-                let foe = mate.and_then(|(m, _)| {
-                    (0..self.units.len())
-                        .filter(|&j| self.units[j].alive && !self.units[j].kind.is_building() && self.units[j].cloak == 0 && enemy(&self.units[j]) && self.noticed(i, j))
-                        .min_by(|&a, &b| self.units[m].dist(&self.units[a]).total_cmp(&self.units[m].dist(&self.units[b])).then(a.cmp(&b)))
-                });
-                foe.map_or((cx, cy), |j| self.pos(j))
-            }
-            _ => (cx, cy),
-        };
+        let (x, y) = self.look_point(i);
         self.calls.push(Call { team, from: i, kind, cx, cy, x, y, tick: self.tick });
+        // The enemy can hear a shout too.
+        self.sounds.push((cx, cy, CALL_RANGE, Some(team)));
         self.units[i].cloak = 0;
         self.units[i].stats.calls += 1;
         self.events.push(Event { kind: EventKind::Call(kind), from: (cx, cy), to: (x, y) });
     }
 
     fn strike(&mut self, i: usize, j: usize) {
-        self.units[i].cd = self.units[i].cd_max;
+        // A tired troop swings slower and softer, and shoots wider.
+        let (tired, force) = (if self.human(i) { self.units[i].tiredness() } else { 0.0 }, self.force(i));
+        self.units[i].cd = self.tired_cd(i);
         self.units[i].cloak = 0;
         let ranged = self.units[i].range > 2.5;
+        let swing = self.units[i].swing;
+        self.spend(i, swing * if ranged { body::COST_SHOT } else { body::COST_SWING });
+        self.use_supply(i, 1.0);
         let kind = if ranged { EventKind::Arrow } else { EventKind::Melee };
         let (from, to) = (self.pos(i), self.pos(j));
         // Trained troops are not perfect shots: far and moving targets get
@@ -1619,7 +2156,8 @@ impl World {
             } else {
                 let r = (me.dist(t) / me.range).min(1.0);
                 0.04 + 0.2 * r * r + if matches!(t.last_action, 1..=8) { 0.12 } else { 0.0 }
-            };
+            } + body::TIRED_MISS * tired
+                + me.aim;
             let roll = self.roll(i, j);
             if roll < p {
                 let (dx, dy) = (to.0 - from.0, to.1 - from.1);
@@ -1632,7 +2170,8 @@ impl World {
             }
         }
         self.events.push(Event { kind, from, to });
-        let dmg = self.units[i].dmg;
+        let high = ranged && self.ground(from.0, from.1) == Some(Ground::Hill);
+        let dmg = self.units[i].dmg * force * if high { HILL_SHOT } else { 1.0 };
         self.damage(i, j, dmg);
         let splash = self.units[i].splash;
         if splash > 0.0 {
@@ -1645,7 +2184,9 @@ impl World {
                 .collect();
             let t = &self.units[j];
             for k in self.reach(i, near, |k| t.dist(&self.units[k])) {
-                self.damage(i, k, dmg * 0.5);
+                // Blasts scatter troops; walls and towers shrug most of it off.
+                let share = if self.units[k].kind.is_building() { SPLASH_BUILDING } else { 0.5 };
+                self.damage(i, k, dmg * share);
             }
             self.events.push(Event { kind: EventKind::Blast, from: to, to });
         }
@@ -1663,10 +2204,12 @@ impl World {
         self.units[i].facing = (dx / d, dy / d);
         self.units[i].move_cd[Move::Charge as usize] = move_cd(CHARGE_CD, p);
         self.units[i].cloak = 0;
+        let force = self.force(i);
+        self.spend(i, body::COST_CHARGE);
         let to = self.pos(i);
         self.events.push(Event { kind: EventKind::Charge, from, to });
         if self.units[i].dist(&self.units[j]) <= self.units[i].range + 0.5 {
-            let dmg = self.units[i].dmg * 1.2 * p;
+            let dmg = self.units[i].dmg * 1.2 * p * force;
             self.damage(i, j, dmg);
             self.stun(j, (10.0 * p).round() as u32);
         }
@@ -1714,9 +2257,10 @@ impl World {
     fn use_skill(&mut self, i: usize) {
         let Some(skill) = self.units[i].skill else { return };
         let (team, power) = (self.units[i].team, self.units[i].skill_power);
-        let base = self.units[i].dmg * power;
+        let base = self.units[i].dmg * power * self.force(i);
         let me = self.pos(i);
         self.units[i].skill_cd = self.units[i].skill_cd_max;
+        self.spend(i, body::COST_SKILL);
         self.units[i].stats.skills += 1;
         self.units[i].cloak = 0;
         let mut to = me;
@@ -1760,6 +2304,7 @@ impl World {
                 let targets = self.nearest_k(i, reach, |u| u.team != team && !u.kind.is_building());
                 for (j, d) in targets {
                     if d <= range {
+                        self.use_supply(i, 1.0);
                         let p = self.pos(j);
                         self.events.push(Event { kind: EventKind::Arrow, from: me, to: p });
                         self.damage(i, j, base);
@@ -1769,6 +2314,7 @@ impl World {
             Skill::Fireball => {
                 let j = self.unit_target(i).or_else(|| self.building_target(i)).unwrap();
                 to = self.pos(j);
+                self.use_supply(i, 3.0);
                 self.damage(i, j, base * 2.0);
                 let near: Vec<usize> = self.enemies_near(team, to.0, to.1, 2.5, true).into_iter().filter(|&k| k != j).collect();
                 let t = &self.units[j];
@@ -1790,6 +2336,7 @@ impl World {
                     let h = amount.min(u.max_hp - u.hp);
                     self.units[k].hp += h;
                     self.units[i].stats.heal += h;
+                    self.mend(k, h);
                 }
             }
         }
@@ -1833,6 +2380,12 @@ impl World {
         let target = self.nearest(i, |u| u.team != team && u.kind == Kind::Troop);
         let (gx, gy, (hx, hy)) = (self.units[i].x, self.units[i].y, self.units[i].home);
         let (range, cd, speed) = (self.units[i].range, self.units[i].cd, self.units[i].speed);
+        let speed = speed
+            * match self.ground(self.units[i].x, self.units[i].y) {
+                Some(Ground::Mud) => MUD_SPEED,
+                Some(Ground::Hill) => HILL_SPEED,
+                None => 1.0,
+            };
         let home = ((gx - hx) * (gx - hx) + (gy - hy) * (gy - hy)).sqrt();
         if let Some((j, d)) = target {
             if d <= range {
@@ -1884,7 +2437,7 @@ impl World {
         self.heard_calls(i)
             .iter()
             .enumerate()
-            .filter_map(|(k, c)| c.map(|(x, y, _)| (k as u8, x, y)))
+            .filter_map(|(k, c)| c.map(|(x, y, _, _, _)| (k as u8, x, y)))
             .collect()
     }
 
