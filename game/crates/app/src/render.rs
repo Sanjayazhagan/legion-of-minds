@@ -42,7 +42,7 @@ pub struct HeardCall {
     /// Unit index of the caller.
     pub from: usize,
     pub kind: u8,
-    /// The enemy a "focus" call points at.
+    /// What the signal points at, if it is a unit.
     pub target: Option<usize>,
     pub at: f64,
 }
@@ -531,7 +531,8 @@ impl Effects {
                     sfx::play(Sfx::Click, fx, 0.5, 0.0);
                     let find = |p: (f32, f32)| w.units.iter().position(|u| u.alive && (u.x - p.0).abs() < 1e-3 && (u.y - p.1).abs() < 1e-3);
                     if let Some(from) = find(e.from) {
-                        let target = if matches!(kind, 0 | 3 | 6) && e.to != e.from { find(e.to) } else { None };
+                        // Every signal points at what the caller looks at (rules v10).
+                        let target = if e.to != e.from { find(e.to) } else { None };
                         self.calls.push(HeardCall { from, kind, target, at: crate::record::now() });
                         let cut = self.calls.len().saturating_sub(8);
                         self.calls.drain(..cut);
@@ -989,6 +990,20 @@ pub fn draw_ground(v: View, show_deploy: bool, show_ranges: bool, w: &World) {
         draw_sight(w);
     }
     end_3d();
+    // Mud and hills (rules v10).
+    for p in &w.terrain {
+        match p.ground {
+            godcore::sim::Ground::Mud => {
+                v.disc(p.x, p.y, p.r, Color::new(0.36, 0.25, 0.13, 0.75));
+                v.disc(p.x + 0.3, p.y - 0.2, p.r * 0.55, Color::new(0.28, 0.19, 0.10, 0.6));
+            }
+            godcore::sim::Ground::Hill => {
+                v.disc(p.x, p.y, p.r, Color::new(0.42, 0.62, 0.28, 0.85));
+                v.disc(p.x, p.y, p.r * 0.6, Color::new(0.50, 0.70, 0.33, 0.85));
+                v.ring(p.x, p.y, p.r, 1.5, Color::new(0.25, 0.4, 0.15, 0.8));
+            }
+        }
+    }
     if show_deploy {
         v.disc(C, C, DEPLOY_RADIUS, Color::new(0.6, 0.1, 0.1, 0.22));
         v.ring(C, C, DEPLOY_RADIUS, 2.0, Color::new(0.95, 0.4, 0.4, 0.8));
@@ -1010,11 +1025,11 @@ fn draw_sight(w: &World) {
     let fill: [u8; 4] = [255, 255, 215, 22];
     let edge = Color::new(1.0, 1.0, 0.85, 0.3);
     let half = godcore::sim::SIGHT_COS.acos();
-    let r = godcore::sim::SIGHT_RANGE;
     for (i, u) in w.units.iter().enumerate() {
         if !u.alive || !w.has_senses(i) {
             continue;
         }
+        let r = u.sight;
         let base = u.facing.1.atan2(u.facing.0);
         let n = 16;
         let at = |k: usize| {
@@ -1698,6 +1713,25 @@ pub fn draw_world(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit) 
     SHAKE.with(|c| c.set(vec3((t * 53.0).sin() + (t * 31.0).sin() * 0.5, 0.0, (t * 47.0 + 1.0).sin()) * k * 0.6));
     draw_world_inner(v, w, fx, look);
     SHAKE.with(|c| c.set(Vec3::ZERO));
+    // Light and weather over the whole field (rules v10).
+    let tint = match w.light {
+        godcore::sim::Light::Day => None,
+        godcore::sim::Light::Dusk => Some(Color::new(0.55, 0.25, 0.1, 0.16)),
+        godcore::sim::Light::Night => Some(Color::new(0.02, 0.04, 0.16, 0.42)),
+        godcore::sim::Light::Fog => Some(Color::new(0.82, 0.84, 0.86, 0.38)),
+    };
+    if let Some(c) = tint {
+        draw_rectangle(v.r.x, v.r.y, v.r.w, v.r.h, c);
+        if w.light == godcore::sim::Light::Night {
+            // Torches on the buildings.
+            for u in w.units.iter().filter(|u| u.alive && u.kind.is_building()) {
+                let p = v.p(u.x, u.y);
+                draw_circle(p.x, p.y, 26.0, Color::new(1.0, 0.7, 0.3, 0.12));
+                draw_circle(p.x, p.y, 10.0, Color::new(1.0, 0.75, 0.35, 0.25));
+            }
+        }
+        draw_text(w.light.name(), v.r.x + 10.0, v.r.y + 24.0, 22.0, Color::new(1.0, 1.0, 1.0, 0.85));
+    }
     if std::env::var_os("BAG_PROFILE").is_some() {
         eprintln!("draw_world {:.2} ms, {} units", t0.elapsed().as_secs_f64() * 1000.0, w.units.len());
     }
@@ -2026,6 +2060,11 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
             let col = if u.team == friendly { GOOD } else { BAD };
             draw_rectangle(top.x - bw / 2.0 - 1.0, top.y - 7.0, bw + 2.0, 6.0, Color::new(0.0, 0.0, 0.0, 0.6));
             bar(Rect::new(top.x - bw / 2.0, top.y - 6.0, bw, 4.0), u.hp / u.max_hp, col);
+        }
+        // A tired troop shows its stamina under its health.
+        if u.pool > 0.0 && u.stamina < u.pool * 0.5 {
+            let bw = s * 1.1;
+            crate::ui::stamina_bar(Rect::new(top.x - bw / 2.0, top.y - 1.0, bw, 3.0), u);
         }
     }
 

@@ -5,9 +5,11 @@
 //! - `scenario`: training drills and enemy bases
 //! - `env`, `nn`, `ppo`: on-device reinforcement learning
 //! - `team`: training several different troops together as a team
+//! - `body`: human limits (stamina, wear, pain) by class
 //! - `troop`, `battle`: owned troops, battles and tournaments
 
 pub mod battle;
+pub mod body;
 pub mod classes;
 pub mod env;
 pub mod mind;

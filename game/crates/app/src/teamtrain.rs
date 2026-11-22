@@ -180,6 +180,13 @@ impl Game {
             m.steps = m.steps.saturating_sub(*saved);
         }
         tr.finish(&mut team, &recent);
+        // What the team now means by each signal (stage D).
+        if let Some(rs) = &s.reactions {
+            let words: Vec<String> = rs.iter().map(|r| r.meaning().unwrap_or("").to_string()).collect();
+            for t in team.iter_mut() {
+                t.signals = words.clone();
+            }
+        }
         for (k, &i) in s.members.iter().enumerate() {
             self.troops[i] = team[k].clone();
             self.store.save_troop(&self.troops[i]);
@@ -458,25 +465,31 @@ impl Game {
                     let used: Vec<(usize, &godcore::team::Reaction)> = rs.iter().enumerate().filter(|(_, r)| r.followed().is_some()).collect();
                     let mut ty = y + 186.0;
                     if ty + 24.0 + 20.0 * used.len() as f32 <= H - 90.0 {
-                        text("Did they understand their calls?", rx, ty, 18.0, TEXT);
+                        text("What their signals mean now", rx, ty, 18.0, TEXT);
                         ty += 20.0;
                         if used.is_empty() {
-                            text("They hardly called. Train longer or on harder drills.", rx, ty + 4.0, 15.0, MUTED);
+                            text("They hardly signal yet. Train longer or on harder drills.", rx, ty + 4.0, 15.0, MUTED);
                         }
                         for (k, r) in used {
                             let f = r.followed().unwrap();
-                            let (col, verdict) = if f >= 0.65 {
+                            let (col, verdict) = if f >= 0.65 || f <= 0.35 {
                                 (GOOD, "understood")
-                            } else if f >= 0.55 {
+                            } else if f >= 0.55 || f <= 0.45 {
                                 (ACCENT, "partly")
                             } else {
                                 (MUTED, "not yet")
                             };
-                            let line = format!("{:<15} teammates went that way {:.0}% ({} heard): {verdict}", crate::render::call_words(k as u8), f * 100.0, r.heard);
+                            let means = r.meaning().map_or("no clear meaning".to_string(), |m| format!("\"{m}\""));
+                            let line = format!(
+                                "{:<6} {means}: teammates went that way {:.0}% ({} heard), {verdict}",
+                                crate::render::call_words(k as u8),
+                                f * 100.0,
+                                r.heard
+                            );
                             text(&line, rx, ty + 4.0, 15.0, col);
                             ty += 20.0;
                         }
-                        text("50% is what troops that ignore a call would score.", rx, ty + 6.0, 14.0, MUTED);
+                        text("Signals start out meaningless; a team decides what each means. 50% is ignoring it.", rx, ty + 6.0, 14.0, MUTED);
                     }
                 }
                 if self.ui.button(Rect::new(rx, H - 80.0, rw, 50.0), &format!("Train together (+{} each)", fmt_steps(s.budget))) {
