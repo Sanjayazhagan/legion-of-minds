@@ -281,8 +281,15 @@ impl Client {
 
     // ------------------------------------------------------------ raids
 
+    /// An opponent in the smallest brain-size category.
     pub fn find_match(&self) -> Result<Match> {
-        self.post("/v1/matchmaking", &serde_json::json!({}))
+        self.find_match_in(0)
+    }
+
+    /// An opponent in brain-size category `bracket` (see
+    /// `bag_protocol::army_bracket`: send your army's).
+    pub fn find_match_in(&self, bracket: u8) -> Result<Match> {
+        self.post("/v1/matchmaking", &bag_protocol::FindMatch { bracket })
     }
 
     /// Fight `m` locally, then send the army so the server can check it.
@@ -375,8 +382,14 @@ impl Client {
 
     // ------------------------------------------------------------ the cup
 
+    /// This week's cup in the category of your entry (or the first).
     pub fn cup(&self) -> Result<CupStandings> {
         self.get("/v1/cup")
+    }
+
+    /// This week's cup in one brain-size category.
+    pub fn cup_in(&self, category: u8) -> Result<CupStandings> {
+        self.get(&format!("/v1/cup?category={category}"))
     }
 
     /// Enter (or replace) this week's troop. Checked locally first.

@@ -7,7 +7,94 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mlp {
     pub dims: Vec<usize>,
+    #[serde(with = "packed")]
     pub params: Vec<f32>,
+}
+
+/// Brains up to 256 neurons are saved as a plain list of numbers, as they
+/// always were. Bigger ones (100k+ numbers) are saved as the raw bits in
+/// base64, which is about 2.5x smaller and quicker to read. Both forms load,
+/// and both give back exactly the same numbers.
+mod packed {
+    use serde::de::{Error, SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+
+    /// Lists longer than this are packed. A 256-neuron actor has 104,220
+    /// numbers, its critic about 98k; a 384 one has 200k+.
+    pub const PACK_ABOVE: usize = 110_000;
+    const PREFIX: &str = "f32le:";
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub fn serialize<S: Serializer>(v: &Vec<f32>, s: S) -> Result<S::Ok, S::Error> {
+        if v.len() <= PACK_ABOVE {
+            return serde::Serialize::serialize(v, s);
+        }
+        let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+        let mut out = String::with_capacity(PREFIX.len() + bytes.len() / 3 * 4 + 4);
+        out.push_str(PREFIX);
+        for c in bytes.chunks(3) {
+            let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+            for k in 0..4 {
+                out.push(if k <= c.len() { ABC[(n >> (18 - 6 * k) & 63) as usize] as char } else { '=' });
+            }
+        }
+        s.serialize_str(&out)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<f32>, D::Error> {
+        d.deserialize_any(V)
+    }
+
+    struct V;
+
+    impl<'de> Visitor<'de> for V {
+        type Value = Vec<f32>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a list of numbers or packed f32le base64")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Vec<f32>, A::Error> {
+            let mut v = Vec::with_capacity(a.size_hint().unwrap_or(0).min(1 << 20));
+            while let Some(x) = a.next_element::<f32>()? {
+                v.push(x);
+            }
+            Ok(v)
+        }
+
+        fn visit_str<E: Error>(self, s: &str) -> Result<Vec<f32>, E> {
+            let b64 = s.strip_prefix(PREFIX).ok_or_else(|| E::custom("unknown brain packing"))?.as_bytes();
+            if b64.len() % 4 != 0 {
+                return Err(E::custom("bad base64 length"));
+            }
+            let val = |c: u8| -> Result<u32, E> {
+                Ok(match c {
+                    b'A'..=b'Z' => c - b'A',
+                    b'a'..=b'z' => c - b'a' + 26,
+                    b'0'..=b'9' => c - b'0' + 52,
+                    b'+' => 62,
+                    b'/' => 63,
+                    _ => return Err(E::custom("bad base64")),
+                } as u32)
+            };
+            let mut bytes = Vec::with_capacity(b64.len() / 4 * 3);
+            for c in b64.chunks(4) {
+                let pad = c.iter().rev().take_while(|&&x| x == b'=').count();
+                if pad > 2 {
+                    return Err(E::custom("bad base64 padding"));
+                }
+                let mut n = 0u32;
+                for (k, &x) in c.iter().enumerate() {
+                    n |= if k < 4 - pad { val(x)? } else { 0 } << (18 - 6 * k);
+                }
+                bytes.extend_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8][..3 - pad]);
+            }
+            if bytes.len() % 4 != 0 {
+                return Err(E::custom("packed brain is not whole f32s"));
+            }
+            Ok(bytes.chunks(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+        }
+    }
 }
 
 /// Activations of one forward pass, kept for backprop.
@@ -199,6 +286,32 @@ impl Adam {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_brains_pack_and_load_bit_exact() {
+        let mut rng = Rng::new(3);
+        for h in [64usize, 256, 384] {
+            let mut m = Mlp::new(&crate::ppo::actor_dims_h(h), 0.01, &mut rng);
+            m.params[0] = f32::MIN_POSITIVE;
+            m.params[1] = -0.0;
+            m.params[2] = 1.0e-42; // subnormal
+            let s = serde_json::to_string(&m).unwrap();
+            assert_eq!(s.contains("f32le:"), m.params.len() > packed::PACK_ABOVE, "{h}");
+            let back: Mlp = serde_json::from_str(&s).unwrap();
+            assert_eq!(back.dims, m.dims);
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&back.params), bits(&m.params), "{h}");
+        }
+        // Every padding length round-trips.
+        for n in 1..7 {
+            let v: Vec<f32> = (0..n).map(|k| k as f32 * 0.37 - 1.0).collect();
+            let mut s = Vec::new();
+            packed::serialize(&{ let mut big = v.clone(); big.resize(packed::PACK_ABOVE + 1 + n, 0.5); big }, &mut serde_json::Serializer::new(&mut s)).unwrap();
+            let back: Vec<f32> = packed::deserialize(&mut serde_json::Deserializer::from_slice(&s)).unwrap();
+            assert_eq!(&back[..n], &v[..]);
+        }
+        assert!(serde_json::from_str::<Mlp>(r#"{"dims":[1,1],"params":"nope"}"#).is_err());
+    }
 
     #[test]
     fn growing_keeps_the_old_outputs() {

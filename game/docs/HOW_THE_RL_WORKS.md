@@ -61,6 +61,18 @@ What we measured comparing 160 and 256 at level 5 (Fighter, Mage and a Fighter/A
 
 So brain size is the player's bet: bigger is slower to train and slower to learn, and the game doesn't yet have fights hard enough to show a clear payoff.
 
+Past level 5 the brain can keep growing up to 2048 neurons, limited only by how fast the player's PC trains (see the README). Measured on a 4-core CPU without a GPU (sim with 121 inputs, one 8,192-step training round):
+
+| Neurons | Numbers in the brain | Training speed | Raid replay (9 troops x 900 ticks) |
+|---|---|---|---|
+| 64 | 13,788 | 6,250 steps/s | 0.1 s |
+| 128 | 35,740 | 2,600 steps/s | 0.3 s |
+| 256 | 104,220 | 930 steps/s | 0.65 s |
+| 512 | 339,484 | 270 steps/s | 1.9 s |
+| 1024 | 1,203,228 | 75 steps/s | 9 s |
+
+Time per step fits fixed cost + cost per brain number within about 10%, which is how the game predicts sizes it doesn't time. Memory is never the limit (a 2048 brain trains in under half a GB); time is.
+
 A second network of the same size, the "critic", guesses how well things are going. It is only used during training, to judge whether a move turned out better or worse than expected.
 
 The game uses no machine-learning library. The network, its learning and the battle simulation are all plain Rust in the game itself, and run on the CPU.

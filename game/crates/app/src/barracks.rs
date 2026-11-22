@@ -3,6 +3,7 @@
 use crate::ui::*;
 use crate::{Game, Screen};
 use godcore::scenario::max_troop_level;
+use godcore::ppo::brain_grow_cost;
 use godcore::troop::{level_up_cost, MAX_LEVEL};
 use macroquad::prelude::*;
 
@@ -242,6 +243,18 @@ impl Game {
             let note = if next > t.hidden() { format!("Grows to {next} at level {}", t.level + 1) } else { format!("Stays {next} at level {}", t.level + 1) };
             text(&note, d.x + d.w - 24.0 - text_width(&note, 16.0), y + 16.0, 16.0, MUTED);
         }
+        // Past level 5 the brain grows up to this PC's max: said beside the
+        // training line, where there is room.
+        let pc_note = if t.level < MAX_LEVEL {
+            None
+        } else {
+            match (t.next_brain(), self.pc_max_brain()) {
+                (Some(next), Some(max)) if next <= max => Some(format!("Brain can grow to {next} (this PC: up to {max})")),
+                (Some(_), Some(max)) => Some(format!("This PC's max brain: {max}")),
+                (Some(_), None) => Some("Testing how big a brain this PC can train...".to_string()),
+                (None, _) => Some("Biggest brain there is".to_string()),
+            }
+        };
         y += 36.0;
         // Weapon and mastery
         let w = t.weapon();
@@ -261,22 +274,29 @@ impl Game {
         y += 30.0;
         text(
             &format!(
-                "Training {} / {} steps (level {} cap)",
+                "Training {} / {} steps ({} cap)",
                 fmt_steps(t.steps),
                 fmt_steps(t.cap()),
-                t.level
+                if t.level >= MAX_LEVEL && t.hidden() > godcore::ppo::LEVEL_BRAIN_MAX {
+                    format!("{}-neuron brain", t.hidden())
+                } else {
+                    format!("level {}", t.level)
+                }
             ),
             x,
             y + 8.0,
             20.0,
             TEXT,
         );
+        if let Some(note) = &pc_note {
+            text(note, d.x + d.w - 24.0 - text_width(note, 16.0), y + 8.0, 16.0, MUTED);
+        }
         bar(
             Rect::new(x, y + 16.0, d.w - 48.0, 14.0),
             t.steps as f32 / t.cap() as f32,
             SKY,
         );
-        if t.level < MAX_LEVEL {
+        if t.level < MAX_LEVEL || self.can_grow_on_this_pc(t) {
             let (line, frac, col) = plateau_line(t);
             text(&line, x, y + 50.0, 17.0, col);
             if let Some(f) = frac {
@@ -411,7 +431,11 @@ impl Game {
                 self.confirm_release = true;
             }
         }
-        if level < MAX_LEVEL && level >= th_cap {
+        if level >= MAX_LEVEL {
+            if let Some(why) = self.level_up_blocker(i).filter(|_| self.troops[i].next_brain().is_some()) {
+                crate::recruit::wrap(&why, x + 180.0, y + 64.0, 520.0, 15.0, MUTED);
+            }
+        } else if level < MAX_LEVEL && level >= th_cap {
             text(
                 &format!(
                     "Upgrade your Town Hall to {} in Home Base to level up",
@@ -444,13 +468,30 @@ impl Game {
 }
 
 impl Game {
-    /// The level-up button's label for troop `i`, and whether it can be pressed.
+    /// Can troop `t` still grow its brain on this PC (level 5, a bigger
+    /// size exists, and this PC can train it)?
+    pub fn can_grow_on_this_pc(&self, t: &godcore::troop::Troop) -> bool {
+        t.level >= MAX_LEVEL && t.next_brain().zip(self.pc_max_brain()).is_some_and(|(n, max)| n <= max)
+    }
+
+    /// The level-up button's label for troop `i`, and whether it can be
+    /// pressed. At level 5 it grows the brain instead, up to this PC's max.
     pub fn level_up_label(&self, i: usize) -> (String, bool) {
         let level = self.troops[i].level;
         let cost = level_up_cost(level);
         let th_cap = max_troop_level(self.profile.base.town_hall);
         if level >= MAX_LEVEL {
-            ("Max level".to_string(), false)
+            let t = &self.troops[i];
+            match (t.next_brain(), self.pc_max_brain()) {
+                (None, _) => ("Biggest brain".to_string(), false),
+                (Some(_), None) => ("Testing your PC...".to_string(), false),
+                (Some(_), Some(_)) if !self.can_grow_on_this_pc(t) => ("PC max reached".to_string(), false),
+                (Some(_), _) if !t.plateau().ready() => ("Still learning".to_string(), false),
+                (Some(n), _) => {
+                    let cost = brain_grow_cost(n);
+                    (format!("Grow to {n} ({cost}g)"), self.profile.gold >= cost)
+                }
+            }
         } else if level >= th_cap {
             ("Needs Town Hall".to_string(), false)
         } else if !self.troops[i].plateau().ready() {
@@ -466,7 +507,20 @@ impl Game {
         let cost = level_up_cost(t.level);
         let th = self.profile.base.town_hall;
         if t.level >= MAX_LEVEL {
-            Some(format!("{} is at the top level.", t.name))
+            let Some(n) = t.next_brain() else { return Some(format!("{} has the biggest brain there is.", t.name)) };
+            let cost = brain_grow_cost(n);
+            Some(match self.settings.pc.as_ref().filter(|p| p.fresh()) {
+                None => "Testing how big a brain this PC can train (Settings shows the result).".to_string(),
+                Some(pc) if n > pc.max_brain() => format!(
+                    "A {n}-neuron brain would take this PC about {:.0} hours to train fully, so {} stays at {}. A faster PC or graphics card can go bigger.",
+                    pc.hours_to_full(n),
+                    t.name,
+                    t.hidden()
+                ),
+                Some(_) if !t.plateau().ready() => format!("{} is still improving with its current brain. Keep training until its score levels off, then grow it to {n}.", t.name),
+                Some(_) if self.profile.gold < cost => format!("Growing the brain to {n} costs {cost} gold; you have {}.", self.profile.gold),
+                Some(_) => return None,
+            })
         } else if t.level >= max_troop_level(th) {
             Some(format!("Level {} troops need Town Hall {}. Upgrade it in Home.", t.level + 1, t.level))
         } else if !t.plateau().ready() {
@@ -481,6 +535,20 @@ impl Game {
     /// Pay for and apply a level-up of troop `i`, and say what changed.
     pub fn level_up_troop(&mut self, i: usize) {
         let level = self.troops[i].level;
+        if level >= MAX_LEVEL {
+            let Some(n) = self.troops[i].next_brain() else { return };
+            self.profile.gold -= brain_grow_cost(n);
+            self.troops[i].grow_brain();
+            self.save_all();
+            let t = &self.troops[i];
+            let hours = self.settings.pc.as_ref().map(|p| p.hours_to_full(n)).unwrap_or(0.0);
+            self.toast(format!(
+                "{}'s brain grew to {n} neurons, keeping what it learned: trains up to {} steps (about {hours:.1} h on this PC)",
+                t.name,
+                fmt_steps(t.cap())
+            ));
+            return;
+        }
         self.profile.gold -= level_up_cost(level);
         let before = self.troops[i].hidden();
         let reach = self.troops[i].spec.talents;
@@ -501,10 +569,11 @@ impl Game {
 /// it is still gathering training to judge, colour).
 pub fn plateau_line(t: &godcore::troop::Troop) -> (String, Option<f32>, Color) {
     use godcore::troop::Plateau;
-    let w = fmt_steps(godcore::troop::plateau_window(t.level));
+    let w = fmt_steps(t.plateau_window());
+    let ready = if t.level >= godcore::troop::MAX_LEVEL { "ready to grow its brain" } else { "ready to level up" };
     match t.plateau() {
         Plateau::Grandfathered => ("Older troop: its next level-up skips the plateau check".into(), None, GOOD),
-        Plateau::AtCap => ("Used all training for this level: ready to level up".into(), None, GOOD),
+        Plateau::AtCap => (format!("Used all training for this brain: {ready}"), None, GOOD),
         Plateau::Warming { done, need } => (
             format!("Plateau check: train {} more at this level to judge", fmt_steps(need - done)),
             Some(done as f32 / need as f32),
@@ -517,7 +586,7 @@ pub fn plateau_line(t: &godcore::troop::Troop) -> (String, Option<f32>, Color) {
             ACCENT,
         ),
         Plateau::Reached { .. } => (
-            format!("Plateaued: its score stopped rising over the last {w} steps. Brain is full, ready to level up"),
+            format!("Plateaued: its score stopped rising over the last {w} steps. Brain is full, {ready}"),
             None,
             GOOD,
         ),

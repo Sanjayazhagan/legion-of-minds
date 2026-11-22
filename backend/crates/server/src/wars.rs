@@ -433,6 +433,7 @@ pub async fn attack(
             town_hall: Some(snapshot.base.town_hall as i32),
         },
         snapshot_id,
+        bracket: bag_protocol::snapshot_bracket(&snapshot),
         snapshot,
         expires_at: expires.to_rfc3339(),
         max_loot: 0,
@@ -467,6 +468,7 @@ pub async fn submit(
     let me = load_user(&st.db, user.id).await?;
     let army = raid_army(&st.db, &me, &req).await?;
     let snapshot: BaseSnapshot = serde_json::from_str(&data).map_err(ApiError::internal)?;
+    crate::attacks::check_bracket(&army, &snapshot)?;
     let (result, army) = tokio::task::spawn_blocking(move || (run_raid(&snapshot, &army), army))
         .await
         .map_err(ApiError::internal)?;

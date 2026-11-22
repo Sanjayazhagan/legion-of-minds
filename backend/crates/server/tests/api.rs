@@ -878,3 +878,90 @@ fn starter_layouts_are_full_and_valid() {
         assert!(bag_client::bag_protocol::canonical_snapshot(&s).is_ok(), "Town Hall {th}");
     }
 }
+
+/// A level 5 troop with a brain grown past what levels give, levelled up
+/// online so the server accepts it.
+fn grown(db: &str, c: &Client, class: BaseClass, id: u64, h: usize) -> Troop {
+    let mut t = Troop::new(id, format!("grown{id}"), class.spec(), 2000 + id);
+    for _ in 1..5 {
+        t.level_up();
+    }
+    assert!(t.set_brain(h), "{h}");
+    let gold = c.me().unwrap().gold;
+    set_gold(db, c, 100_000);
+    for from in 1..5 {
+        c.level_up(id, from).unwrap();
+    }
+    set_gold(db, c, gold);
+    t
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn brain_categories_keep_big_brains_apart() {
+    let db = fresh_db().await;
+    let dbu = db.clone();
+    let url = serve(|u| test_config(db, u, vec![])).await;
+    blocking(move || {
+        // Alice's base has a 384-neuron defender: "Up to 1024".
+        let mut alice = Client::new(&url);
+        alice.dev_login("Alice").unwrap();
+        buy_town_hall(&dbu, &alice, 4);
+        let g = grown(&dbu, &alice, BaseClass::Guard, 1, 384);
+        let base = HomeBase { town_hall: 4, buildings: HomeBase::default().buildings };
+        alice.publish_base(&snapshot_from(&base, &[(g, defender_spots(1)[0])])).unwrap();
+        // Carol's has small brains: "Up to 256".
+        let mut carol = Client::new(&url);
+        carol.dev_login("Carol").unwrap();
+        carol.publish_base(&snapshot_from(&HomeBase::default(), &[(big(BaseClass::Guard, 1), defender_spots(1)[0])])).unwrap();
+
+        let mut bob = Client::new(&url);
+        bob.dev_login("Bob").unwrap();
+        buy_town_hall(&dbu, &bob, 4);
+        bob.publish_base(&snapshot_from(&HomeBase::default(), &[])).unwrap();
+        // Each category only meets its own bases.
+        for _ in 0..3 {
+            let m = bob.find_match_in(0).unwrap();
+            assert_eq!((m.defender.display_name.as_str(), m.bracket), ("Carol", 0));
+            let m = bob.find_match_in(1).unwrap();
+            assert_eq!((m.defender.display_name.as_str(), m.bracket), ("Alice", 1));
+        }
+        assert_eq!(api_code(bob.find_match_in(9)), "invalid");
+
+        // A 1024-neuron attacker: packed on the wire, accepted online.
+        let huge = grown(&dbu, &bob, BaseClass::Fighter, 7, 1024);
+        let json = huge.save_json();
+        assert!(json.contains("f32le:") && json.len() < 16 << 20, "{} bytes", json.len());
+        let army = bag_client::army_from(&[(huge, army_spots(1)[0])]);
+        // Not against a small-brain base...
+        let m = bob.find_match_in(0).unwrap();
+        assert_eq!(m.defender.display_name, "Carol");
+        assert_eq!(api_code(bob.attack(&m, army.clone())), "invalid");
+        // ...but fine in its own category, and the server's replay matches.
+        let m = bob.find_match_in(1).unwrap();
+        let (local, out) = bob.attack(&m, army).unwrap();
+        assert_eq!(out.client_matched, Some(true));
+        assert_eq!(out.result.fingerprint, local.fingerprint);
+
+        // Brains past 1024 stay offline (the game is told before uploading).
+        let mut too_big = grown(&dbu, &bob, BaseClass::Fighter, 8, 1024);
+        assert!(too_big.set_brain(1536));
+        let m = bob.find_match_in(1).unwrap();
+        let army = bag_client::army_from(&[(too_big, army_spots(1)[0])]);
+        match bob.attack(&m, army) {
+            Err(Error::Invalid(why)) => assert!(why.contains("offline only"), "{why}"),
+            other => panic!("expected offline only, got {:?}", other.map(|_| ())),
+        }
+
+        // The cup ranks each category on its own.
+        let small = big(BaseClass::Fighter, 3);
+        let s = carol.enter_cup(&small).unwrap();
+        assert_eq!((s.category, s.entries, s.mine.unwrap().rank), (0, 1, 1));
+        let big_one = grown(&dbu, &alice, BaseClass::Fighter, 9, 384);
+        let s = alice.enter_cup(&big_one).unwrap();
+        assert_eq!((s.category, s.entries, s.mine.unwrap().rank), (1, 1, 1));
+        assert_eq!(bob.cup().unwrap().category, 0);
+        assert_eq!(bob.cup_in(1).unwrap().top[0].player.display_name, "Alice");
+        assert_eq!(bob.cup_in(0).unwrap().top[0].player.display_name, "Carol");
+    })
+    .await;
+}

@@ -18,6 +18,7 @@ mod online;
 mod recruit;
 mod render;
 mod scene;
+mod pc_check;
 mod settings;
 mod sfx;
 mod stat_panel;
@@ -81,6 +82,26 @@ pub struct Game {
 }
 
 impl Game {
+    /// The biggest brain this PC can train, once the speed test has run.
+    pub fn pc_max_brain(&self) -> Option<usize> {
+        self.settings.pc.as_ref().filter(|p| p.fresh()).map(|p| p.max_brain())
+    }
+
+    /// Keep a finished PC speed test.
+    fn poll_pc_check(&mut self) {
+        match pc_check::take() {
+            Some(Ok(r)) => {
+                let max = r.max_brain();
+                println!("PC check: {} -> brains up to {max} ({:.0} steps/s at 256)", r.device, r.steps_per_sec(256));
+                self.settings.pc = Some(r);
+                self.settings.save(&self.store.home);
+                self.toast(format!("PC speed test done: this PC can train brains up to {max} neurons"));
+            }
+            Some(Err(e)) => self.toast(format!("PC speed test failed: {e}")),
+            None => {}
+        }
+    }
+
     pub fn toast(&mut self, s: impl Into<String>) {
         self.toast = Some((s.into(), 3.0));
     }
@@ -302,6 +323,13 @@ async fn main() {
     };
     game.settings = settings::Settings::load(&game.store.home);
     game.settings.apply();
+    // How big a brain this PC can train: tested once (and again after a
+    // sim change), in the background. Skipped for scripted screenshots and
+    // recordings, which must not compete for the CPU.
+    let scripted = ["BAG_SCREEN", "BAG_RECORD", "BAG_SCREENSHOT", "BAG_CLIP_OUT"].iter().any(|v| std::env::var_os(v).is_some());
+    if !game.settings.pc.as_ref().is_some_and(|p| p.fresh()) && !scripted {
+        pc_check::start();
+    }
     #[cfg(feature = "cheats")]
     if game.settings.test_mode {
         game.set_test_mode(true);
@@ -396,6 +424,7 @@ async fn main() {
                 }
             }
         }
+        game.poll_pc_check();
         game.tour_frame(&screen, click);
         if let Some(n) = save::take_notice() {
             game.toast = Some((n, 6.0));

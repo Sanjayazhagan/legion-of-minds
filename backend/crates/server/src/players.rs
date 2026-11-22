@@ -183,13 +183,14 @@ pub async fn publish_base(
     let data = serde_json::to_string(&snap).map_err(ApiError::internal)?;
     let mut tx = st.db.begin().await?;
     sqlx::query(
-        "INSERT INTO snapshots (id, user_id, town_hall, data, sim_version) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO snapshots (id, user_id, town_hall, data, sim_version, bracket) VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(id)
         .bind(user.id)
         .bind(snap.base.town_hall as i32)
         .bind(&data)
         .bind(SIM_VERSION as i32)
+        .bind(bag_protocol::snapshot_bracket(&snap) as i16)
         .execute(&mut *tx)
         .await?;
     sqlx::query("UPDATE users SET current_snapshot = $1 WHERE id = $2")

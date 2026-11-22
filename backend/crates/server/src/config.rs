@@ -81,7 +81,7 @@ pub struct Config {
     pub practice_gold: i64,
     pub practice_paid_per_day: i64,
     /// Largest JSON body once unzipped. A full army of 256-neuron brains is
-    /// about 6 MB.
+    /// about 6 MB; of 1024-neuron brains (packed) about 32 MB.
     pub max_json_bytes: usize,
     /// How long a season lasts.
     pub season: Duration,
@@ -170,8 +170,10 @@ impl Config {
             daily_win_bonus: num("DAILY_WIN_BONUS", 100i64)?.max(0),
             practice_gold: num("PRACTICE_GOLD", 20i64)?.max(0),
             practice_paid_per_day: num("PRACTICE_PAID_PER_DAY", 5i64)?,
-            max_body_bytes: 8 << 20,
-            max_json_bytes: 16 << 20,
+            // Big enough for five 1024-neuron brains (about 6.4 MB each
+            // packed; brain numbers barely compress).
+            max_body_bytes: 40 << 20,
+            max_json_bytes: 48 << 20,
             season: Duration::from_secs(num("SEASON_DAYS", 28u64)? * 86_400),
             war_prep: mins(num("WAR_PREP_MINUTES", 360u64)?),
             war_battle: mins(num("WAR_BATTLE_MINUTES", 1440u64)?),

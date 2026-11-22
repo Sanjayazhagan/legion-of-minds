@@ -147,7 +147,7 @@ if [ -n "$DOMAIN" ]; then
 server {
     listen 80;
     server_name $DOMAIN;
-    client_max_body_size 8m;
+    client_max_body_size 40m;
     location / {
         proxy_pass http://127.0.0.1:$PORT;
         proxy_set_header Host \$host;
@@ -159,6 +159,11 @@ NGINX
       $SUDO ln -sf "$conf" /etc/nginx/sites-enabled/$SERVICE
       $SUDO nginx -t
       $SUDO systemctl reload nginx
+    fi
+    # Sites made before big brains allowed only 8 MB uploads: raise it.
+    if $SUDO grep -q "client_max_body_size 8m;" "$conf"; then
+      $SUDO sed -i 's/client_max_body_size 8m;/client_max_body_size 40m;/' "$conf"
+      $SUDO nginx -t && $SUDO systemctl reload nginx
     fi
     if ! $SUDO test -d "/etc/letsencrypt/live/$DOMAIN"; then
       command -v certbot >/dev/null 2>&1 || $APT install -y -qq certbot python3-certbot-nginx >/dev/null
