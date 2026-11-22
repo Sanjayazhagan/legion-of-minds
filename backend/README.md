@@ -77,10 +77,12 @@ docker build -f backend/Dockerfile -t legion-of-minds-server .
 
 ### Deploy to the Azure VM with deploy.ps1
 
-`deploy.ps1` works like the portfolio site's: from PowerShell on your laptop it packs the server source, uploads it over `scp` and runs `deploy/server.sh` on the VM over `ssh`. That script does the rest:
+`deploy.ps1` works like the portfolio site's: from PowerShell on your laptop it packs the server source into a tarball, uploads it over `scp` (with the same keepalive options) and runs `deploy/server.sh` on the VM over `ssh`, sent as one base64 token with Windows line endings removed. That script does the rest:
 
 - **First deploy only:** it installs build tools, Postgres and Rust, and adds a swap file on a small VM so the build fits in memory. It also creates a Postgres database with a random password. The password stays in the VM's env file and never leaves the VM.
 - **Every deploy:** it builds the server on the VM (Linux can't run a Windows build) and merges `deploy.env` into `<VmPath>/server.env`. It then restarts the `legion-server` systemd service and checks `/health`.
+- **Before changing anything:** it backs up the Postgres database to `<VmPath>/db-backups/legion-<time>.dump` (newest 10 kept) and stops if the backup fails. The previous server binary is kept as `<VmPath>/bag-server.prev`.
+- **Leaves the portfolio alone:** it never touches pm2 or the portfolio's folder. It stops if the port is taken by another program, or if another nginx site already uses the domain. It checks nginx with `nginx -t` before reloading and removes its own site again if the check fails.
 
 ```
 cd backend

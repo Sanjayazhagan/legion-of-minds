@@ -7,6 +7,10 @@
 #
 # Reads /tmp/legion-deploy.tar.gz (source) and, if present,
 # /tmp/legion-deploy.env (secrets from the laptop, merged into the env file).
+#
+# The VM also runs the portfolio (pm2, its own folder, maybe nginx). This
+# script never touches pm2 or the portfolio folder, refuses a port or domain
+# something else already uses, and only adds its own nginx site.
 set -euo pipefail
 
 APP="$1"
@@ -21,6 +25,8 @@ PG="sudo -u postgres"
 APT="$SUDO env DEBIAN_FRONTEND=noninteractive apt-get"
 
 say() { echo "  $*"; }
+fail() { echo "  ERROR: $*" >&2; exit 1; }
+port_busy() { ss -ltnH "( sport = :$1 )" 2>/dev/null | grep -q .; }
 
 # --- Packages (first deploy only) ---------------------------------------
 need=()
@@ -35,6 +41,39 @@ if [ ${#need[@]} -gt 0 ]; then
   $APT install -y -qq "${need[@]}" >/dev/null
 fi
 $SUDO systemctl enable --now postgresql >/dev/null 2>&1 || true
+
+# --- Don't collide with the portfolio or anything else --------------------
+# The port must be free, unless it's our own server already running there.
+if port_busy "$PORT" && ! $SUDO systemctl is-active --quiet $SERVICE; then
+  fail "Port $PORT is already used by another program on the VM (the portfolio?). Pick another one: .\deploy.ps1 -Port 8081"
+fi
+if [ -n "$DOMAIN" ] && command -v nginx >/dev/null 2>&1; then
+  # Another nginx site (for example the portfolio's) already answers for
+  # this domain: adding ours would fight over it.
+  other=$($SUDO grep -rlE "server_name[^;]*[[:space:]]$DOMAIN[[:space:];]" /etc/nginx/sites-enabled/ /etc/nginx/conf.d/ 2>/dev/null | grep -v "/$SERVICE\$" || true)
+  [ -z "$other" ] || fail "$DOMAIN is already used by another nginx site ($other). Use a separate subdomain for the game, like game.yourdomain.com."
+fi
+
+# --- Back up the database before anything changes -------------------------
+# Like the portfolio's pre-deploy backup. The new server may add tables when
+# it starts, so keep a copy from before. Keeps the newest 10.
+if $PG psql -qtAc "SELECT 1 FROM pg_database WHERE datname='legion'" 2>/dev/null | grep -q 1; then
+  BK="$APP/db-backups"
+  mkdir -p "$BK"
+  chmod 700 "$BK"
+  TS=$(date +%Y%m%d-%H%M%S)
+  if $PG pg_dump -Fc legion > "$BK/legion-$TS.dump"; then
+    chmod 600 "$BK/legion-$TS.dump"
+    say "Backed up the database -> $BK/legion-$TS.dump"
+    say "(restore with: sudo -u postgres pg_restore --clean -d legion $BK/legion-$TS.dump)"
+  else
+    rm -f "$BK/legion-$TS.dump"
+    fail "Database backup failed, so nothing was changed. The server keeps running."
+  fi
+  ls -1t "$BK"/legion-*.dump 2>/dev/null | tail -n +11 | xargs -r rm -f || true
+else
+  say "No database yet (first deploy): nothing to back up."
+fi
 
 # A Rust release build needs more memory than the smallest VMs have.
 mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
@@ -65,6 +104,8 @@ say "Building the server (the first build takes several minutes)..."
 # The target folder lives outside src so later builds only redo what changed.
 (cd "$APP/src/backend" && CARGO_TARGET_DIR="$APP/target" cargo build --release --locked -p bag-server)
 install -m 755 "$APP/target/release/bag-server" "$APP/bag-server.new"
+# Keep the last working server, in case the new one needs rolling back.
+[ -f "$APP/bag-server" ] && cp -f "$APP/bag-server" "$APP/bag-server.prev"
 mv -f "$APP/bag-server.new" "$APP/bag-server"
 say "Build complete."
 
@@ -157,7 +198,12 @@ server {
 }
 NGINX
       $SUDO ln -sf "$conf" /etc/nginx/sites-enabled/$SERVICE
-      $SUDO nginx -t
+      # Check the whole nginx setup before reloading, so a mistake here can
+      # never take the portfolio down: undo our site and stop instead.
+      if ! $SUDO nginx -t; then
+        $SUDO rm -f /etc/nginx/sites-enabled/$SERVICE "$conf"
+        fail "nginx rejected the new site, so it was removed again. The portfolio is unchanged."
+      fi
       $SUDO systemctl reload nginx
     fi
     # Sites made before big brains allowed only 8 MB uploads: raise it.
@@ -170,7 +216,11 @@ NGINX
       $SUDO certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect
     fi
   else
-    # Nothing on ports 80/443 yet: Caddy gets and renews the certificate itself.
+    # No nginx: Caddy gets and renews the certificate itself, but only if
+    # nothing else (like the portfolio) already holds ports 80 and 443.
+    if ! command -v caddy >/dev/null 2>&1 && { port_busy 80 || port_busy 443; }; then
+      fail "Ports 80/443 are used by another program and nginx isn't installed. Set up HTTPS for $DOMAIN in that program, pointing at 127.0.0.1:$PORT."
+    fi
     command -v caddy >/dev/null 2>&1 || $APT install -y -qq caddy >/dev/null
     if ! $SUDO grep -q "^$DOMAIN " /etc/caddy/Caddyfile 2>/dev/null; then
       printf '\n%s {\n    reverse_proxy 127.0.0.1:%s\n}\n' "$DOMAIN" "$PORT" | $SUDO tee -a /etc/caddy/Caddyfile >/dev/null
