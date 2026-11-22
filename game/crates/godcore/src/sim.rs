@@ -24,7 +24,7 @@ pub const SPLASH_BUILDING: f32 = 0.25;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
 pub const SIM_VERSION: u32 = 10;
-pub const OBS_DIM: usize = 138;
+pub const OBS_DIM: usize = 140;
 /// Where the teamwork part of the view starts (the two allies' roles,
 /// threats and actions, sim version 4).
 pub const OBS_TEAM: usize = 74;
@@ -460,11 +460,13 @@ pub struct Patch {
     pub r: f32,
 }
 
-pub const MUD_SPEED: f32 = 0.65;
-pub const MUD_EFFORT: f32 = 1.5;
+pub const MUD_SPEED: f32 = 0.75;
+pub const MUD_EFFORT: f32 = 1.3;
 pub const HILL_SPEED: f32 = 0.85;
 pub const HILL_SIGHT: f32 = 2.0;
 pub const HILL_SHOT: f32 = 1.1;
+/// How far away a troop notices the edge of mud or a hill.
+pub const GROUND_FEEL: f32 = 6.0;
 /// How far a troop's footsteps carry (heavy armour carries further).
 pub const STEP_SOUND: f32 = 4.0;
 pub const HEAVY_STEP_SOUND: f32 = 6.0;
@@ -1675,14 +1677,28 @@ impl World {
         put(&mut o, body::injury(me.arms));
         put(&mut o, me.bleed / body::BLEED_MAX);
         put(&mut o, me.supply());
-        // The battlefield: how far it can see in this light, fog, and the
-        // ground under it and two steps ahead.
+        // The battlefield: how far it can see in this light, fog, the ground
+        // under it, and which way the nearest mud and hill are (stronger the
+        // closer their edge), so a troop backing away knows what's behind it.
         put(&mut o, self.light.sight());
         put(&mut o, (self.light == Light::Fog) as u8 as f32);
-        let (ax, ay) = (me.x + me.facing.0 * 2.0, me.y + me.facing.1 * 2.0);
-        for g in [self.ground(me.x, me.y), self.ground(ax, ay)] {
-            put(&mut o, (g == Some(Ground::Mud)) as u8 as f32);
-            put(&mut o, (g == Some(Ground::Hill)) as u8 as f32);
+        let g = self.ground(me.x, me.y);
+        put(&mut o, (g == Some(Ground::Mud)) as u8 as f32);
+        put(&mut o, (g == Some(Ground::Hill)) as u8 as f32);
+        for ground in [Ground::Mud, Ground::Hill] {
+            let mut best: Option<(f32, f32, f32)> = None;
+            for p in self.terrain.iter().filter(|p| p.ground == ground) {
+                let (dx, dy) = (p.x - me.x, p.y - me.y);
+                let d = (dx * dx + dy * dy).sqrt();
+                let edge = (d - p.r).max(0.0);
+                if edge < GROUND_FEEL && best.map_or(true, |b| edge < b.0) {
+                    let (ux, uy) = if d > 1e-3 { (dx / d, dy / d) } else { (0.0, 0.0) };
+                    best = Some((edge, ux, uy));
+                }
+            }
+            let (ux, uy, near) = best.map_or((0.0, 0.0, 0.0), |(e, ux, uy)| (ux, uy, 1.0 - e / GROUND_FEEL));
+            put(&mut o, ux * near);
+            put(&mut o, uy * near);
         }
         debug_assert_eq!(k, OBS_DIM);
         o

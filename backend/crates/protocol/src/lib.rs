@@ -931,6 +931,8 @@ mod tests {
         t.mastery.insert(Weapon::Greataxe, 40_000);
         t.mastery.insert(Weapon::Daggers, 160_000);
         t.equip(Weapon::Daggers);
+        // As the game does after training: conditioning follows the steps.
+        t.sync_moves();
         let level = t.spec.mastery;
         assert!(level > 0);
         let c = canonical_army(&a, 1).unwrap();

@@ -226,7 +226,7 @@ impl Troop {
     /// What this troop was born with (average for troops from before traits).
     pub fn traits(&self) -> Traits {
         if self.born {
-            Traits::roll(self.seed)
+            Traits::roll_for(self.seed, &self.spec)
         } else {
             Traits::default()
         }

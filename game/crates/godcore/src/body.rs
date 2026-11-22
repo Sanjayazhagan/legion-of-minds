@@ -93,7 +93,7 @@ fn mana_pool(c: BaseClass) -> f32 {
 pub const SUPPLY_TRAINED: f32 = 0.25;
 /// Mana a spell costs, a Fireball costs 3 times as much, and mana back per tick.
 pub const SPELL_MANA: f32 = 3.0;
-pub const MANA_REGEN: f32 = 0.2;
+pub const MANA_REGEN: f32 = 0.3;
 /// With no arrows (or no mana for a spell) a troop fights in close: this
 /// reach and this share of its damage.
 pub const MAKESHIFT_RANGE: f32 = 1.3;
@@ -112,8 +112,8 @@ pub fn weapon_weight(w: Weapon) -> (f32, f32) {
 }
 
 /// What a recruit is born with (sim version 10). Every value is a
-/// difference from the class's normal; each troop's add up to the same
-/// total, so traits make troops different, not better. Troops recruited
+/// difference from the class's normal, evened out by what each trait is
+/// worth to the class, so traits make troops different, not better. Troops recruited
 /// before traits existed are average in everything.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Traits {
@@ -137,6 +137,25 @@ pub struct Traits {
 
 /// How far each trait can go from average.
 const TRAIT_SPAN: [f32; 8] = [0.08, 0.10, 0.10, 0.15, 0.15, 2.0, 1.0, 0.05];
+/// Drill win points each trait is worth at full span, measured on
+/// 600k-step troops over 2,000 drills each (melee, ranged, caster, other).
+/// Speed, eyesight and reflexes barely matter; strength and toughness do.
+const TRAIT_VALUE: [[f32; 8]; 4] = [
+    [0.6, 14.4, 11.3, 4.4, 2.0, 0.0, 0.2, 0.0],
+    [1.2, 9.5, 3.8, 0.2, 0.6, 1.8, 0.0, 3.0],
+    [0.0, 7.5, 3.3, 0.2, 0.2, 0.0, 0.6, 2.3],
+    [0.6, 10.5, 6.1, 1.6, 0.9, 0.6, 0.3, 1.8],
+];
+
+fn trait_value(class: BaseClass) -> [f32; 8] {
+    match class {
+        BaseClass::Fighter | BaseClass::Paladin | BaseClass::Guard | BaseClass::Assassin => TRAIT_VALUE[0],
+        BaseClass::Archer | BaseClass::Sentry | BaseClass::Hunter => TRAIT_VALUE[1],
+        BaseClass::Mage | BaseClass::Warlock => TRAIT_VALUE[2],
+        BaseClass::Healer | BaseClass::Keeper => TRAIT_VALUE[3],
+    }
+}
+
 /// Names for a strong and a weak trait.
 const TRAIT_WORDS: [(&str, &str); 8] = [
     ("Quick", "Slow"),
@@ -150,20 +169,46 @@ const TRAIT_WORDS: [(&str, &str); 8] = [
 ];
 
 impl Traits {
-    /// The traits a recruit with this seed is born with. Each one is drawn,
-    /// then the average is taken off so every troop's add up to zero.
+    /// The traits a recruit of this class with this seed is born with.
+    /// Each trait is drawn, then the draw is evened out by what each trait
+    /// is worth to the class (measured in drills: strength and toughness
+    /// matter far more than eyesight), so a Strong, Tough recruit pays for
+    /// it elsewhere and no roll is clearly best.
+    pub fn roll_for(seed: u64, spec: &ClassSpec) -> Traits {
+        let total: f32 = spec.parents.iter().map(|p| p.1).sum();
+        let mut w = [0.0f32; 8];
+        for &(class, share) in &spec.parents {
+            let v = trait_value(class);
+            for k in 0..8 {
+                w[k] += v[k] * share / total;
+            }
+        }
+        Self::roll_weighted(seed, w)
+    }
+
+    /// Born traits evened out for an average class (see `roll_for`).
     pub fn roll(seed: u64) -> Traits {
+        Self::roll_weighted(seed, TRAIT_VALUE[3])
+    }
+
+    fn roll_weighted(seed: u64, w: [f32; 8]) -> Traits {
         let mut rng = Rng::new(seed ^ 0x7472_6169_7473);
         let mut v = [0.0f32; 8];
         for x in v.iter_mut() {
             *x = rng.range(-1.0, 1.0);
         }
-        let mean = v.iter().sum::<f32>() / 8.0;
-        // Shrink (rather than cut) so the scores still add up to zero.
-        let big = v.iter().map(|x| (x - mean).abs()).fold(1.0f32, f32::max);
+        // Take off the part of the draw that makes the troop better or worse
+        // overall, so what it is worth adds up to zero.
+        let ww: f32 = w.iter().map(|x| x * x).sum();
+        let vw: f32 = (0..8).map(|k| v[k] * w[k]).sum();
+        for k in 0..8 {
+            v[k] -= vw / ww * w[k];
+        }
+        // Shrink (rather than cut) so the worth still adds up to zero.
+        let big = v.iter().map(|x| x.abs()).fold(1.0f32, f32::max);
         let mut out = [0.0f32; 8];
         for k in 0..8 {
-            out[k] = (v[k] - mean) / big * TRAIT_SPAN[k];
+            out[k] = v[k] / big * TRAIT_SPAN[k];
         }
         // For reflexes and aim, lower is better: flip so a positive draw is good.
         Traits {
@@ -176,6 +221,21 @@ impl Traits {
             reflexes: -out[6],
             aim: -out[7],
         }
+    }
+
+    /// What this troop's traits are worth to its class, in drill win
+    /// points (0 for a fair roll).
+    pub fn worth(&self, spec: &ClassSpec) -> f32 {
+        let total: f32 = spec.parents.iter().map(|p| p.1).sum();
+        let sc = self.scores();
+        let mut sum = 0.0;
+        for &(class, share) in &spec.parents {
+            let v = trait_value(class);
+            for k in 0..8 {
+                sum += v[k] * sc[k] * share / total;
+            }
+        }
+        sum
     }
 
     /// Each trait as a share of its span, positive meaning better.
@@ -299,14 +359,14 @@ pub const PAIN_SLOW: f32 = 0.25;
 /// Injuries (sim version 10). Each hit on a trained troop lands on its legs,
 /// arms or torso. Damage to the legs slows it, to the arms weakens and slows
 /// its attacks, fully once that part has taken this share of its health.
-pub const INJURY_FULL: f32 = 0.4;
+pub const INJURY_FULL: f32 = 0.6;
 /// Share of hits on the legs and on the arms (the rest hit the torso).
 pub const HIT_LEGS: f32 = 0.3;
 pub const HIT_ARMS: f32 = 0.3;
 /// Speed left with ruined legs; damage left and cooldown with ruined arms.
-pub const LAME_SPEED: f32 = 0.7;
-pub const ARM_DMG: f32 = 0.75;
-pub const ARM_COOLDOWN: f32 = 1.25;
+pub const LAME_SPEED: f32 = 0.8;
+pub const ARM_DMG: f32 = 0.85;
+pub const ARM_COOLDOWN: f32 = 1.15;
 /// A hit this big (share of health) opens a wound: bleeding this much a
 /// tick, adding up to the most. Any heal stops it.
 pub const WOUND: f32 = 0.15;

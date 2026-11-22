@@ -167,12 +167,12 @@ fn hits_hurt_legs_and_arms_and_big_ones_bleed() {
     let u = &w.units[me];
     assert!(u.legs > 0.0 && u.arms > 0.0, "some hits land on each: {} {}", u.legs, u.arms);
     let (mut w, me, _) = duel(BaseClass::Fighter);
-    w.units[me].legs = 0.4;
+    w.units[me].legs = godcore::body::INJURY_FULL;
     let mut ok = w.clone();
     ok.units[me].legs = 0.0;
     step(&mut w, me, 1);
     step(&mut ok, me, 1);
-    assert!(w.units[me].x - 10.0 < 0.75 * (ok.units[me].x - 10.0), "ruined legs limp");
+    assert!(w.units[me].x - 10.0 < 0.85 * (ok.units[me].x - 10.0), "ruined legs limp");
 }
 
 #[test]
@@ -226,9 +226,14 @@ fn recruits_are_born_different_but_balanced() {
     let a = Troop::new(1, "a".into(), BaseClass::Fighter.spec(), 101);
     let b = Troop::new(2, "b".into(), BaseClass::Fighter.spec(), 202);
     assert_ne!(a.spec.traits, b.spec.traits);
-    for seed in 0..200 {
-        let s: f32 = Traits::roll(seed).scores().iter().sum();
-        assert!(s.abs() < 0.3, "seed {seed}: traits add up to {s}");
+    for class in [BaseClass::Fighter, BaseClass::Archer, BaseClass::Mage, BaseClass::Healer, BaseClass::Hunter] {
+        let spec = class.spec();
+        for seed in 0..1000 {
+            let t = Traits::roll_for(seed, &spec);
+            let worth = t.worth(&spec);
+            assert!(worth.abs() < 0.01, "{class:?} seed {seed}: worth {worth}");
+            assert!(t.scores().iter().all(|s| s.abs() <= 1.0 + 1e-5));
+        }
     }
     // Old saves (no traits) stay average, and a client can't pick traits.
     let mut old = a.clone();

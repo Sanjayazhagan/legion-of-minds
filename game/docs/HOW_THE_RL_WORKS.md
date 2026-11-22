@@ -389,12 +389,12 @@ The battle screen shows a yellow stamina bar under each troop's health in the si
 
 | Limit | Rule |
 |---|---|
-| Injuries | Each hit on a trained troop lands on the legs (30%), arms (30%) or torso. Leg damage slows it (70% speed once the legs took 40% of its health). Arm damage weakens and slows its attacks (75% damage, 1.25x cooldown at 40%). |
+| Injuries | Each hit on a trained troop lands on the legs (30%), arms (30%) or torso. Leg damage slows it (80% speed once the legs took 60% of its health). Arm damage weakens and slows its attacks (85% damage, 1.15x cooldown at 60%). |
 | Bleeding | A hit worth 15% of health or more bleeds 0.1 health a tick, adding up to 0.3. Any heal stops it and mends injuries by half the amount healed (as a share of health). |
 | Arrows | Crossbows carry 90 arrows (Archer), 80 (Sentry) or 60 (others); Volley uses one per target. With none left the troop fights in close: reach 1.3, 40% damage. |
-| Mana | Fire staffs have 100 mana (Mage, Warlock) or 80; a spell costs 3, a Fireball 9, and mana comes back at 0.2 a tick. Without enough for a spell the troop bashes with its staff (reach 1.3, 40% damage, no splash). |
+| Mana | Fire staffs have 100 mana (Mage, Warlock) or 80; a spell costs 3, a Fireball 9, and mana comes back at 0.3 a tick. Without enough for a spell the troop bashes with its staff (reach 1.3, 40% damage, no splash). |
 | Supplies and training | Conditioning adds up to 25% more arrows and mana. |
-| Traits | Recruits are born different: speed ±8%, strength ±10%, toughness ±10%, lungs ±15%, recovery ±15%, eyesight ±2 steps, reflexes ±1 tick, aim ±5% misses. They are rolled from the troop's seed and shrunk so they add up to zero: different, never simply better. The server rerolls them from the seed. Troops recruited before traits are average in everything. |
+| Traits | Recruits are born different: speed ±8%, strength ±10%, toughness ±10%, lungs ±15%, recovery ±15%, eyesight ±2 steps, reflexes ±1 tick, aim ±5% misses. They are rolled from the troop's seed, then evened out by what each trait is worth to the class (measured in drills: strength and toughness are worth far more than speed, eyesight or reflexes), so a Strong, Tough recruit pays for it elsewhere: different, never simply better. The server rerolls them from the seed. Troops recruited before traits are average in everything. |
 | Weapon weight | Stamina per attack: greataxe and greatsword 1.3x, crossbow 1.2x, sword and shield 1x (the shield adds 0.2 armour weight), staff and wand 0.8x, daggers 0.7x. |
 
 ### Light, noise, surprise and ground
@@ -404,11 +404,11 @@ The battle screen shows a yellow stamina bar under each troop's health in the si
 | Light | Day: sight 14. Dusk: 11. Night: 8, but buildings carry torches and are seen from as far as by day. Fog: 6, and sound carries 25% further. Outpost is fought by day, Fort at dusk, Twin Gate in fog, the Citadel at night. Home bases (and so online raids) get their light from their own layout; drills pick at random so brains learn every kind. |
 | Noise | Footsteps carry 4 steps (6 in heavy armour), shouts carry 12 and the enemy hears them too. A troop only hears the other side's steps and shouts (and every fight). |
 | Surprise | A blow from an enemy the target hasn't noticed does 30% more and can't be dodged or blocked. |
-| Mud | 65% speed, walking costs 1.5x stamina. |
+| Mud | 75% speed, walking costs 1.3x stamina. |
 | Hills | 85% speed on the slope, +2 sight and +10% ranged damage from the top. |
 | Layout | Two mud patches and a hill between the deploy ring and the base, clear of buildings: the same for everyone on a given base. Guards are slowed by them too. |
 
-Brains get 10 more inputs for these (OBS_DIM 138): leg and arm injury, bleeding, ammunition or mana left, the light, fog, and the ground under the troop and two steps ahead.
+Brains get 12 more inputs for these (OBS_DIM 140): leg and arm injury, bleeding, ammunition or mana left, the light, fog, the ground under the troop, and which way the nearest mud and hill are (stronger as their edge gets within 6 steps), so a troop backing away knows what is behind it.
 
 ### Measured
 
@@ -456,6 +456,31 @@ Drills are harder now (a third of them are at night or in fog, and there is mud 
 A first try with 40 arrows and 6-mana spells left Archers out of arrows halfway through a drill (14% wins); quivers are now 90/80/60 and spells cost 3 with faster mana.
 
 Old saves: the tour's starter troops (trained under v8) still 3-star the Outpost in 43 s at 1x, so they stay as they are. Retrained from scratch under v10 at the same 254k steps they did worse (2 stars, out of time), because the new rules take longer to learn.
+
+### Balance check at 1.2M steps
+
+The 600k numbers above raised the question whether the drops were just under-training. Same seeds, level 3, 1.2M steps, 120 greedy drills each:
+
+| Drill wins | Rules v8 | v10 first tuning | v10 now |
+|---|---|---|---|
+| Fighter | 87% | 80% | 81% |
+| Archer | 78% | 51% | 73% |
+| Mage | 91% | 69% | 83% |
+| Healer | 50% | 49% | 49% |
+
+The Fighter caught up with more training; the Archer and Mage did not, so it was a balance problem for ranged troops. Switching each rule off in turn for the 1.2M troops (1,000 drills each) showed why:
+
+| Switched off | Archer | Mage | Fighter |
+|---|---|---|---|
+| nothing | 43% | 59% | 80% |
+| night and fog (always day) | 46% | 60% | |
+| arrow and mana limits | 44% | 67% | |
+| mud and hill | 58% | 66% | 87% |
+| injuries | 61% | 74% | 90% |
+
+Light barely mattered. Archers spent 11% of their time in mud (Fighters 2%): they back away from enemies while facing them, and the old input only showed the ground ahead. Injuries cut ranged troops hardest, since their damage and kiting fall apart once hit. The Mage ran out of mana in a fifth of its drills. Now: injuries need 60% of health on a part to be full and do less (80% speed, 85% damage, 1.15x cooldown), mud is 75% speed and 1.3x stamina, brains feel the nearest mud and hill in every direction, and mana comes back at 0.3 a tick. Squad raids with the retrained troops: Outpost, Fort and Twin Gate 3 stars (140, 194, 400 ticks), Citadel 1 star (62%) out of time.
+
+Born traits: measured one at a time (2,000 drills each), a full step of strength was worth 14 win points to a Fighter and toughness 11, while speed, eyesight, reflexes and aim were worth 0 to 1 (aim 3 for an Archer). With traits that only added up to zero, the best of 40 recruits won 71% and the worst 42%. Evened out by worth, the 40 recruits spread by 1.5 points (53% to 59%), about the noise of the measurement.
 
 ## In one line
 
