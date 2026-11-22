@@ -159,6 +159,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                move_tier: 0,
                 traits: Default::default(),
                 talents: TALENT_MAX,
             },
@@ -189,6 +190,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                move_tier: 0,
                 traits: Default::default(),
                 talents: TALENT_MAX,
             },
@@ -219,6 +221,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                move_tier: 0,
                 traits: Default::default(),
                 talents: TALENT_MAX,
             },
@@ -242,6 +245,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                move_tier: 0,
                 traits: Default::default(),
                 talents: TALENT_MAX,
             },
@@ -265,6 +269,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                move_tier: 0,
                 traits: Default::default(),
                 talents: TALENT_MAX,
             },
@@ -292,6 +297,7 @@ impl BaseClass {
                 mastery: 0,
                 move_practice: [0.0; crate::moves::N_MOVES],
                 conditioning: 0.0,
+                move_tier: 0,
                 traits: Default::default(),
                 talents: TALENT_MAX,
             },
@@ -551,6 +557,10 @@ pub struct ClassSpec {
     /// (see `body`): more stamina, faster recovery, steadier nerve.
     #[serde(default)]
     pub conditioning: f32,
+    /// Which human moves its brain unlocks (sim version 11, see
+    /// `human_moves`), set from the troop's brain size.
+    #[serde(default)]
+    pub move_tier: u8,
     /// What the troop was born with, set from the troop (see `body::Traits`).
     #[serde(default)]
     pub traits: crate::body::Traits,
@@ -590,6 +600,7 @@ impl ClassSpec {
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
             conditioning: 0.0,
+            move_tier: 0,
             traits: Default::default(),
             talents: TALENT_MAX,
         }
@@ -660,6 +671,7 @@ impl ClassSpec {
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
             conditioning: 0.0,
+            move_tier: 0,
             traits: Default::default(),
             talents: TALENT_MAX,
         }
@@ -741,6 +753,7 @@ impl ClassSpec {
             mastery: 0,
             move_practice: [0.0; crate::moves::N_MOVES],
             conditioning: 0.0,
+            move_tier: 0,
             traits: Default::default(),
             talents: TALENT_MAX,
         }

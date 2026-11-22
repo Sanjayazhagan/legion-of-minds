@@ -13,7 +13,7 @@ use bag_protocol::{
     apply_rest, loot, practice_gold, run_raid_rested, shield_share, starter_layout, trophy_swing,
     AttackLog, AttackOutcome, AttackSubmit, BaseSnapshot, Match, Placement, PublicPlayer,
     RaidResult, Replay, TroopFatigue, User, KIND_PRACTICE, KIND_RAID, KIND_REVENGE, SIM_VERSION,
-    League,
+    League, army_bracket, bracket_name, snapshot_bracket, FindMatch, Invalid, BRACKETS,
 };
 use sqlx::{Postgres, Transaction};
 use chrono::{DateTime, Utc};
@@ -105,6 +105,7 @@ async fn open_raid(
         .await?;
     tx.commit().await?;
     let defender = load_user(&st.db, defender_id).await?;
+    let snapshot: BaseSnapshot = parse(&data)?;
     let max_loot = if kind == KIND_PRACTICE {
         practice_gold(st.cfg.practice_gold, me.upgrades.town_hall, 1.0)
     } else {
@@ -116,7 +117,8 @@ async fn open_raid(
         max_loot,
         defender: public(&defender),
         snapshot_id,
-        snapshot: parse(&data)?,
+        bracket: snapshot_bracket(&snapshot),
+        snapshot,
         expires_at: expires.to_rfc3339(),
         kind: kind.into(),
         rest,
@@ -130,11 +132,18 @@ async fn open_raid(
 /// no other player yet), the attacker gets a practice raid instead: a copy
 /// of another player's base, or a computer-made one. It costs that player
 /// nothing and moves no trophies.
+///
+/// Only bases in the brain-size category the attacker asks for are matched
+/// (see [`FindMatch`]), so small brains never meet huge ones.
 pub async fn find_match(
     State(st): State<AppState>,
     _v: SameRules,
     user: AuthUser,
+    Json(req): Json<FindMatch>,
 ) -> ApiResult<Json<Match>> {
+    if req.bracket as usize >= BRACKETS.len() {
+        return Err(Invalid(format!("unknown brain-size category {}", req.bracket)).into());
+    }
     let me = load_user(&st.db, user.id).await?;
     // Players who raid can be raided: without this, a player who never
     // publishes keeps every coin and loses no trophies.
@@ -154,7 +163,7 @@ pub async fn find_match(
     for range in [st.cfg.match_range, i32::MAX] {
         found = sqlx::query_as(
             "SELECT u.id, u.current_snapshot FROM users u
-             JOIN snapshots s ON s.id = u.current_snapshot AND s.sim_version = $4
+             JOIN snapshots s ON s.id = u.current_snapshot AND s.sim_version = $4 AND s.bracket = $5
              WHERE u.id <> $1 AND NOT u.is_bot
                AND (u.shield_until IS NULL OR u.shield_until < now())
                AND abs(u.trophies::bigint - $2::bigint) <= $3::bigint
@@ -171,6 +180,7 @@ pub async fn find_match(
         .bind(me.trophies)
         .bind(range as i64)
         .bind(SIM_VERSION as i32)
+        .bind(req.bracket as i16)
         .fetch_optional(&mut *tx)
         .await?;
         if found.is_some() {
@@ -184,10 +194,11 @@ pub async fn find_match(
         "SELECT u.id, u.current_snapshot FROM users u
          JOIN snapshots s ON s.id = u.current_snapshot AND s.sim_version = $2
          WHERE u.id <> $1 AND NOT u.is_bot
-         ORDER BY random() LIMIT 1",
+         ORDER BY (s.bracket = $3) DESC, random() LIMIT 1",
     )
     .bind(user.id)
     .bind(SIM_VERSION as i32)
+    .bind(req.bracket as i16)
     .fetch_optional(&mut *tx)
     .await?;
     let (defender_id, snapshot_id) = match copy {
@@ -251,6 +262,19 @@ pub async fn revenge(
     open_raid(&st, tx, &me, target, snapshot, KIND_REVENGE, Some(attack_id)).await
 }
 
+/// An army may not raid a base in a smaller brain-size category.
+pub(crate) fn check_bracket(army: &[Placement], snapshot: &BaseSnapshot) -> Result<(), Invalid> {
+    let (a, b) = (army_bracket(army), snapshot_bracket(snapshot));
+    if a > b {
+        return Err(Invalid(format!(
+            "this base is in the \"{}\" brain category and your army is in \"{}\": raid it with smaller brains",
+            bracket_name(b),
+            bracket_name(a)
+        )));
+    }
+    Ok(())
+}
+
 /// Late submissions are accepted for this long past the window, to allow for
 /// a slow connection.
 const GRACE_SECS: i64 = 60;
@@ -282,6 +306,10 @@ pub async fn submit(
     let me = load_user(&st.db, user.id).await?;
     let mut army = crate::clans::raid_army(&st.db, &me, &req).await?;
     let snapshot: BaseSnapshot = parse(&data)?;
+    // Practice costs the defender nothing, so any brains may practise.
+    if kind != KIND_PRACTICE {
+        check_bracket(&army, &snapshot)?;
+    }
     // The player's own troops start as tired as they were when the raid
     // opened; borrowed troops (placed after them) arrive fresh.
     let rest: Vec<TroopFatigue> = match rest {

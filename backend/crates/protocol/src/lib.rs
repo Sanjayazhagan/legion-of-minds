@@ -19,6 +19,8 @@ use godcore::sim::{Outcome, OBS_DIM};
 /// client in this header on every request.
 pub use godcore::sim::SIM_VERSION;
 pub const SIM_VERSION_HEADER: &str = "x-sim-version";
+use godcore::ppo::{brain_bracket, brain_cap, LEVEL_BRAIN_MAX, ONLINE_BRAIN_MAX};
+pub use godcore::ppo::BRACKETS;
 use godcore::troop::{level_cap, level_up_cost, Troop, MAX_LEVEL};
 use godcore::weapons::Weapon;
 use serde::{Deserialize, Serialize};
@@ -266,10 +268,43 @@ pub struct Match {
     /// gold from the server, the defender loses nothing) or "revenge".
     #[serde(default = "raid_kind")]
     pub kind: String,
+    /// The brain-size category of the defender's base (see [`BRACKETS`]).
+    #[serde(default)]
+    pub bracket: u8,
     /// How tired the attacker's troops are for this raid (stage C), as the
     /// server counts it. Troops not listed are fresh.
     #[serde(default)]
     pub rest: Vec<TroopFatigue>,
+}
+
+/// Ask for an opponent. `bracket` is the brain-size category to look in
+/// (the game sends its army's): only bases of that category are matched,
+/// and the army sent must not be in a bigger one. Old clients send `{}`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FindMatch {
+    #[serde(default)]
+    pub bracket: u8,
+}
+
+/// The brain-size category of one troop (troops are checked first, so this
+/// never sees a brain too big to go online; if it did, it counts as the top).
+pub fn troop_bracket(t: &Troop) -> u8 {
+    brain_bracket(t.actor.dims.get(1).copied().unwrap_or(0)).unwrap_or(BRACKETS.len() as u8 - 1)
+}
+
+/// An army's category: that of its biggest brain.
+pub fn army_bracket(army: &[Placement]) -> u8 {
+    army.iter().map(|p| troop_bracket(&p.troop)).max().unwrap_or(0)
+}
+
+/// A base's category: that of its biggest defender brain.
+pub fn snapshot_bracket(s: &BaseSnapshot) -> u8 {
+    s.defenders.iter().map(|p| troop_bracket(&p.troop)).max().unwrap_or(0)
+}
+
+/// The category's name, as the game shows it.
+pub fn bracket_name(b: u8) -> &'static str {
+    BRACKETS.get(b as usize).map(|x| x.1).unwrap_or("?")
 }
 
 /// One troop's carried tiredness for a raid: the share of its stamina
@@ -384,6 +419,9 @@ pub struct CupRow {
     pub score: f32,
     /// Gold won; None while the week is still open.
     pub prize: Option<i64>,
+    /// Brain-size category; ranks and prizes are per category.
+    #[serde(default)]
+    pub category: u8,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -391,6 +429,10 @@ pub struct CupStandings {
     pub week: i64,
     pub ends_at: String,
     pub entries: u32,
+    /// The category `top` and `last_week` show (the player's entry's, or
+    /// the one asked for).
+    #[serde(default)]
+    pub category: u8,
     pub top: Vec<CupRow>,
     pub mine: Option<CupRow>,
     /// Last week's top three.
@@ -494,16 +536,29 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
             t.level
         ));
     }
-    if t.steps > level_cap(t.level) {
-        return bad("troop has more training than its level allows");
-    }
-    // Players pick the brain size, but only from godcore's list.
+    // Brain sizes come from godcore's list. Up to 256 any level may have
+    // one (players used to pick sizes); bigger brains are grown at level 5,
+    // and online they stop at ONLINE_BRAIN_MAX.
     let dims = &t.actor.dims;
     if !godcore::ppo::actor_dims_ok(dims) {
         return bad(format!(
             "troop brain size must be one of {:?} neurons per layer",
             godcore::ppo::HIDDEN_SIZES
         ));
+    }
+    let h = dims[1];
+    if h > ONLINE_BRAIN_MAX {
+        return bad(format!(
+            "brains bigger than {ONLINE_BRAIN_MAX} neurons play offline only ({} has {h})",
+            t.name
+        ));
+    }
+    if h > LEVEL_BRAIN_MAX && t.level < MAX_LEVEL {
+        return bad(format!("only level {MAX_LEVEL} troops can have brains bigger than {LEVEL_BRAIN_MAX}"));
+    }
+    let cap = if t.level >= MAX_LEVEL { level_cap(t.level).max(brain_cap(h)) } else { level_cap(t.level) };
+    if t.steps > cap {
+        return bad("troop has more training than its level allows");
     }
     if t.brain.is_some_and(|h| h != dims[1]) {
         return bad("troop brain doesn't match its chosen size");
@@ -1070,7 +1125,7 @@ mod tests {
 
     #[test]
     fn team_training_is_kept_and_raids_match() {
-        assert_eq!(godcore::sim::SIM_VERSION, 10);
+        assert_eq!(godcore::sim::SIM_VERSION, 11);
         let mut a = army();
         a[0].troop.team_steps = 120_000;
         let c = canonical_army(&a, 1).unwrap();
@@ -1109,13 +1164,41 @@ mod tests {
     fn any_listed_brain_size_is_accepted() {
         use godcore::ppo::HIDDEN_SIZES;
         let s = canonical_snapshot(&snapshot()).unwrap();
-        for h in HIDDEN_SIZES {
+        for h in HIDDEN_SIZES.into_iter().filter(|&h| h <= LEVEL_BRAIN_MAX) {
             let mut a = army();
             assert!(a[0].troop.set_brain(h), "{h}");
-            let c = canonical_army(&a, 1).unwrap();
+            // The human moves a troop may use come from its brain, not
+            // from whatever its file says.
+            let mut forged = a.clone();
+            forged[0].troop.spec.move_tier = 4;
+            let c = canonical_army(&forged, 1).unwrap();
+            assert_eq!(c[0].troop.spec.move_tier, godcore::human_moves::tier_for_brain(h));
             assert_eq!(c[0].troop.actor.dims[1], h);
             assert_eq!(c[0].troop.brain, Some(h));
             assert_eq!(run_raid(&s, &a), run_raid(&s, &c), "{h}");
+            assert_eq!(army_bracket(&c), 0);
+        }
+        // Past 256 only level 5 troops, and online only up to 1024.
+        for h in HIDDEN_SIZES.into_iter().filter(|&h| h > LEVEL_BRAIN_MAX) {
+            let mut a = army();
+            assert!(a[0].troop.set_brain(h), "{h}");
+            assert!(canonical_army(&a, 5).is_err(), "level 1 with {h}");
+            a[0].troop.level = 5;
+            a[0].troop.sync_moves();
+            if h > ONLINE_BRAIN_MAX {
+                let e = canonical_army(&a, 5).unwrap_err();
+                assert!(e.0.contains("offline only"), "{e}");
+                continue;
+            }
+            // More training than level 5 alone allows, within the brain's cap.
+            a[0].troop.steps = brain_cap(h);
+            a[0].troop.mastery.clear();
+            a[0].troop.move_xp.clear();
+            let c = canonical_army(&a, 5).unwrap();
+            assert_eq!(army_bracket(&c), 1, "{h}");
+            assert_eq!(bracket_name(1), "Up to 1024");
+            a[0].troop.steps += 1;
+            assert!(canonical_army(&a, 5).is_err(), "{h} over its cap");
         }
         // Old troops with no pick: whatever size their level grew them to.
         let mut a = army();
@@ -1130,7 +1213,7 @@ mod tests {
         use godcore::nn::Mlp;
         use godcore::ppo::actor_dims_h;
         use godcore::rng::Rng;
-        for h in [0usize, 1, 32, 100, 65, 512, 4096] {
+        for h in [0usize, 1, 32, 100, 65, 500, 4096] {
             let mut a = army();
             a[0].troop.actor = Mlp::new(&actor_dims_h(h.max(1)), 0.01, &mut Rng::new(1));
             a[0].troop.brain = Some(h);

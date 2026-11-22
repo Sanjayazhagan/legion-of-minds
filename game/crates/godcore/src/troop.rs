@@ -5,7 +5,9 @@ use crate::body::{conditioning_of, Traits};
 use crate::classes::{talents_for_level, ClassSpec};
 use crate::env::EpisodeInfo;
 use crate::nn::Mlp;
-use crate::ppo::{actor_dims_h, critic_dims_h, hidden_for_level, new_actor_for, new_critic_for, HIDDEN_SIZES};
+use crate::ppo::{
+    actor_dims_h, brain_cap, critic_dims_h, hidden_for_level, new_actor_for, new_critic_for, HIDDEN_SIZES, LEVEL_BRAIN_MAX,
+};
 use crate::rng::Rng;
 use crate::moves::{practice_of, Move};
 use crate::weapons::{mastery_level, Weapon};
@@ -33,7 +35,12 @@ pub fn level_up_cost(level: u32) -> u32 {
 /// Training steps in each half of the plateau check at a level: the score of
 /// the last `window` steps is compared with the `window` before it.
 pub fn plateau_window(level: u32) -> u64 {
-    (level_cap(level) / 8).max(60_000)
+    plateau_window_for(level_cap(level))
+}
+
+/// The plateau window for a training cap (see [`Troop::plateau_window`]).
+pub fn plateau_window_for(cap: u64) -> u64 {
+    (cap / 8).max(60_000)
 }
 
 /// A troop has plateaued when its drill score rose by less than this (on a
@@ -293,11 +300,13 @@ impl Troop {
 
     /// Has it learned all its current brain can hold? See [`Plateau`].
     pub fn plateau(&self) -> Plateau {
-        if self.level >= MAX_LEVEL || self.steps_left() == 0 {
+        // At level 5 the brain can still grow past 256, so the check keeps
+        // running until there is no bigger size.
+        if (self.level >= MAX_LEVEL && self.next_brain().is_none()) || self.steps_left() == 0 {
             return Plateau::AtCap;
         }
         let Some(from) = self.level_from else { return Plateau::Grandfathered };
-        let w = plateau_window(self.level);
+        let w = self.plateau_window();
         // Two windows to compare, plus a quarter window so the check can be
         // made twice in a row (see below).
         let need = 2 * w + w / 4;
@@ -354,6 +363,33 @@ impl Troop {
         HIDDEN_SIZES.iter().copied().find(|&h| h > self.hidden())
     }
 
+    /// Steps in each half of this troop's plateau check right now.
+    pub fn plateau_window(&self) -> u64 {
+        plateau_window_for(self.cap())
+    }
+
+    /// Can a level 5 troop grow its brain now? The caller also checks the
+    /// player's PC can train the next size ([`Troop::next_brain`]) and pays
+    /// [`crate::ppo::brain_grow_cost`].
+    pub fn can_grow_brain(&self) -> bool {
+        self.level >= MAX_LEVEL && self.next_brain().is_some() && self.plateau().ready()
+    }
+
+    /// Grow a level 5 troop's brain one size, keeping what it learned. Its
+    /// training cap rises with it (see [`brain_cap`]) and the plateau check
+    /// starts again. Returns the new size.
+    pub fn grow_brain(&mut self) -> Option<usize> {
+        if self.level < MAX_LEVEL {
+            return None;
+        }
+        let h = self.next_brain()?;
+        self.brain = Some(h);
+        self.upgrade_brain();
+        self.level_from = Some(self.steps);
+        self.plateaued = false;
+        Some(h)
+    }
+
     pub fn weapon(&self) -> Weapon {
         self.spec.weapon()
     }
@@ -407,6 +443,7 @@ impl Troop {
         self.spec.talents = talents_for_level(self.level);
         self.spec.conditioning = conditioning_of(self.steps);
         self.spec.traits = self.traits();
+        self.spec.move_tier = crate::human_moves::tier_for_brain(self.hidden());
         for m in Move::ALL {
             self.spec.move_practice[m as usize] = if self.spec.has_move(m) { self.move_practice(m) } else { 0.0 };
         }
@@ -415,9 +452,12 @@ impl Troop {
     /// Bring the brain up to the chosen size and the current input shape,
     /// keeping everything it learned. Returns true if it changed.
     pub fn upgrade_brain(&mut self) -> bool {
-        let mut rng = Rng::new(self.seed ^ 0x6272_6169_6e00 ^ self.level as u64);
-        let mut changed = false;
         let h = self.target_hidden();
+        // Sizes past level 5 add their size to the seed so each growth gets
+        // fresh neurons; the old sizes keep the seed they always had.
+        let extra = if h > LEVEL_BRAIN_MAX { (h as u64) << 16 } else { 0 };
+        let mut rng = Rng::new(self.seed ^ 0x6272_6169_6e00 ^ self.level as u64 ^ extra);
+        let mut changed = false;
         let target = actor_dims_h(h);
         if self.actor.dims != target {
             // Never shrink a brain that is already bigger.
@@ -438,6 +478,8 @@ impl Troop {
         // An old pick the level has caught up with is just the level's size
         // now; keeping it would make the server think the brain doesn't match.
         self.brain = self.brain.filter(|&b| b > hidden_for_level(self.level));
+        // The human moves the brain unlocks follow its size.
+        self.spec.move_tier = crate::human_moves::tier_for_brain(self.hidden());
         changed
     }
 
@@ -452,8 +494,13 @@ impl Troop {
         self.upgrade_brain();
     }
 
+    /// Total training steps allowed: by level, and at level 5 by brain size.
     pub fn cap(&self) -> u64 {
-        level_cap(self.level)
+        if self.level >= MAX_LEVEL {
+            level_cap(self.level).max(brain_cap(self.hidden()))
+        } else {
+            level_cap(self.level)
+        }
     }
 
     pub fn steps_left(&self) -> u64 {

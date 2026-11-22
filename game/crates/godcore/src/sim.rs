@@ -23,8 +23,12 @@ pub const CASTER_EXPOSED: f32 = 0.25;
 pub const SPLASH_BUILDING: f32 = 0.25;
 /// Bumped whenever battle maths, observations or actions change: battles
 /// recorded under another version will not replay the same.
-pub const SIM_VERSION: u32 = 10;
-pub const OBS_DIM: usize = 154;
+pub const SIM_VERSION: u32 = 11;
+pub const OBS_DIM: usize = 162;
+/// Where the human-moves part starts (sim version 11): pace, crouch,
+/// parry, being feinted, the brain's move tier, and the nearest enemy's
+/// attack and crouch.
+pub const OBS_HUMAN: usize = 154;
 /// Where the teamwork part of the view starts (the two allies' roles,
 /// threats and actions, sim version 4).
 pub const OBS_TEAM: usize = 74;
@@ -34,7 +38,7 @@ pub const OBS_CALLS: usize = 100;
 /// Where the body part starts (sim version 10): stamina, wear, and how
 /// tired the nearest enemies and allies look.
 pub const OBS_BODY: usize = 121;
-pub const N_ACTIONS: usize = 28;
+pub const N_ACTIONS: usize = 40;
 /// The first observation features and actions, as they were before dodge,
 /// block and skills (brains from older saves are grown from these).
 pub const OBS_DIM_V1: usize = 47;
@@ -69,6 +73,20 @@ pub const ACT_CALL_TOWER: u8 = 24;
 pub const ACT_CALL_WAIT: u8 = 25;
 pub const ACT_CALL_GO: u8 = 26;
 pub const ACT_CALL_WATCH: u8 = 27;
+/// Human moves (sim version 11, see `human_moves`), unlocked by brain size.
+pub const ACT_SPRINT: u8 = 28;
+pub const ACT_SNEAK: u8 = 29;
+pub const ACT_BACKSTEP: u8 = 30;
+pub const ACT_STRAFE_L: u8 = 31;
+pub const ACT_STRAFE_R: u8 = 32;
+pub const ACT_SHOVE: u8 = 33;
+pub const ACT_CROUCH: u8 = 34;
+pub const ACT_JUMP: u8 = 35;
+pub const ACT_PARRY: u8 = 36;
+pub const ACT_FEINT: u8 = 37;
+pub const ACT_GRAB: u8 = 38;
+pub const ACT_ROCK: u8 = 39;
+pub const N_HUMAN: usize = 12;
 pub const N_CALLS: usize = 7;
 /// What each signal sounds like, as shown on screen. Meaningless until a
 /// team gives it a meaning (see `team::call_reactions`).
@@ -209,6 +227,9 @@ pub struct UnitStats {
     pub evaded: u32,
     /// Damage soaked up by blocking.
     pub blocked: f32,
+    /// Blows turned aside by a parry, and times caught by a feint.
+    pub parried: u32,
+    pub fooled: u32,
     /// Ranged shots that missed.
     pub missed: u32,
     /// Calls made to teammates.
@@ -310,6 +331,16 @@ pub struct Unit {
     pub full_range: f32,
     pub full_dmg: f32,
     pub full_splash: f32,
+    /// Human moves (sim version 11): which tier its brain unlocks, its pace
+    /// (0 walk, 1 sprint, 2 sneak) and how long that lasts, crouch and parry
+    /// ticks, ticks it is open to a feint, and each move's cooldown.
+    pub tier: u8,
+    pub pace: u8,
+    pub pace_ticks: u32,
+    pub crouch: u32,
+    pub parry: u32,
+    pub feinted: u32,
+    pub human_cd: [u32; N_HUMAN],
 }
 
 impl Unit {
@@ -407,6 +438,16 @@ pub enum EventKind {
     Cloak,
     /// A teleport: `from` start, `to` end.
     Blink,
+    /// A shove: `from` the shover, `to` where the target ended up.
+    Shove,
+    /// A jump: `from` start, `to` landing.
+    Jump,
+    /// A fake swing that stops short (at `to`).
+    Feint,
+    /// A grab and throw: `from` where the target was, `to` where it landed.
+    Throw,
+    /// A thrown rock: `from` the thrower, `to` where it lands.
+    Rock,
     /// A trap was set (at `to`).
     TrapSet,
     /// A trap went off (at `to`).
@@ -705,6 +746,13 @@ impl World {
             full_range: 0.0,
             full_dmg: 0.0,
             full_splash: 0.0,
+            tier: 0,
+            pace: 0,
+            pace_ticks: 0,
+            crouch: 0,
+            parry: 0,
+            feinted: 0,
+            human_cd: [0; N_HUMAN],
         }
     }
 
@@ -765,6 +813,7 @@ impl World {
         u.block_taken = 1.0 - (1.0 - ws.block_taken) * u.moves[Move::Block as usize];
         u.tag = tag;
         u.give_body(spec);
+        u.tier = spec.move_tier;
         // Raiders look towards the middle of the map, defenders out from it.
         let c = ARENA * 0.5;
         let (dx, dy) = if team == Team::Attack { (c - x, c - y) } else { (x - c, y - c) };
@@ -972,6 +1021,7 @@ impl World {
             ] {
                 m[a as usize] = m[a as usize] && self.can_afford(i, cost);
             }
+            self.human_mask(i, &mut m);
             let tick = self.tick;
             if self.anyone_to_call(i) && !self.calls.iter().any(|c| c.from == i && tick - c.tick < CALL_GAP) {
                 for a in ACT_CALL_FOCUS..ACT_CALL_FOCUS + N_CALLS as u8 {
@@ -1131,7 +1181,7 @@ impl World {
             0.0
         } else if (u.stun > 0 || u.last_action == ACT_IDLE) && self.tick >= u.effort + body::BREATHER {
             1.0
-        } else if matches!(u.last_action, 1..=8) {
+        } else if crate::human_moves::is_step(u.last_action) {
             body::REST_WALKING
         } else {
             body::REST_FIGHTING
@@ -1744,6 +1794,16 @@ impl World {
             put(&mut o, dx);
             put(&mut o, dy);
         }
+        // Human moves (sim version 11), from OBS_HUMAN on.
+        put(&mut o, (me.pace == 1) as u8 as f32);
+        put(&mut o, (me.pace == 2) as u8 as f32);
+        put(&mut o, (me.crouch > 0) as u8 as f32);
+        put(&mut o, (me.parry > 0) as u8 as f32);
+        put(&mut o, (me.feinted > 0) as u8 as f32);
+        put(&mut o, me.tier as f32 / 4.0);
+        let foe = es.first().filter(|e| e.fresh >= 1.0).map(|e| &self.units[e.j]);
+        put(&mut o, foe.map_or(0.0, |u| matches!(u.last_action, ACT_HIT_UNIT | ACT_SKILL | ACT_CHARGE | ACT_FEINT) as u8 as f32));
+        put(&mut o, foe.map_or(0.0, |u| (u.crouch > 0) as u8 as f32));
         debug_assert_eq!(k, OBS_DIM);
         o
     }
@@ -1897,6 +1957,25 @@ impl World {
             self.units[to].stats.evaded += 1;
             return;
         }
+        // A parry turns a blow aside and leaves the attacker reeling
+        // (sim version 11). Arrows, spells and towers can't be parried.
+        if self.units[to].parry > 0
+            && !surprise
+            && from != to
+            && !self.units[from].kind.is_building()
+            && self.units[from].dist(&self.units[to]) <= 2.5
+        {
+            let u = &mut self.units[to];
+            u.parry = 0;
+            u.stats.blocked += amount;
+            u.stats.parried += 1;
+            let a = &mut self.units[from];
+            a.stun = a.stun.max(crate::human_moves::PARRY_STUN);
+            let (pf, pt) = (self.pos(from), self.pos(to));
+            self.events.push(Event { kind: EventKind::Blocked, from: pf, to: pt });
+            self.events.push(Event { kind: EventKind::Stun, from: pf, to: pf });
+            return;
+        }
         let mut amount = amount;
         if self.units[to].ward > 0 {
             amount *= 1.0 - self.units[to].ward_power;
@@ -1952,6 +2031,219 @@ impl World {
         }
     }
 
+    // ------------------------------------------------------------ human moves
+
+    /// Which human moves (sim version 11) a troop may make now: unlocked by
+    /// its brain's tier, off cooldown, affordable, and with something to use
+    /// them on.
+    fn human_mask(&self, i: usize, m: &mut [bool; N_ACTIONS]) {
+        use crate::human_moves::*;
+        let me = &self.units[i];
+        if me.tier == 0 {
+            return;
+        }
+        let team = me.team;
+        let threat = self.threat(i).is_some();
+        let foe = self.nearest_noticed(i, |u| u.team != team && !u.kind.is_building() && u.kind != Kind::Core);
+        let foe_d = foe.map_or(f32::MAX, |f| f.1);
+        let grapple = foe.is_some_and(|(j, d)| d <= GRAPPLE_REACH && self.units[j].kind != Kind::Tower);
+        for &(a, _, tier) in HUMAN_MOVES.iter() {
+            let k = (a - ACT_SPRINT) as usize;
+            if me.tier < tier || me.human_cd[k] > 0 {
+                continue;
+            }
+            m[a as usize] = match a {
+                ACT_SPRINT => me.pace != 1 && (me.pool <= 0.0 || me.stamina >= me.pool * SPRINT_MIN_BREATH),
+                ACT_SNEAK => me.pace != 2,
+                ACT_BACKSTEP => threat,
+                ACT_STRAFE_L | ACT_STRAFE_R => foe_d <= STRAFE_RANGE,
+                ACT_SHOVE => grapple && self.can_afford(i, COST_SHOVE),
+                ACT_CROUCH => me.crouch == 0,
+                ACT_JUMP => self.can_afford(i, COST_JUMP),
+                ACT_PARRY => threat && me.parry == 0 && self.can_afford(i, body::COST_BLOCK),
+                ACT_FEINT => foe_d <= me.range.max(2.0) && self.can_afford(i, COST_FEINT),
+                ACT_GRAB => grapple && self.can_afford(i, COST_GRAB),
+                ACT_ROCK => foe_d <= ROCK_RANGE && self.can_afford(i, COST_ROCK),
+                _ => false,
+            };
+        }
+    }
+
+    /// Speed, effort and footstep-sound multipliers of the troop's pace.
+    fn pace(&self, i: usize) -> (f32, f32, f32) {
+        use crate::human_moves::*;
+        let u = &self.units[i];
+        let (mut sp, mut eff, mut snd) = match u.pace {
+            1 => (SPRINT_SPEED, SPRINT_EFFORT, SPRINT_SOUND),
+            2 => (SNEAK_SPEED, SNEAK_EFFORT, 0.0),
+            _ => (1.0, 1.0, 1.0),
+        };
+        if u.crouch > 0 {
+            sp *= CROUCH_SPEED;
+            snd *= 0.5;
+            eff *= 1.2;
+        }
+        (sp, eff, snd)
+    }
+
+    /// One step `dist` along (ux, uy) at walking cost, without turning.
+    fn sidestep(&mut self, i: usize, ux: f32, uy: f32, speed: f32) {
+        let u = &self.units[i];
+        let g = self.ground(u.x, u.y);
+        let slow = match g {
+            Some(Ground::Mud) => MUD_SPEED,
+            Some(Ground::Hill) => HILL_SPEED,
+            None => 1.0,
+        };
+        let (pace_speed, pace_effort, pace_sound) = self.pace(i);
+        let sp = u.speed * speed * self.vigour(i) * slow * pace_speed;
+        let cost = body::COST_WALK * u.load * if g == Some(Ground::Mud) { MUD_EFFORT } else { 1.0 } * pace_effort;
+        let sound = if u.load > 1.2 { HEAVY_STEP_SOUND } else { STEP_SOUND } * pace_sound;
+        if sound > 0.0 {
+            self.sounds.push((u.x, u.y, sound, Some(u.team)));
+        }
+        self.move_unit(i, ux * sp, uy * sp);
+        if self.human(i) {
+            let u = &mut self.units[i];
+            u.stamina = (u.stamina - cost).max(0.0);
+        }
+    }
+
+    /// Unit vector from `i` to `j` (or east if they overlap).
+    fn toward(&self, i: usize, j: usize) -> (f32, f32) {
+        let (a, b) = (self.pos(i), self.pos(j));
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let d = (dx * dx + dy * dy).sqrt();
+        if d > 1e-4 {
+            (dx / d, dy / d)
+        } else {
+            (1.0, 0.0)
+        }
+    }
+
+    /// Make human move `a` (already checked against the mask).
+    fn human_do(&mut self, i: usize, a: u8) {
+        use crate::human_moves::*;
+        let k = (a - ACT_SPRINT) as usize;
+        let team = self.units[i].team;
+        let foe = self
+            .nearest_noticed(i, |u| u.team != team && !u.kind.is_building() && u.kind != Kind::Core)
+            .map(|f| f.0);
+        match a {
+            ACT_SPRINT | ACT_SNEAK => {
+                let u = &mut self.units[i];
+                u.pace = if a == ACT_SPRINT { 1 } else { 2 };
+                u.pace_ticks = PACE_TICKS;
+            }
+            ACT_BACKSTEP => {
+                let j = self.threat(i).unwrap();
+                let (ux, uy) = self.toward(i, j);
+                self.sidestep(i, -ux, -uy, BACKSTEP_SPEED);
+                self.turn_toward(i, ux, uy);
+            }
+            ACT_STRAFE_L | ACT_STRAFE_R => {
+                let j = foe.unwrap();
+                let (ux, uy) = self.toward(i, j);
+                let (px, py) = if a == ACT_STRAFE_L { (-uy, ux) } else { (uy, -ux) };
+                self.sidestep(i, px, py, STRAFE_SPEED);
+                self.turn_toward(i, ux, uy);
+            }
+            ACT_SHOVE => {
+                let j = foe.unwrap();
+                let (ux, uy) = self.toward(i, j);
+                self.move_unit(j, ux * SHOVE_DIST, uy * SHOVE_DIST);
+                let t = &mut self.units[j];
+                t.block_ticks = 0;
+                t.crouch = 0;
+                t.stun = t.stun.max(SHOVE_STUN);
+                self.units[i].human_cd[k] = SHOVE_CD;
+                self.spend(i, COST_SHOVE);
+                self.turn_toward(i, ux, uy);
+                let (f, to) = (self.pos(i), self.pos(j));
+                self.events.push(Event { kind: EventKind::Shove, from: f, to });
+            }
+            ACT_CROUCH => {
+                self.units[i].crouch = CROUCH_TICKS;
+            }
+            ACT_JUMP => {
+                let (fx, fy) = self.units[i].facing;
+                let from = self.pos(i);
+                // A jump clears mud: no slowing, full distance.
+                self.move_unit(i, fx * JUMP_DIST, fy * JUMP_DIST);
+                let u = &mut self.units[i];
+                u.invuln = u.invuln.max(JUMP_INVULN);
+                u.crouch = 0;
+                u.human_cd[k] = JUMP_CD;
+                u.stats.dodges += 1;
+                self.spend(i, COST_JUMP);
+                let to = self.pos(i);
+                self.events.push(Event { kind: EventKind::Jump, from, to });
+            }
+            ACT_PARRY => {
+                let u = &mut self.units[i];
+                u.parry = PARRY_TICKS;
+                u.human_cd[k] = PARRY_CD;
+                self.spend(i, body::COST_BLOCK);
+            }
+            ACT_FEINT => {
+                let j = foe.unwrap();
+                let (ux, uy) = self.toward(i, j);
+                self.turn_toward(i, ux, uy);
+                self.units[j].feinted = FEINT_TICKS;
+                self.units[i].human_cd[k] = FEINT_CD;
+                self.spend(i, COST_FEINT);
+                let (f, to) = (self.pos(i), self.pos(j));
+                // It looks like a real swing that stops short.
+                let short = (f.0 + (to.0 - f.0) * 0.6, f.1 + (to.1 - f.1) * 0.6);
+                self.events.push(Event { kind: EventKind::Feint, from: f, to: short });
+            }
+            ACT_GRAB => {
+                let j = foe.unwrap();
+                let (ux, uy) = self.toward(i, j);
+                self.turn_toward(i, ux, uy);
+                let from = self.pos(j);
+                self.move_unit(j, ux * GRAB_THROW, uy * GRAB_THROW);
+                let t = &mut self.units[j];
+                t.block_ticks = 0;
+                t.crouch = 0;
+                t.parry = 0;
+                t.stun = t.stun.max(GRAB_STUN);
+                self.units[i].human_cd[k] = GRAB_CD;
+                self.units[i].cloak = 0;
+                self.spend(i, COST_GRAB);
+                let dmg = self.units[i].full_dmg.max(self.units[i].dmg) * GRAB_DMG * self.force(i);
+                let to = self.pos(j);
+                self.events.push(Event { kind: EventKind::Throw, from, to });
+                self.damage(i, j, dmg);
+            }
+            ACT_ROCK => {
+                let j = foe.unwrap();
+                let (ux, uy) = self.toward(i, j);
+                self.turn_toward(i, ux, uy);
+                self.units[i].human_cd[k] = ROCK_CD;
+                self.units[i].cloak = 0;
+                self.spend(i, COST_ROCK);
+                let (f, to) = (self.pos(i), self.pos(j));
+                let r = (self.units[i].dist(&self.units[j]) / ROCK_RANGE).min(1.0);
+                let t = &self.units[j];
+                let miss = 0.15
+                    + 0.3 * r * r
+                    + if is_step(t.last_action) { 0.12 } else { 0.0 }
+                    + if t.crouch > 0 { CROUCH_MISS } else { 0.0 };
+                if self.roll(i, j ^ 0x726f) < miss {
+                    let wide = (to.0 - uy * 1.2, to.1 + ux * 1.2);
+                    self.events.push(Event { kind: EventKind::Rock, from: f, to: wide });
+                    self.units[i].stats.missed += 1;
+                } else {
+                    self.events.push(Event { kind: EventKind::Rock, from: f, to });
+                    let dmg = ROCK_DMG * self.force(i);
+                    self.damage(i, j, dmg);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn troop_act(&mut self, i: usize, a: u8) {
         self.troop_do(i, a);
         self.breathe(i);
@@ -1960,8 +2252,14 @@ impl World {
     fn troop_do(&mut self, i: usize, a: u8) {
         {
             let u = &mut self.units[i];
-            for t in [&mut u.cd, &mut u.skill_cd, &mut u.block_ticks, &mut u.invuln, &mut u.cloak, &mut u.ward] {
+            for t in [&mut u.cd, &mut u.skill_cd, &mut u.block_ticks, &mut u.invuln, &mut u.cloak, &mut u.ward, &mut u.crouch, &mut u.parry, &mut u.feinted, &mut u.pace_ticks] {
                 *t = t.saturating_sub(1);
+            }
+            for t in u.human_cd.iter_mut() {
+                *t = t.saturating_sub(1);
+            }
+            if u.pace_ticks == 0 {
+                u.pace = 0;
             }
             for t in u.move_cd.iter_mut() {
                 *t = t.saturating_sub(1);
@@ -1980,7 +2278,25 @@ impl World {
             a = self.units[i].last_action;
             m = self.mask(i);
         }
+        // Fooled by a feint: rolling, guarding, parrying or jumping away from
+        // a blow that never comes leaves it off balance.
+        if matches!(a, ACT_DODGE | ACT_BLOCK | ACT_PARRY | ACT_JUMP) && m[a as usize] && self.units[i].feinted > 0 {
+            let u = &mut self.units[i];
+            u.feinted = 0;
+            u.stun = crate::human_moves::FEINT_STUN;
+            u.last_action = ACT_IDLE;
+            u.stats.fooled += 1;
+            let p = self.pos(i);
+            self.events.push(Event { kind: EventKind::Stun, from: p, to: p });
+            return;
+        }
         self.units[i].last_action = a;
+        if a >= ACT_SPRINT {
+            if m[a as usize] {
+                self.human_do(i, a);
+            }
+            return;
+        }
         match a {
             1..=8 => {
                 let (dx, dy) = DIRS[(a - 1) as usize];
@@ -1991,10 +2307,13 @@ impl World {
                     Some(Ground::Hill) => HILL_SPEED,
                     None => 1.0,
                 };
-                let sp = if u.block_ticks > 0 { u.speed * 0.5 } else { u.speed } * self.vigour(i) * slow;
-                let cost = body::COST_WALK * u.load * if g == Some(Ground::Mud) { MUD_EFFORT } else { 1.0 };
-                let sound = if u.load > 1.2 { HEAVY_STEP_SOUND } else { STEP_SOUND };
-                self.sounds.push((u.x, u.y, sound, Some(u.team)));
+                let (pace_speed, pace_effort, pace_sound) = self.pace(i);
+                let sp = if u.block_ticks > 0 { u.speed * 0.5 } else { u.speed } * self.vigour(i) * slow * pace_speed;
+                let cost = body::COST_WALK * u.load * if g == Some(Ground::Mud) { MUD_EFFORT } else { 1.0 } * pace_effort;
+                let sound = if u.load > 1.2 { HEAVY_STEP_SOUND } else { STEP_SOUND } * pace_sound;
+                if sound > 0.0 {
+                    self.sounds.push((u.x, u.y, sound, Some(u.team)));
+                }
                 self.move_unit(i, dx * sp, dy * sp);
                 // Walking doesn't wear the body down, it just costs breath.
                 if self.human(i) {
@@ -2155,7 +2474,9 @@ impl World {
                 0.02
             } else {
                 let r = (me.dist(t) / me.range).min(1.0);
-                0.04 + 0.2 * r * r + if matches!(t.last_action, 1..=8) { 0.12 } else { 0.0 }
+                0.04 + 0.2 * r * r
+                    + if crate::human_moves::is_step(t.last_action) { 0.12 } else { 0.0 }
+                    + if t.crouch > 0 { crate::human_moves::CROUCH_MISS } else { 0.0 }
             } + body::TIRED_MISS * tired
                 + me.aim;
             let roll = self.roll(i, j);
@@ -2455,6 +2776,11 @@ impl World {
             ACT_HEAL => self.heal_target(i, 0),
             ACT_HEAL_2 => self.heal_target(i, 1),
             ACT_CHARGE => self.charge_target(i),
+            ACT_BACKSTEP => self.threat(i),
+            ACT_STRAFE_L | ACT_STRAFE_R | ACT_SHOVE | ACT_FEINT | ACT_GRAB | ACT_ROCK => {
+                let team = self.units[i].team;
+                self.nearest_noticed(i, |u| u.team != team && !u.kind.is_building() && u.kind != Kind::Core).map(|f| f.0)
+            }
             _ => None,
         }
     }

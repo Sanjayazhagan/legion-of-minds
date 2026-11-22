@@ -21,11 +21,13 @@ pub struct Settings {
     pub sight: bool,
     /// Playing on the test save, with cheats.
     pub test_mode: bool,
+    /// The last PC speed test: how big a brain this computer can train.
+    pub pc: Option<crate::pc_check::PcResult>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { volume: 0.8, muted: false, shake: true, sight: false, test_mode: false }
+        Settings { volume: 0.8, muted: false, shake: true, sight: false, test_mode: false, pc: None }
     }
 }
 
@@ -217,10 +219,65 @@ impl Game {
                 self.cheats_panel(Rect::new(20.0, 656.0, 1240.0, 130.0));
             }
         }
+        if !self.store.is_test() {
+            self.pc_panel(Rect::new(20.0, 656.0, 1240.0, 130.0));
+        }
 
         if changed {
             self.settings.apply();
             self.settings.save(&self.store.home);
+        }
+    }
+
+    /// How big a brain this PC can train, from the speed test.
+    fn pc_panel(&mut self, c: Rect) {
+        use crate::pc_check::{PcResult, TRAIN_HOURS};
+        panel(c);
+        let (x, y) = (c.x + 24.0, c.y + 34.0);
+        let running = crate::pc_check::running();
+        let fresh = self.settings.pc.clone().filter(|p| p.fresh());
+        match (&fresh, running) {
+            (_, Some((k, n))) => {
+                text("Your PC: testing how big a brain it can train...", x, y, 22.0, TEXT);
+                text(&format!("Timing a real training round ({k} of {n}). Takes 10 to 60 seconds."), x, y + 28.0, 16.0, MUTED);
+            }
+            (Some(pc), None) => {
+                let max = pc.max_brain();
+                text(&format!("Your PC can train brains up to {max} neurons"), x, y, 22.0, GOOD);
+                text(
+                    &format!(
+                        "Tested on {}. Level 5 troops grow past 256 one size per plateau, up to sizes this PC trains fully in {TRAIN_HOURS:.0} hours.",
+                        pc.device
+                    ),
+                    x,
+                    y + 26.0,
+                    15.0,
+                    MUTED,
+                );
+                let mut bx = x;
+                for h in godcore::ppo::HIDDEN_SIZES.into_iter().filter(|&h| h >= 256) {
+                    let hrs = pc.hours_to_full(h);
+                    let t = if hrs < 1.0 { format!("{h}: {:.0} min", hrs * 60.0) } else { format!("{h}: {hrs:.0} h") };
+                    let col = if h <= max { GOOD } else { MUTED };
+                    text(&t, bx, y + 58.0, 17.0, col);
+                    bx += text_width(&t, 17.0) + 26.0;
+                }
+                let online = format!("Online: up to {} (in categories)", godcore::ppo::ONLINE_BRAIN_MAX);
+                text(&online, x, y + 82.0, 15.0, MUTED);
+                let mem = format!("Memory to train {max}: about {:.0} MB", PcResult::train_mb(max));
+                text(&mem, x + text_width(&online, 15.0) + 30.0, y + 82.0, 15.0, MUTED);
+            }
+            (None, None) => {
+                text("Your PC: not tested yet", x, y, 22.0, TEXT);
+                text("The test times a real training round to find the biggest brain this PC can train.", x, y + 28.0, 16.0, MUTED);
+            }
+        }
+        let br = Rect::new(c.x + c.w - 190.0, c.y + 20.0, 166.0, 40.0);
+        // Training shares the CPU and would make the test read low.
+        let training = self.training_count() > 0;
+        let label = if training { "Training running" } else if fresh.is_some() { "Test again" } else { "Test my PC" };
+        if self.ui.button_ex(br, label, running.is_none() && !training, false) {
+            crate::pc_check::start();
         }
     }
 

@@ -14,8 +14,9 @@ use crate::{Game, Screen};
 use bag_client::bag_protocol::{
     AttackLog, CupReplay, CupStandings, LoginStart, Match, Providers, PublicPlayer, Published,
     Replay, Upgrades, User, KIND_PRACTICE, KIND_REVENGE, ClanSummary, League, Loan, Season,
-    MAX_BORROWED, GiftClaimed, LiveView,
+    MAX_BORROWED, GiftClaimed, LiveView, bracket_name, troop_bracket,
 };
+use godcore::ppo::ONLINE_BRAIN_MAX;
 use bag_client::{
     army_from, army_spots, defender_spots, replay_battle, snapshot_from, Client, Uuid,
 };
@@ -746,7 +747,7 @@ fn base_defenders(g: &Game, paid: &Upgrades) -> (Vec<(Troop, (f32, f32))>, usize
         .collect();
     let ok: Vec<Troop> = all
         .iter()
-        .filter(|t| t.level <= cap && paid.blocker(t).is_none())
+        .filter(|t| t.level <= cap && paid.blocker(t).is_none() && t.hidden() <= ONLINE_BRAIN_MAX)
         .take(MAX_DEFENDERS)
         .map(|t| (*t).clone())
         .collect();
@@ -763,7 +764,7 @@ pub(crate) fn raid_army(g: &Game, paid: &Upgrades) -> Vec<(Troop, (f32, f32))> {
         .troops
         .iter()
         .enumerate()
-        .filter(|(i, t)| t.spec.role == Role::Attack && t.level <= cap && paid.blocker(t).is_none() && !g.is_busy(*i))
+        .filter(|(i, t)| t.spec.role == Role::Attack && t.level <= cap && paid.blocker(t).is_none() && !g.is_busy(*i) && t.hidden() <= ONLINE_BRAIN_MAX)
         .map(|(_, t)| t)
         .collect();
     v.sort_by(|a, b| {
@@ -1149,6 +1150,13 @@ impl Game {
             .into_iter()
             .zip(spots[army.len()..].iter().copied())
             .collect();
+        // The brain-size category this army raids in: its biggest brain's.
+        let bracket = army
+            .iter()
+            .map(|(t, _)| troop_bracket(t))
+            .chain(borrowed.iter().map(|(l, _)| troop_bracket(&l.troop)))
+            .max()
+            .unwrap_or(0);
         match &s.found {
             None => {
                 let training = (0..self.troops.len()).filter(|&i| self.troops[i].spec.role == Role::Attack && self.is_busy(i)).count();
@@ -1172,7 +1180,11 @@ impl Game {
                 ) {
                     let c = self.account.client();
                     s.msg = None;
-                    s.busy = Some(Busy::Find(Task::spawn(move || c.find_match().map_err(err))));
+                    s.busy = Some(Busy::Find(Task::spawn(move || c.find_match_in(bracket).map_err(err))));
+                }
+                if !army.is_empty() {
+                    let cat = format!("Brain category: {}. You only meet bases in it.", bracket_name(bracket));
+                    text(&cat, mx, mid.y + 172.0, 16.0, MUTED);
                 }
                 if army.is_empty() {
                     let none = !self.troops.iter().any(|t| t.spec.role == Role::Attack);
@@ -1252,7 +1264,7 @@ impl Game {
                     false,
                 ) {
                     let c = self.account.client();
-                    s.busy = Some(Busy::Find(Task::spawn(move || c.find_match().map_err(err))));
+                    s.busy = Some(Busy::Find(Task::spawn(move || c.find_match_in(bracket).map_err(err))));
                 }
             }
         }
@@ -1454,7 +1466,7 @@ impl Game {
             }
         } else if let Some(cup) = s.cup.clone() {
             text(
-                &format!("{} entered. Ends Monday 00:00 UTC.", cup.entries),
+                &format!("{} entered in \"{}\" brains. Ends Monday 00:00 UTC.", cup.entries, bracket_name(cup.category)),
                 right.x + 20.0,
                 right.y + 62.0,
                 15.0,

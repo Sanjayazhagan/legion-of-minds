@@ -29,6 +29,7 @@ struct Row {
     class_name: String,
     score: f32,
     prize: Option<i64>,
+    category: i16,
 }
 
 impl Row {
@@ -45,34 +46,41 @@ impl Row {
             class_name: self.class_name,
             score: self.score,
             prize: self.prize,
+            category: self.category as u8,
         }
     }
 }
 
-/// A week's entries, best first. Ties go to whoever entered first.
+/// A week's entries, best first, ranked within each brain-size category.
+/// Ties go to whoever entered first.
 const RANKED: &str = "SELECT * FROM (
-        SELECT row_number() OVER (ORDER BY c.score DESC, c.entered_at, c.user_id) AS rank,
+        SELECT row_number() OVER (PARTITION BY c.category ORDER BY c.score DESC, c.entered_at, c.user_id) AS rank,
             c.user_id, u.display_name, u.trophies, s.town_hall, c.troop_name, c.class_name,
-            c.score, c.prize
+            c.score, c.prize, c.category
         FROM cup_entries c
         JOIN users u ON u.id = c.user_id
         LEFT JOIN snapshots s ON s.id = u.current_snapshot
         WHERE c.week = $1
     ) r";
 
-async fn rows(db: &PgPool, week: i64, filter: &str, arg: Option<Uuid>) -> ApiResult<Vec<CupRow>> {
-    let sql = format!("{RANKED} {filter} ORDER BY rank");
-    let mut q = sqlx::query_as::<_, Row>(&sql).bind(week as i32);
-    if let Some(a) = arg {
-        q = q.bind(a);
-    }
+/// `filter` may use $2 (a player) and $3 (a category).
+async fn rows(db: &PgPool, week: i64, filter: &str, arg: Option<Uuid>, category: u8) -> ApiResult<Vec<CupRow>> {
+    // Both parameters are always sent; mention them so Postgres knows their
+    // types even when the filter doesn't use one.
+    let sql = format!("{RANKED} {filter} AND ($2::uuid IS NULL OR TRUE) AND ($3::smallint IS NULL OR TRUE) ORDER BY rank");
+    let q = sqlx::query_as::<_, Row>(&sql).bind(week as i32).bind(arg).bind(category as i16);
     Ok(q.fetch_all(db).await?.into_iter().map(Row::into_row).collect())
 }
 
-async fn standings_for(st: &AppState, me: Uuid) -> ApiResult<CupStandings> {
+/// Standings in one category: `category` if asked, else the player's
+/// entry's, else the first.
+async fn standings_for(st: &AppState, me: Uuid, category: Option<u8>) -> ApiResult<CupStandings> {
     let week = cup_week(Utc::now().timestamp());
-    let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM cup_entries WHERE week = $1")
+    let mine = rows(&st.db, week, "WHERE user_id = $2", Some(me), 0).await?.pop();
+    let category = category.or(mine.as_ref().map(|m| m.category)).unwrap_or(0);
+    let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM cup_entries WHERE week = $1 AND category = $2")
         .bind(week as i32)
+        .bind(category as i16)
         .fetch_one(&st.db)
         .await?;
     Ok(CupStandings {
@@ -81,14 +89,24 @@ async fn standings_for(st: &AppState, me: Uuid) -> ApiResult<CupStandings> {
             .unwrap_or_default()
             .to_rfc3339(),
         entries: entries as u32,
-        top: rows(&st.db, week, "WHERE rank <= 50", None).await?,
-        mine: rows(&st.db, week, "WHERE user_id = $2", Some(me)).await?.pop(),
-        last_week: rows(&st.db, week - 1, "WHERE rank <= 3", None).await?,
+        category,
+        top: rows(&st.db, week, "WHERE rank <= 50 AND category = $3", None, category).await?,
+        mine,
+        last_week: rows(&st.db, week - 1, "WHERE rank <= 3 AND category = $3", None, category).await?,
     })
 }
 
-pub async fn standings(State(st): State<AppState>, user: AuthUser) -> ApiResult<Json<CupStandings>> {
-    Ok(Json(standings_for(&st, user.id).await?))
+#[derive(serde::Deserialize)]
+pub struct CupQuery {
+    category: Option<u8>,
+}
+
+pub async fn standings(
+    State(st): State<AppState>,
+    user: AuthUser,
+    axum::extract::Query(q): axum::extract::Query<CupQuery>,
+) -> ApiResult<Json<CupStandings>> {
+    Ok(Json(standings_for(&st, user.id, q.category).await?))
 }
 
 /// Enter a troop, or replace this week's entry. The troop is checked like
@@ -103,15 +121,17 @@ pub async fn enter(
     if let Some(why) = paid.blocker(&troop) {
         return Err(bag_protocol::Invalid(why).into());
     }
+    // Each brain-size category is its own cup.
+    let category = bag_protocol::troop_bracket(&troop);
     let (score, troop) = tokio::task::spawn_blocking(move || (cup_score(&troop), troop))
         .await
         .map_err(ApiError::internal)?;
     sqlx::query(
-        "INSERT INTO cup_entries (week, user_id, troop, troop_name, class_name, score)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        "INSERT INTO cup_entries (week, user_id, troop, troop_name, class_name, score, category)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (week, user_id) DO UPDATE SET troop = EXCLUDED.troop,
              troop_name = EXCLUDED.troop_name, class_name = EXCLUDED.class_name,
-             score = EXCLUDED.score, entered_at = now()",
+             score = EXCLUDED.score, category = EXCLUDED.category, entered_at = now()",
     )
     .bind(cup_week(Utc::now().timestamp()) as i32)
     .bind(user.id)
@@ -119,9 +139,10 @@ pub async fn enter(
     .bind(&troop.name)
     .bind(&troop.spec.name)
     .bind(score)
+    .bind(category as i16)
     .execute(&st.db)
     .await?;
-    Ok(Json(standings_for(&st, user.id).await?))
+    Ok(Json(standings_for(&st, user.id, None).await?))
 }
 
 /// One entry with its troop, so anyone can replay its cup raids.
@@ -130,7 +151,7 @@ pub async fn entry(
     _user: AuthUser,
     Path((week, player)): Path<(i64, Uuid)>,
 ) -> ApiResult<Json<CupReplay>> {
-    let row = rows(&st.db, week, "WHERE user_id = $2", Some(player))
+    let row = rows(&st.db, week, "WHERE user_id = $2", Some(player), 0)
         .await?
         .pop()
         .ok_or_else(|| ApiError::not_found("cup entry"))?;
@@ -154,7 +175,7 @@ pub async fn pay_finished(db: &PgPool, current_week: i64) -> Result<u64, sqlx::E
     let paid = sqlx::query(
         "WITH ranked AS (
              SELECT week, user_id,
-                 row_number() OVER (PARTITION BY week ORDER BY score DESC, entered_at, user_id) AS r
+                 row_number() OVER (PARTITION BY week, category ORDER BY score DESC, entered_at, user_id) AS r
              FROM cup_entries WHERE week < $1 AND prize IS NULL
          ), paid AS (
              UPDATE cup_entries c SET prize = CASE

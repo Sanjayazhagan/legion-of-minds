@@ -89,3 +89,62 @@ fn old_saves_get_one_free_level_up() {
     old.level_up();
     assert!(!old.plateau().ready(), "after that the check applies");
 }
+
+#[test]
+fn level_5_brains_keep_growing_past_256_on_each_plateau() {
+    use godcore::ppo::{brain_cap, brain_grow_cost, brain_bracket, HIDDEN_SIZES};
+    let mut t = Troop::new(1, "t".into(), BaseClass::Fighter.spec(), 5);
+    for _ in 1..5 {
+        t.level_up();
+    }
+    assert_eq!((t.level, t.hidden()), (5, 256));
+    assert_eq!(t.cap(), 3_500_000);
+    // Level 5 no longer means "at cap": the check runs for the next size.
+    assert!(!t.plateau().ready(), "{:?}", t.plateau());
+    assert!(!t.can_grow_brain());
+    // Flat after learning: ready to grow.
+    let w = t.plateau_window();
+    let steps = 3 * w;
+    for k in 1..=(steps / 8192) {
+        let s = k * 8192;
+        t.curve.push(CurvePoint { steps: s, win: (s as f32 / w as f32).min(0.7), died: 0.5, timeout: 0.0, ret: 0.0 });
+    }
+    t.steps = steps;
+    assert!(t.can_grow_brain(), "{:?}", t.plateau());
+    let obs: Vec<f32> = (0..godcore::sim::OBS_DIM).map(|k| (k as f32 * 0.13).sin()).collect();
+    let before = {
+        let mut c = godcore::nn::Cache::default();
+        t.actor.forward(&obs, &mut c);
+        c.acts.last().unwrap().clone()
+    };
+    assert_eq!(t.grow_brain(), Some(384));
+    assert_eq!((t.hidden(), t.brain, t.cap()), (384, Some(384), brain_cap(384)));
+    assert_eq!(t.level_from, Some(steps));
+    assert!(!t.plateau().ready());
+    // Same choices as before the growth.
+    let mut c = godcore::nn::Cache::default();
+    t.actor.forward(&obs, &mut c);
+    for (a, b) in before.iter().zip(c.acts.last().unwrap()) {
+        assert!((a - b).abs() < 1e-4, "{a} vs {b}");
+    }
+    // Saved and loaded, it keeps its size (the file packs the big brain).
+    let back = Troop::load_json(&t.save_json()).unwrap();
+    assert_eq!(back.hidden(), 384);
+    assert_eq!(back.actor.params, t.actor.params);
+    // Costs and categories.
+    assert_eq!(brain_grow_cost(384), 3600);
+    assert_eq!(brain_grow_cost(512), 4900);
+    assert_eq!(brain_bracket(256), Some(0));
+    assert_eq!(brain_bracket(384), Some(1));
+    assert_eq!(brain_bracket(1024), Some(1));
+    assert_eq!(brain_bracket(1536), None);
+    // The biggest size has nowhere to grow.
+    let mut big = Troop::new(2, "b".into(), BaseClass::Fighter.spec(), 6);
+    big.level = 5;
+    assert!(big.set_brain(*HIDDEN_SIZES.last().unwrap()));
+    assert_eq!(big.next_brain(), None);
+    assert_eq!(big.plateau(), Plateau::AtCap);
+    // Below level 5 there is no growing past the level's size.
+    let mut low = Troop::new(3, "l".into(), BaseClass::Fighter.spec(), 7);
+    assert_eq!(low.grow_brain(), None);
+}

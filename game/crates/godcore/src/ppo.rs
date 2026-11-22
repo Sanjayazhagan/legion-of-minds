@@ -57,9 +57,58 @@ pub fn hidden_for_level(level: u32) -> usize {
     }
 }
 
-/// Every hidden size a troop brain can have. Players pick one; bigger brains
-/// train slower and need more practice but can play the hardest fights better.
-pub const HIDDEN_SIZES: [usize; 6] = [64, 96, 128, 160, 192, 256];
+/// Every hidden size a troop brain can have. Levels 1 to 5 grow it up to
+/// [`LEVEL_BRAIN_MAX`]; after that a level 5 troop can keep growing its brain
+/// one size at a time (each time its training plateaus) up to what the
+/// player's PC can train in reasonable time. Bigger brains train slower and
+/// need more practice but can play the hardest fights better.
+pub const HIDDEN_SIZES: [usize; 12] = [64, 96, 128, 160, 192, 256, 384, 512, 768, 1024, 1536, 2048];
+
+/// The biggest brain levels alone give (level 5).
+pub const LEVEL_BRAIN_MAX: usize = 256;
+
+/// The biggest brain that can go online (raids, wars, the weekly cup): a
+/// 1024 brain is 1.2M numbers, about 5 MB to upload, and a raid with nine of
+/// them takes the server ~9 s to check. Bigger brains play offline.
+pub const ONLINE_BRAIN_MAX: usize = 1024;
+
+/// Online brain-size categories, so players on small PCs never meet huge
+/// brains: an army or base is in the category of its biggest brain.
+pub const BRACKETS: [(usize, &str); 2] = [(LEVEL_BRAIN_MAX, "Up to 256"), (ONLINE_BRAIN_MAX, "Up to 1024")];
+
+/// The online category (index into [`BRACKETS`]) of a brain size, or None
+/// if it is too big to go online.
+pub fn brain_bracket(h: usize) -> Option<u8> {
+    BRACKETS.iter().position(|&(max, _)| h <= max).map(|k| k as u8)
+}
+
+/// Numbers in an actor brain with `h` neurons per layer.
+pub fn brain_params(h: usize) -> usize {
+    OBS_DIM * h + h + h * h + h + h * N_ACTIONS + N_ACTIONS
+}
+
+/// Total training steps a level 5 troop may have with a brain of `h`
+/// neurons: bigger brains hold more, so they get more practice before they
+/// top out (about +40% per size step past 256).
+pub fn brain_cap(h: usize) -> u64 {
+    match h {
+        0..=256 => 3_500_000,
+        257..=384 => 5_000_000,
+        385..=512 => 7_000_000,
+        513..=768 => 10_000_000,
+        769..=1024 => 14_000_000,
+        1025..=1536 => 20_000_000,
+        _ => 28_000_000,
+    }
+}
+
+/// Gold to grow a level 5 troop's brain to `h` neurons: priced like the
+/// level-ups before it (level 5 cost 2500, the first growth 3600, then
+/// 4900, ...).
+pub fn brain_grow_cost(h: usize) -> u32 {
+    let k = HIDDEN_SIZES.iter().filter(|&&s| s > LEVEL_BRAIN_MAX && s <= h).count() as u32;
+    100 * (5 + k) * (5 + k)
+}
 
 pub fn actor_dims(level: u32) -> Vec<usize> {
     actor_dims_h(hidden_for_level(level))

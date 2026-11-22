@@ -233,6 +233,6 @@ fn listeners_hear_where_a_signal_came_from() {
     let k = (ACT_CALL_HELP - ACT_CALL_FOCUS) as usize;
     assert!(o[OBS_CALLS + 3 * k + 2] > 0.5, "heard");
     // The caller's position sits at the end of the view, two per signal.
-    let at = OBS_DIM - 2 * N_CALLS + 2 * k;
+    let at = OBS_HUMAN - 2 * N_CALLS + 2 * k;
     assert!((o[at] - (10.0 - 13.0) / CALL_RANGE).abs() < 1e-5 && (o[at + 1] - (10.0 - 14.0) / CALL_RANGE).abs() < 1e-5);
 }
