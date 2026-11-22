@@ -198,7 +198,7 @@ fn archers_run_out_of_arrows_and_fight_in_close() {
     let me = w.add_troop(&BaseClass::Archer.spec(), 10.0, 10.0, Control::External, 0);
     w.add_core(28.0, 28.0);
     let u = &w.units[me];
-    assert_eq!(u.arrows, 40.0);
+    assert_eq!(u.arrows, 90.0);
     assert!(u.range > 2.5);
     w.units[me].arrows = 0.0;
     step(&mut w, me, ACT_IDLE);
@@ -211,7 +211,7 @@ fn archers_run_out_of_arrows_and_fight_in_close() {
 fn mages_spend_mana_and_get_it_back() {
     let (mut w, me, _) = duel(BaseClass::Mage);
     assert_eq!(w.units[me].mana, 100.0);
-    w.units[me].mana = 3.0;
+    w.units[me].mana = 1.0;
     step(&mut w, me, ACT_IDLE);
     assert_eq!(w.units[me].splash, 0.0, "no mana, no spell");
     for _ in 0..40 {

@@ -76,9 +76,9 @@ pub struct Body {
 /// Arrows a troop of each class carries, and mana (sim version 10).
 fn quiver(c: BaseClass) -> f32 {
     match c {
-        BaseClass::Archer => 40.0,
-        BaseClass::Sentry => 35.0,
-        _ => 30.0,
+        BaseClass::Archer => 90.0,
+        BaseClass::Sentry => 80.0,
+        _ => 60.0,
     }
 }
 
@@ -92,8 +92,8 @@ fn mana_pool(c: BaseClass) -> f32 {
 /// Conditioning adds up to this share of arrows and mana.
 pub const SUPPLY_TRAINED: f32 = 0.25;
 /// Mana a spell costs, a Fireball costs 3 times as much, and mana back per tick.
-pub const SPELL_MANA: f32 = 6.0;
-pub const MANA_REGEN: f32 = 0.1;
+pub const SPELL_MANA: f32 = 3.0;
+pub const MANA_REGEN: f32 = 0.2;
 /// With no arrows (or no mana for a spell) a troop fights in close: this
 /// reach and this share of its damage.
 pub const MAKESHIFT_RANGE: f32 = 1.3;

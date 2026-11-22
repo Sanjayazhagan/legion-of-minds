@@ -385,6 +385,31 @@ Brains get 7 new inputs (`OBS_BODY`, 121 to 128): their own stamina and worn cei
 
 The battle screen shows a yellow stamina bar under each troop's health in the side list (dark red for what wear took), a small one over a tired troop's head, "out of breath" in its action, and a Body line in the thinking panel. The Barracks shows each troop's conditioning and body.
 
+### Injuries, supplies, traits and weapon weight
+
+| Limit | Rule |
+|---|---|
+| Injuries | Each hit on a trained troop lands on the legs (30%), arms (30%) or torso. Leg damage slows it (70% speed once the legs took 40% of its health). Arm damage weakens and slows its attacks (75% damage, 1.25x cooldown at 40%). |
+| Bleeding | A hit worth 15% of health or more bleeds 0.1 health a tick, adding up to 0.3. Any heal stops it and mends injuries by half the amount healed (as a share of health). |
+| Arrows | Crossbows carry 90 arrows (Archer), 80 (Sentry) or 60 (others); Volley uses one per target. With none left the troop fights in close: reach 1.3, 40% damage. |
+| Mana | Fire staffs have 100 mana (Mage, Warlock) or 80; a spell costs 3, a Fireball 9, and mana comes back at 0.2 a tick. Without enough for a spell the troop bashes with its staff (reach 1.3, 40% damage, no splash). |
+| Supplies and training | Conditioning adds up to 25% more arrows and mana. |
+| Traits | Recruits are born different: speed ±8%, strength ±10%, toughness ±10%, lungs ±15%, recovery ±15%, eyesight ±2 steps, reflexes ±1 tick, aim ±5% misses. They are rolled from the troop's seed and shrunk so they add up to zero: different, never simply better. The server rerolls them from the seed. Troops recruited before traits are average in everything. |
+| Weapon weight | Stamina per attack: greataxe and greatsword 1.3x, crossbow 1.2x, sword and shield 1x (the shield adds 0.2 armour weight), staff and wand 0.8x, daggers 0.7x. |
+
+### Light, noise, surprise and ground
+
+| Rule | Detail |
+|---|---|
+| Light | Day: sight 14. Dusk: 11. Night: 8, but buildings carry torches and are seen from as far as by day. Fog: 6, and sound carries 25% further. Outpost is fought by day, Fort at dusk, Twin Gate in fog, the Citadel at night. Home bases (and so online raids) get their light from their own layout; drills pick at random so brains learn every kind. |
+| Noise | Footsteps carry 4 steps (6 in heavy armour), shouts carry 12 and the enemy hears them too. A troop only hears the other side's steps and shouts (and every fight). |
+| Surprise | A blow from an enemy the target hasn't noticed does 30% more and can't be dodged or blocked. |
+| Mud | 65% speed, walking costs 1.5x stamina. |
+| Hills | 85% speed on the slope, +2 sight and +10% ranged damage from the top. |
+| Layout | Two mud patches and a hill between the deploy ring and the base, clear of buildings: the same for everyone on a given base. Guards are slowed by them too. |
+
+Brains get 10 more inputs for these (OBS_DIM 138): leg and arm injury, bleeding, ammunition or mana left, the light, fog, and the ground under the troop and two steps ahead.
+
 ### Measured
 
 Fighter, Archer and Healer, seed 7, level 3, 600k steps, 120 greedy drills each. Raids use the three as a squad.
@@ -409,6 +434,28 @@ With seed 7, troops trained under v10 paced themselves so carefully that none dr
 So fatigue does bite in long fights: Fighters run low on the Fort, Twin Gate and Citadel and stop to recover between bouts. Raid times were similar to v8 for these seeds (Outpost 197 and 198 ticks against 239 and 183), and seed 22's squad did 45% on the Citadel against 12% under v8. The 900-tick clock already ended Twin Gate raids before v10 (v8 seed 22: 52%, timed out), and still does (v10: 79%).
 
 Old brains: the starter troops (254k steps, trained under v8) load with the new inputs switched off and still 3-star the Outpost in 241 ticks (40 s at 1x), but drop from 3 to 2 stars on the Fort because they don't know to pace and run out of breath (the Archer spent 400 ticks tired). 150k more steps under v10 brought the Fort back to 3 stars and the Fighter's drill wins from 28% to 54%; the Archer was still behind (16%) at that point, so plan on more retraining for ranged troops.
+
+
+### Measured with everything in stage A and B
+
+Fresh troops, 600k steps, level 3 (Fighter seed 21, Archer, Healer and Mage seed 7), 120 greedy drills each; raids with all four as a squad.
+
+| | Rules v8 | Rules v10 (stamina, injuries, supplies, traits, light, ground) |
+|---|---|---|
+| Fighter drill wins / deaths | 77% / 23% | 55% / 38% |
+| Archer drill wins / deaths | 43% / 41% | 24% / 34% |
+| Healer drill wins / deaths | 50% / 1% | 49% / 4% |
+| Mage drill wins / deaths | 64% / 18% | 28% / 43% |
+| Outpost (day) | 3 stars, 138 ticks | 3 stars, 223 ticks |
+| Fort (dusk) | 3 stars, 220 ticks | 3 stars, 261 ticks |
+| Twin Gate (fog) | 3 stars, 711 ticks | 2 stars, 95%, out of time |
+| Citadel (night) | 0 stars, 13% | 2 stars, 52%, out of time |
+
+Drills are harder now (a third of them are at night or in fog, and there is mud to avoid), so the same training buys lower drill win rates, most of all for the Mage (which the player simulation had found too strong) and the Archer. In raids the squad still clears Outpost and Fort, and did better than before on the Citadel, but the two big bases run out of clock.
+
+A first try with 40 arrows and 6-mana spells left Archers out of arrows halfway through a drill (14% wins); quivers are now 90/80/60 and spells cost 3 with faster mana.
+
+Old saves: the tour's starter troops (trained under v8) still 3-star the Outpost in 43 s at 1x, so they stay as they are. Retrained from scratch under v10 at the same 254k steps they did worse (2 stars, out of time), because the new rules take longer to learn.
 
 ## In one line
 
