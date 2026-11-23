@@ -11,7 +11,7 @@ fn run(h: usize, steps: u64, label: &str) {
     let mut troop = Troop::new(1, "Bench".into(), BaseClass::Fighter.spec(), 1);
     troop.level = 5;
     troop.sync_moves();
-    assert!(troop.set_brain(h), "brain must be one of {:?}", godcore::ppo::HIDDEN_SIZES);
+    assert!(troop.set_brain(h), "brain must be one of {:?}...", godcore::ppo::brain_sizes().take(14).collect::<Vec<_>>());
     let mut tr = Trainer::new(&troop.spec, troop.actor.clone(), troop.critic.clone(), 1, PpoConfig::default());
     let t0 = Instant::now();
     let mut wins = Vec::new();

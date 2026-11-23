@@ -72,7 +72,7 @@ impl Game {
         let (x, mut y) = (l.x + 20.0, l.y + 300.0);
         text(&t.name, x, y, 32.0, TEXT);
         y += 26.0;
-        text(&format!("Level {} {}", t.level, t.spec.name), x, y, 18.0, MUTED);
+        text(&format!("Level {} {}", t.shown_level(), t.spec.name), x, y, 18.0, MUTED);
         y += 40.0;
         text(current.name(), x, y, 26.0, ACCENT);
         y += 28.0;

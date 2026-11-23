@@ -92,7 +92,7 @@ fn old_saves_get_one_free_level_up() {
 
 #[test]
 fn level_5_brains_keep_growing_past_256_on_each_plateau() {
-    use godcore::ppo::{brain_cap, brain_grow_cost, brain_bracket, HIDDEN_SIZES};
+    use godcore::ppo::{brain_cap, brain_grow_cost, brain_bracket};
     let mut t = Troop::new(1, "t".into(), BaseClass::Fighter.spec(), 5);
     for _ in 1..5 {
         t.level_up();
@@ -117,7 +117,9 @@ fn level_5_brains_keep_growing_past_256_on_each_plateau() {
         t.actor.forward(&obs, &mut c);
         c.acts.last().unwrap().clone()
     };
+    assert_eq!(t.shown_level(), 5);
     assert_eq!(t.grow_brain(), Some(384));
+    assert_eq!((t.level, t.shown_level()), (5, 6), "each growth past 256 is a level");
     assert_eq!((t.hidden(), t.brain, t.cap()), (384, Some(384), brain_cap(384)));
     assert_eq!(t.level_from, Some(steps));
     assert!(!t.plateau().ready());
@@ -138,13 +140,34 @@ fn level_5_brains_keep_growing_past_256_on_each_plateau() {
     assert_eq!(brain_bracket(384), Some(1));
     assert_eq!(brain_bracket(1024), Some(1));
     assert_eq!(brain_bracket(1536), None);
-    // The biggest size has nowhere to grow.
+    // There is no fixed biggest size: past 2048 brains keep growing (the
+    // player's PC is the only limit), and so do levels and training caps.
     let mut big = Troop::new(2, "b".into(), BaseClass::Fighter.spec(), 6);
     big.level = 5;
-    assert!(big.set_brain(*HIDDEN_SIZES.last().unwrap()));
-    assert_eq!(big.next_brain(), None);
-    assert_eq!(big.plateau(), Plateau::AtCap);
+    assert!(big.set_brain(2048));
+    assert_eq!(big.next_brain(), Some(3072));
+    assert_ne!(big.plateau(), Plateau::AtCap);
+    assert_eq!(big.shown_level(), 11);
+    assert!(brain_cap(3072) > brain_cap(2048) && brain_cap(4096) > brain_cap(3072));
+    assert!(brain_grow_cost(3072) > brain_grow_cost(2048));
+    assert!(!big.set_brain(2500), "only listed sizes");
     // Below level 5 there is no growing past the level's size.
     let mut low = Troop::new(3, "l".into(), BaseClass::Fighter.spec(), 7);
     assert_eq!(low.grow_brain(), None);
+}
+
+#[test]
+fn brain_sizes_have_no_fixed_top() {
+    use godcore::ppo::{brain_cap, brain_sizes, is_brain_size, level_for_brain, next_brain_size};
+    let first: Vec<usize> = brain_sizes().take(16).collect();
+    assert_eq!(first, [64, 96, 128, 160, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192]);
+    // The old fixed list keeps its caps, so troops and the server agree.
+    for (h, cap) in [(256, 3_500_000), (384, 5_000_000), (1024, 14_000_000), (2048, 28_000_000), (3072, 39_000_000)] {
+        assert_eq!(brain_cap(h), cap, "{h}");
+    }
+    assert_eq!([64, 96, 128, 192, 256, 384, 512, 1024, 2048, 4096].map(level_for_brain), [1, 2, 3, 4, 5, 6, 7, 9, 11, 13]);
+    assert!(is_brain_size(16384) && !is_brain_size(1000));
+    assert_eq!(next_brain_size(8192), Some(12288));
+    // The list does end somewhere (no overflow), far past any real PC.
+    assert!(brain_sizes().last().unwrap() >= 1 << 20);
 }

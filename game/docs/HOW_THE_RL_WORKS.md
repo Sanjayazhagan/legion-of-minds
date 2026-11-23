@@ -61,7 +61,7 @@ What we measured comparing 160 and 256 at level 5 (Fighter, Mage and a Fighter/A
 
 So brain size is the player's bet: bigger is slower to train and slower to learn, and the game doesn't yet have fights hard enough to show a clear payoff.
 
-Past level 5 the brain can keep growing up to 2048 neurons, limited only by how fast the player's PC trains (see the README). Measured on a 4-core CPU without a GPU (sim with 154 inputs, one 8,192-step training round; raid replay = 9 troops x 1,080 ticks of the brain choosing moves):
+Past level 5 the brain keeps growing one size per level with no fixed top, limited only by the player's PC: training time (7 days of background training), battle thinking speed and memory (see the README). Measured on a 4-core CPU without a GPU (sim with 154 inputs, one 8,192-step training round; raid replay = 9 troops x 1,080 ticks of the brain choosing moves):
 
 | Neurons | Numbers in the brain | Training speed | Raid replay |
 |---|---|---|---|

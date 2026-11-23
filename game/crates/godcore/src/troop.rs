@@ -6,7 +6,8 @@ use crate::classes::{talents_for_level, ClassSpec};
 use crate::env::EpisodeInfo;
 use crate::nn::Mlp;
 use crate::ppo::{
-    actor_dims_h, brain_cap, critic_dims_h, hidden_for_level, new_actor_for, new_critic_for, HIDDEN_SIZES, LEVEL_BRAIN_MAX,
+    actor_dims_h, brain_cap, critic_dims_h, hidden_for_level, is_brain_size, level_for_brain, new_actor_for, new_critic_for,
+    next_brain_size, LEVEL_BRAIN_MAX,
 };
 use crate::rng::Rng;
 use crate::moves::{practice_of, Move};
@@ -14,6 +15,9 @@ use crate::weapons::{mastery_level, Weapon};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// The last level the Town Hall and gold alone give. Past it, each level
+/// grows the brain one size ([`crate::ppo::brain_sizes`]), and how many
+/// levels a troop can reach depends only on the player's PC.
 pub const MAX_LEVEL: u32 = 5;
 
 /// Total training steps a troop can have at each level. Longer training makes
@@ -350,7 +354,7 @@ impl Troop {
     /// The player picks a brain size. Brains can grow (keeping what they
     /// learned) but never shrink. Returns false if the size isn't allowed.
     pub fn set_brain(&mut self, h: usize) -> bool {
-        if !HIDDEN_SIZES.contains(&h) || h < self.hidden() {
+        if !is_brain_size(h) || h < self.hidden() {
             return false;
         }
         self.brain = Some(h);
@@ -358,9 +362,21 @@ impl Troop {
         true
     }
 
-    /// The next bigger brain size, if there is one.
+    /// The next bigger brain size. There is always one in practice: sizes
+    /// have no top, only what the player's PC can handle.
     pub fn next_brain(&self) -> Option<usize> {
-        HIDDEN_SIZES.iter().copied().find(|&h| h > self.hidden())
+        next_brain_size(self.hidden())
+    }
+
+    /// The level the player sees. Up to 5 it is the troop's level; past
+    /// that every brain growth is one more level (a 384 brain is level 6,
+    /// 512 is 7, 1024 is 9, ...), up to what the player's PC allows.
+    pub fn shown_level(&self) -> u32 {
+        if self.level >= MAX_LEVEL {
+            self.level.max(level_for_brain(self.hidden()))
+        } else {
+            self.level
+        }
     }
 
     /// Steps in each half of this troop's plateau check right now.

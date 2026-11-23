@@ -264,7 +264,7 @@ impl Game {
             text(
                 &format!(
                     "Lv{} {}  {:.0}% wins",
-                    t.level,
+                    t.shown_level(),
                     t.spec.name,
                     t.skills.win * 100.0
                 ),
@@ -396,7 +396,7 @@ impl Game {
             );
             crate::art::draw_portrait(vec2(r.x + 24.0, r.y + 24.0), 16.0, &t.spec);
             text(
-                &format!("{}  (Lv{} {})", t.name, t.level, t.spec.name),
+                &format!("{}  (Lv{} {})", t.name, t.shown_level(), t.spec.name),
                 r.x + 48.0,
                 r.y + 30.0,
                 20.0,

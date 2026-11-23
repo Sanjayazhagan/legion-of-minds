@@ -442,7 +442,7 @@ impl Game {
             text(&t.name, r.x + 40.0, r.y + 16.0, 18.0, TEXT);
             let role = format!("{:?}", godcore::sim::Role::of_spec(&t.spec));
             let left = if t.steps_left() == 0 { "at level cap".to_string() } else { format!("{} left", fmt_steps(t.steps_left())) };
-            text(&format!("Lv {} {}  ·  {}  ·  {left}", t.level, t.spec.name, role), r.x + 40.0, r.y + 31.0, 14.0, if t.steps_left() == 0 { ACCENT } else { MUTED });
+            text(&format!("Lv {} {}  ·  {}  ·  {left}", t.shown_level(), t.spec.name, role), r.x + 40.0, r.y + 31.0, 14.0, if t.steps_left() == 0 { ACCENT } else { MUTED });
             if let Some(l) = &away {
                 crate::bg::busy_veil(r, l);
             }
