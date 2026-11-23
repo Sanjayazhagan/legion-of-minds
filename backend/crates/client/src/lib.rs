@@ -241,6 +241,14 @@ impl Client {
         )
     }
 
+    /// Delete this online account and everything the server keeps about it.
+    /// Troops and saves on this computer are not touched.
+    pub fn delete_account(&mut self) -> Result<()> {
+        self.send_empty(self.req(reqwest::Method::DELETE, "/v1/me"))?;
+        self.token = None;
+        Ok(())
+    }
+
     pub fn leaderboard(&self, limit: u32) -> Result<Vec<PublicPlayer>> {
         self.get(&format!("/v1/leaderboard?limit={limit}"))
     }

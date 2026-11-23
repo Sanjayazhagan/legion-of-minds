@@ -629,3 +629,45 @@ async fn operator_runs_the_season_and_rewards() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_account_forgets_the_player() {
+    let db = fresh_db().await;
+    let url = serve(db.clone()).await;
+    let check = db.clone();
+    let alice_id = blocking(move || {
+        let mut alice = login(&url, "Alice");
+        let bob = login(&url, "Bob");
+        publish(&db, &alice);
+        let clan = alice.create_clan("Leavers", "", true).unwrap().clan.id;
+        bob.join_clan(clan).unwrap();
+        alice.say("remember me").unwrap();
+        let id = alice.me().unwrap().id;
+        let token = alice.token().unwrap().to_string();
+
+        alice.delete_account().unwrap();
+        // The old session is gone with the account.
+        let old = Client::new(&url).with_token(token);
+        assert!(old.me().is_err());
+        // Bob now leads, and Alice's words are gone from the chat.
+        let v = bob.my_clan().unwrap();
+        assert_eq!(v.members.len(), 1);
+        assert_eq!(v.members[0].role, ClanRole::Leader);
+        let chat = bob.chat(0).unwrap();
+        assert!(chat.iter().all(|m| m.body != "remember me"), "{chat:?}");
+        assert!(chat.iter().any(|m| m.body == "Alice left"));
+        assert_eq!(api_code(bob.player(id)), "not_found");
+        id
+    })
+    .await;
+    let pool = sqlx::PgPool::connect(&check).await.unwrap();
+    for table in ["users", "identities", "sessions", "snapshots"] {
+        let col = if table == "users" { "id" } else { "user_id" };
+        let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE {col} = $1"))
+            .bind(alice_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "{table} still has rows");
+    }
+}

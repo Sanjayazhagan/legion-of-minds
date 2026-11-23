@@ -126,6 +126,22 @@ pub async fn rename(
     Ok(Json(load_user(&st.db, user.id).await?))
 }
 
+/// Delete the signed-in account and everything the server keeps about it:
+/// sign-in links, sessions, published bases, raids, cup entries, clan
+/// membership, lent troops and clan chat. It can't be undone.
+pub async fn delete_me(State(st): State<AppState>, user: AuthUser) -> ApiResult<axum::http::StatusCode> {
+    let mut tx = st.db.begin().await?;
+    crate::clans::forget_member(&mut tx, user.id).await?;
+    // Everything else that names the player goes with the row (ON DELETE CASCADE).
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user.id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    tracing::info!("account deleted");
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
 pub async fn player(
     State(st): State<AppState>,
     _user: AuthUser,

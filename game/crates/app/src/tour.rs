@@ -206,7 +206,7 @@ impl Game {
     pub fn tour_input(&mut self, screen: &Screen) -> bool {
         let click = self.ui.clicked;
         MARKS.with(|m| m.borrow_mut().clear());
-        if self.tour.is_none() || self.settings_open {
+        if self.tour.is_none() || self.settings_open || self.legal.is_some() {
             return click;
         }
         let (target, card, lock) = LAST.with(|l| *l.borrow());
@@ -224,7 +224,7 @@ impl Game {
     pub fn tour_frame(&mut self, screen: &Screen, click: bool) {
         LAST.with(|l| *l.borrow_mut() = (None, None, false));
         let Some(mut k) = self.tour else { return };
-        if self.settings_open {
+        if self.settings_open || self.legal.is_some() {
             return;
         }
         // Keep the raid steps in order: backing out of a raid starts it again
