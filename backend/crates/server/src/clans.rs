@@ -313,6 +313,25 @@ pub async fn leave(State(st): State<AppState>, user: AuthUser) -> ApiResult<Json
     Ok(Json(()))
 }
 
+/// Take a player whose account is being deleted out of their clan, the same
+/// way leaving does, and drop everything they wrote in clan chat.
+pub(crate) async fn forget_member(db: &mut PgConnection, user: Uuid) -> ApiResult<()> {
+    if let Some((clan, _)) = membership(&mut *db, user).await? {
+        sqlx::query("SELECT id FROM clans WHERE id = $1 FOR UPDATE")
+            .bind(clan)
+            .execute(&mut *db)
+            .await?;
+        let who = name_of(&mut *db, user).await?;
+        say(&mut *db, clan, format!("{who} left")).await?;
+        remove(&mut *db, clan, user).await?;
+    }
+    sqlx::query("DELETE FROM clan_messages WHERE user_id = $1")
+        .bind(user)
+        .execute(&mut *db)
+        .await?;
+    Ok(())
+}
+
 pub async fn kick(
     State(st): State<AppState>,
     user: AuthUser,
