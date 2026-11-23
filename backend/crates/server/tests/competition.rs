@@ -629,3 +629,84 @@ async fn operator_runs_the_season_and_rewards() {
     })
     .await;
 }
+
+/// Opted-in play data is stored without a sign-in, shows on the admin page,
+/// and "Delete my play data" removes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn play_data_is_stored_summed_and_forgotten() {
+    use bag_client::bag_protocol::{PlayBatch, PlayEvent};
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    let db = fresh_db().await;
+    let url = serve(db.clone()).await;
+    let pool = sqlx::PgPool::connect(&db).await.unwrap();
+    let install = uuid::Uuid::new_v4();
+    blocking({
+        let url = url.clone();
+        move || {
+            let c = Client::new(&url);
+            let ev = |name: &str, secs: u32, props: serde_json::Value| PlayEvent {
+                name: name.into(),
+                secs,
+                props: props.as_object().cloned().unwrap_or_default(),
+            };
+            let batch = PlayBatch {
+                install,
+                session: uuid::Uuid::new_v4(),
+                game_version: "0.1.2".into(),
+                sim_version: godcore::sim::SIM_VERSION,
+                os: "windows".into(),
+                events: vec![
+                    ev("session_start", 0, serde_json::json!({ "day": 0, "cores": 8, "gpu": "Test GPU", "max_brain": 512 })),
+                    ev("screen", 5, serde_json::json!({ "name": "barracks" })),
+                    ev("tour_step", 6, serde_json::json!({ "step": 2 })),
+                    ev("first_raid_won", 120, serde_json::json!({ "mins": 2.0 })),
+                    ev("battle_end", 120, serde_json::json!({ "mode": "raid", "won": true, "timeout": false, "classes": ["Fighter", "Archer+Mage"] })),
+                    ev("training_end", 300, serde_json::json!({ "brain": 128, "mins": 4.5, "plateau": true })),
+                    ev("rating", 310, serde_json::json!({ "after": "first_raid", "stars": 5 })),
+                    // A detail of the wrong type is ignored, not an error.
+                    ev("session_end", 400, serde_json::json!({ "fps": "fast", "slow": 0.02 })),
+                ],
+            };
+            c.send_play_data(&batch).unwrap();
+            // Only listed events are taken.
+            let mut bad = batch.clone();
+            bad.events = vec![ev("email", 1, serde_json::json!({}))];
+            assert_eq!(api_code(c.send_play_data(&bad)), "bad_request");
+        }
+    })
+    .await;
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM play_events").fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 8);
+
+    let summary = blocking({
+        let url = url.clone();
+        move || {
+            let r = reqwest::blocking::Client::new()
+                .get(format!("{url}/v1/admin/play-data?days=7"))
+                .header("x-admin-key", ADMIN_KEY)
+                .send()
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            let none = reqwest::blocking::get(format!("{url}/v1/admin/play-data")).unwrap();
+            assert_eq!(none.status(), 401);
+            r.json::<serde_json::Value>().unwrap()
+        }
+    })
+    .await;
+    assert_eq!(summary["players"], 1);
+    assert_eq!(summary["new_players"], 1);
+    let table = |title: &str| summary["tables"].as_array().unwrap().iter().find(|t| t["title"] == title).cloned().unwrap();
+    let funnel = table("First 10 minutes");
+    assert_eq!(funnel["rows"][2], serde_json::json!(["Won a raid", "1", "100%"]));
+    assert_eq!(funnel["rows"][1], serde_json::json!(["Finished the tour", "0", "0%"]));
+    let quit = table("Where short first sessions stopped");
+    assert_eq!(quit["rows"][0], serde_json::json!(["barracks", "1"]));
+    let classes = table("Raids by class");
+    assert_eq!(classes["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(table("Ratings")["rows"][0], serde_json::json!(["first_raid", "1", "5.0", "100%"]));
+    assert_eq!(table("Training by brain size")["rows"][0], serde_json::json!(["128", "1", "4.5", "100%"]));
+
+    blocking(move || Client::new(&url).forget_play_data(install).unwrap()).await;
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM play_events").fetch_one(&pool).await.unwrap();
+    assert_eq!(n, 0);
+}

@@ -45,6 +45,8 @@ struct Job {
     saved: Vec<u64>,
     /// When progress was last written to the troops' files.
     saved_at: f64,
+    /// When this run started.
+    began: f64,
 }
 
 struct Preview {
@@ -169,7 +171,7 @@ fn spawn(troops: &[Troop], budget: u64, pool: Option<Opponents>, hardness: u8) -
         s.recent = recent;
         s.done = true;
     });
-    Job { shared, stop, target: budget, saved: vec![0; troops_len], saved_at: get_time() }
+    Job { shared, stop, target: budget, saved: vec![0; troops_len], saved_at: get_time(), began: get_time() }
 }
 
 impl Game {
@@ -194,6 +196,13 @@ impl Game {
         let ids: Vec<u64> = team.iter().map(|t| t.id).collect();
         self.team_news = None;
         let job = spawn(&team, budget, pool, hardness);
+        crate::playdata::event(
+            "training_start",
+            crate::playdata::with(
+                serde_json::json!({ "kind": "team", "size": team.len(), "steps": budget, "resumed": done_before > 0 }),
+                crate::playdata::squad(&team),
+            ),
+        );
         self.team_runs.push(TeamRun { ids, side, hardness, done_before, job });
     }
 
@@ -304,6 +313,21 @@ impl Game {
             fmt_steps(steps.iter().sum::<u64>() / steps.len().max(1) as u64),
             recent.len(),
             won * 100.0
+        );
+        crate::playdata::event(
+            "training_end",
+            crate::playdata::with(
+                serde_json::json!({
+                    "kind": "team",
+                    "size": team.len(),
+                    "steps": steps.iter().sum::<u64>() / steps.len().max(1) as u64,
+                    "mins": ((get_time() - job.began) / 6.0).round() / 10.0,
+                    "win": (won as f64 * 100.0).round() / 100.0,
+                    "plateau": team.iter().all(|t| t.plateaued),
+                    "brain": team.iter().map(|t| t.hidden()).max().unwrap_or(0),
+                }),
+                crate::playdata::squad(&team),
+            ),
         );
         Some(TeamNews { ids: run.ids, msg, reactions })
     }

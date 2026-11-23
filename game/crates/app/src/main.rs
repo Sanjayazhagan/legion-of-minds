@@ -20,6 +20,7 @@ mod recruit;
 mod render;
 mod scene;
 mod pc_check;
+mod playdata;
 mod settings;
 mod sfx;
 mod stat_panel;
@@ -90,6 +91,14 @@ pub struct Game {
     pub team_news: Option<teamtrain::TeamNews>,
     /// Training to resume once the startup PC speed test finishes.
     pub resume_after_pc_check: bool,
+    /// A screenshot or recording run (no question cards).
+    pub scripted: bool,
+    /// The one-tap rating card to show next ("first_raid", "first_training").
+    pub rate_now: Option<&'static str>,
+    /// Settings is showing what play data is sent.
+    pub privacy_open: bool,
+    /// "Delete my play data" waiting for the server.
+    pub forgetting: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
 }
 
 impl Game {
@@ -103,12 +112,16 @@ impl Game {
         match pc_check::take() {
             Some(Ok(r)) => {
                 let max = r.max_brain();
+                playdata::event("speed_test", serde_json::json!({ "ok": true, "max_brain": max, "device": r.device }));
                 println!("PC check: {} -> brains up to {max} ({:.0} steps/s at 256)", r.device, r.steps_per_sec(256));
                 self.settings.pc = Some(r);
                 self.settings.save(&self.store.home);
                 self.toast(format!("PC speed test done: this PC can train brains up to {max} neurons"));
             }
-            Some(Err(e)) => self.toast(format!("PC speed test failed: {e}")),
+            Some(Err(e)) => {
+                playdata::event("speed_test", serde_json::json!({ "ok": false, "error": e }));
+                self.toast(format!("PC speed test failed: {e}"))
+            }
             None => return,
         }
         if std::mem::take(&mut self.resume_after_pc_check) {
@@ -171,6 +184,28 @@ impl Game {
                 self.toast = None;
             }
         }
+    }
+}
+
+/// A screen's name for play data.
+fn screen_name(s: &Screen) -> &'static str {
+    match s {
+        Screen::Barracks => "barracks",
+        Screen::Recruit(_) => "recruit",
+        Screen::Train(_) => "train",
+        Screen::BattleSetup(_) => "battle_setup",
+        Screen::Deploy(_) => "deploy",
+        Screen::Battle(_) => "battle",
+        Screen::Tournament(_) => "tournament",
+        Screen::Home(_) => "home",
+        Screen::Replay(_) => "replay",
+        Screen::Armoury(_) => "armoury",
+        Screen::Team(_) => "team",
+        Screen::SignIn(_) => "sign_in",
+        Screen::Online(_) => "online",
+        Screen::OnlineWatch(_) => "online_watch",
+        Screen::Clip(_) => "clip",
+        Screen::Clan(_) => "clan",
     }
 }
 
@@ -339,9 +374,18 @@ async fn main() {
         train_news: Default::default(),
         team_news: None,
         resume_after_pc_check: false,
+        scripted: false,
+        rate_now: None,
+        privacy_open: false,
+        forgetting: None,
     };
     game.settings = settings::Settings::load(&game.store.home);
     game.settings.apply();
+    // Anonymous play data, only once the player says yes (playdata.rs).
+    let now = godcore::troop::unix_now() as i64;
+    let first_played = *game.settings.first_played.get_or_insert(if new_player { now } else { 1 });
+    game.settings.save(&game.store.home);
+    playdata::init(&game.store.home, &game.account.server, game.settings.share_play_data, game.settings.play_id.as_deref());
     // How big a brain this PC can train: tested once (and again after a
     // sim change), in the background. Skipped for scripted screenshots and
     // recordings, which must not compete for the CPU.
@@ -367,11 +411,20 @@ async fn main() {
     if std::env::var("BAG_SCREEN").as_deref() == Ok("settings") {
         game.settings_open = true;
     }
+    // Test hooks for screenshots: the play data page, and a rating card.
+    if std::env::var("BAG_SCREEN").as_deref() == Ok("play_data") {
+        (game.settings_open, game.privacy_open) = (true, true);
+    }
+    if std::env::var("BAG_RATE").as_deref() == Ok("first_raid") {
+        game.rate_now = Some("first_raid");
+    }
     // The game opens on the sign-in screen, except for recordings and
     // screenshot tests, which go straight to their screen.
     let scripted = ["BAG_SCREEN", "BAG_RECORD", "BAG_SCREENSHOT"]
         .iter()
         .any(|v| std::env::var_os(v).is_some());
+    // Scripted runs never ask the play data question, unless a test asks for it.
+    game.scripted = scripted && std::env::var_os("BAG_ASK_PLAY_DATA").is_none();
     // The tour starts by itself until it is finished or skipped (a player who
     // quits halfway sees it again). Scripted runs only get it when asked for.
     if !game.profile.tour_done && (!scripted || std::env::var_os("BAG_NEW_PLAYER").is_some()) {
@@ -391,6 +444,7 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(30);
     let mut frame = 0u32;
+    let mut last_screen = "";
     // Closing the window saves first (see the end of the loop).
     prevent_quit();
     loop {
@@ -410,6 +464,7 @@ async fn main() {
         if game.store.is_test() {
             game.profile.gold = save::TEST_GOLD;
         }
+        let card_click = game.cards_input(&screen);
         let click = game.tour_input(&screen);
         if game.settings_open {
             game.settings_screen();
@@ -457,6 +512,13 @@ async fn main() {
         game.poll_pc_check();
         game.tick_training();
         game.tour_frame(&screen, click);
+        game.cards_frame(&screen, card_click);
+        let name = if game.settings_open { if game.privacy_open { "play_data" } else { "settings" } } else { screen_name(&screen) };
+        if name != last_screen {
+            last_screen = name;
+            playdata::event("screen", serde_json::json!({ "name": name }));
+        }
+        playdata::tick();
         if let Some(n) = save::take_notice() {
             game.toast = Some((n, 6.0));
         }
@@ -466,6 +528,7 @@ async fn main() {
             // time), then everything else.
             game.pause_all_training();
             game.save_all();
+            playdata::shutdown();
             break;
         }
         if is_key_pressed(KeyCode::M) {
@@ -477,6 +540,18 @@ async fn main() {
         frame += 1;
         if frame == 2 {
             read_gpu_name();
+            let day = (now - first_played).max(0) / 86_400;
+            playdata::event(
+                "session_start",
+                serde_json::json!({
+                    "day": day,
+                    "new": new_player,
+                    "cores": cores,
+                    "gpu": gpu_name().unwrap_or("?"),
+                    "train_on": train_device().map(|d| d.unwrap_or("CPU")).unwrap_or("?"),
+                    "max_brain": game.pc_max_brain(),
+                }),
+            );
         }
         if record::active() {
             if record::end_frame() {

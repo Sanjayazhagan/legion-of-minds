@@ -55,6 +55,16 @@
   .log { font-size: 13px; color: var(--muted); }
   .log div { padding: 4px 0; border-top: 1px solid var(--line); }
   .log b { color: var(--text); font-weight: 600; }
+  .pd-head { display: flex; gap: 22px; flex-wrap: wrap; margin: 12px 0 4px; }
+  .pd-head div { font-size: 13px; color: var(--muted); }
+  .pd-head b { display: block; font-size: 22px; color: var(--text); }
+  .pd-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-top: 12px; }
+  .pd-grid h3 { margin: 0 0 2px; font-size: 15px; }
+  .pd-grid p { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+  .pd-grid table { font-size: 13px; }
+  .pd-grid th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px; }
+  .pd-grid td:not(:first-child), .pd-grid th:not(:first-child) { text-align: right; white-space: nowrap; }
+  .pd-grid td { padding: 4px; overflow-wrap: anywhere; }
   @media (max-width: 800px) { main { grid-template-columns: 1fr; } .row { grid-template-columns: 1fr; } header .stats { display: none; } }
 </style>
 </head>
@@ -139,6 +149,23 @@
   <section>
     <h2>Recent changes</h2>
     <div class="log" id="log"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Player feedback</h2>
+    <p class="lead">Anonymous play data from players who switched it on (Settings in the game). No names or accounts. Kept 180 days.</p>
+    <div class="row" style="max-width:420px">
+      <div><label for="pd-days">Period</label>
+        <select id="pd-days">
+          <option value="1">Last day</option>
+          <option value="7">Last 7 days</option>
+          <option value="30" selected>Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="180">Last 180 days</option>
+        </select></div>
+    </div>
+    <div class="pd-head" id="pd-head"></div>
+    <div class="pd-grid" id="pd-tables"></div>
   </section>
 
   <section class="wide">
@@ -365,10 +392,35 @@ $("set-save").addEventListener("click", (ev) => busy(ev.target, async () => {
 }));
 $("set-undo").addEventListener("click", () => renderSettings(SETTINGS));
 
+// --------------------------------------------------------------- play data
+function renderPlayData(d) {
+  const head = $("pd-head"), grid = $("pd-tables");
+  head.replaceChildren(); grid.replaceChildren();
+  const mins = d.median_minutes == null ? "-" : d.median_minutes.toFixed(0);
+  for (const [label, v] of [["Players", d.players], ["New players", d.new_players], ["Sessions", d.sessions], ["Typical session (min)", mins]]) {
+    head.append(el("div", {}, el("b", {}, String(v)), label));
+  }
+  if (!d.players) { grid.append(el("div", { class: "empty" }, "No play data yet in this period.")); }
+  for (const t of d.tables) {
+    const table = el("table", {}, el("tr", {}, ...t.cols.map((c) => el("th", {}, c))));
+    for (const r of t.rows) table.append(el("tr", {}, ...r.map((c) => el("td", {}, c))));
+    if (!t.rows.length) table.append(el("tr", {}, el("td", { class: "empty" }, "Nothing yet")));
+    grid.append(el("div", {}, el("h3", {}, t.title), el("p", {}, t.help), table));
+  }
+}
+async function loadPlayData() {
+  try { renderPlayData(await api("GET", `/v1/admin/play-data?days=${$("pd-days").value}`)); }
+  catch (e) { toast(e.message, true); }
+}
+$("pd-days").addEventListener("change", loadPlayData);
+
 // --------------------------------------------------------------- setup
 async function load(overviewOnly) {
   renderOverview(await api("GET", "/v1/admin/overview"));
-  if (!overviewOnly) renderSettings(await api("GET", "/v1/admin/settings"));
+  if (!overviewOnly) {
+    renderSettings(await api("GET", "/v1/admin/settings"));
+    loadPlayData();
+  }
 }
 
 function lock() {

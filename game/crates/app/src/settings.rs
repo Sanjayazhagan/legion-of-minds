@@ -23,11 +23,31 @@ pub struct Settings {
     pub test_mode: bool,
     /// The last PC speed test: how big a brain this computer can train.
     pub pc: Option<crate::pc_check::PcResult>,
+    /// Share anonymous play data: None until the player answers.
+    pub share_play_data: Option<bool>,
+    /// The random id play data is sent under (see playdata.rs).
+    pub play_id: Option<String>,
+    /// When this computer first ran the game (Unix seconds); 1 for players
+    /// from before this was kept.
+    pub first_played: Option<i64>,
+    /// Rating questions already asked ("first_raid", "first_training").
+    pub asked: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { volume: 0.8, muted: false, shake: true, sight: false, test_mode: false, pc: None }
+        Settings {
+            volume: 0.8,
+            muted: false,
+            shake: true,
+            sight: false,
+            test_mode: false,
+            pc: None,
+            share_play_data: None,
+            play_id: None,
+            first_played: None,
+            asked: Vec::new(),
+        }
     }
 }
 
@@ -83,6 +103,10 @@ pub fn gear_button(g: &mut Game, r: Rect) -> bool {
 
 impl Game {
     pub fn settings_screen(&mut self) {
+        if self.privacy_open {
+            self.privacy_screen();
+            return;
+        }
         if self.header("Settings", true) {
             self.settings_open = false;
             return;
@@ -90,7 +114,7 @@ impl Game {
         let mut changed = false;
 
         // ---- Sound
-        let l = Rect::new(20.0, 70.0, 600.0, 250.0);
+        let l = Rect::new(20.0, 70.0, 600.0, 170.0);
         panel(l);
         let (x, mut y) = (l.x + 24.0, l.y + 40.0);
         text("Sound", x, y, 26.0, TEXT);
@@ -111,11 +135,10 @@ impl Game {
             self.settings.muted = !self.settings.muted;
             changed = true;
         }
-        y += 70.0;
-        text("Press M anywhere to mute or unmute.", x, y, 16.0, MUTED);
+        text("Press M anywhere to mute or unmute.", x + 280.0, y + 26.0, 16.0, MUTED);
 
         // ---- Battle view
-        let b = Rect::new(20.0, 336.0, 600.0, 210.0);
+        let b = Rect::new(20.0, 256.0, 600.0, 210.0);
         panel(b);
         let (x, mut y) = (b.x + 24.0, b.y + 40.0);
         text("Battle view", x, y, 26.0, TEXT);
@@ -133,6 +156,9 @@ impl Game {
             }
             y += 66.0;
         }
+
+        // ---- Play data and feedback
+        self.play_data_panel(Rect::new(20.0, 482.0, 600.0, 64.0));
 
         // ---- Account
         let a = Rect::new(640.0, 70.0, 620.0, 250.0);

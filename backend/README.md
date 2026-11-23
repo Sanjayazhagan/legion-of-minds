@@ -146,6 +146,8 @@ All bodies are JSON. Publishing, matchmaking and raids need the header `x-sim-ve
 | `GET /v1/leaderboard?limit=` | | Top players by trophies |
 | `GET /v1/live` | ✓ | Running and upcoming events, the season, and gifts waiting to be claimed |
 | `POST /v1/me/gifts/{id}/claim` | ✓ | Claim a gift → `{gold, user}` |
+| `POST /v1/play-data` `{install, session, game_version, sim_version, os, events}` | | Anonymous play data from players who opted in (see below) |
+| `DELETE /v1/play-data/{install}` | | Delete everything sent under that play data id ("Delete my play data" in the game) |
 | `/v1/admin/...` | admin key | The operator's controls, see "Running events, rewards and seasons" |
 
 ## Running events, rewards and seasons
@@ -158,6 +160,14 @@ The server has an admin page for the game's operator at `<PUBLIC_URL>/admin`. It
 - **Rewards and timings**: season length, end-of-season gold per league, league win bonus, shield length, war rewards and starting gold. Changes apply at once; set a value back to its default to undo.
 
 Every change is listed under Recent changes (table `admin_log`). The API behind it is under `/v1/admin` with the header `x-admin-key` (`overview`, `events`, `events/{id}/stop`, `gifts`, `gifts/{id}/cancel`, `season`, `season/end`, `settings`); `bag_client::Client::admin(key)` wraps it for scripts. Changing how battles play still needs a game release with a new SIM_VERSION.
+
+## Player feedback (anonymous play data)
+
+Players who say yes (a card on first launch, or Settings > Share anonymous play data) send small events about once a minute: where new players stop, tour progress, battles (classes, wins, time-outs, whether they watched a troop think), training (minutes per session, plateau, brain size), speed test results, sign-in failures, server refusals such as `update_required`, empty Find opponent, cup entries, crashes, frame rate and PC specs, and a one-tap 1 to 5 rating after the first raid and first training. The full list, in the words players see, is `bag_protocol::PLAY_EVENTS`; the server refuses any other event.
+
+No account, name, address, troop brain or file is sent or stored: only a random id the game made when the player said yes (table `play_events`, migration 0010). Uploads need no sign-in and the game sends them without its session token. The cleanup deletes rows after 180 days, and "Delete my play data" deletes them at once. The admin page's **Player feedback** section sums it up for the last day to 180 days: first 10 minutes funnel and who came back, where short first sessions stopped, training by brain size, speed tests, raids by class, find opponent, brain-size categories (from the online tables), errors, crashes, frame rate, PCs, ratings and game versions (`GET /v1/admin/play-data?days=30`).
+
+The game's Discord button comes from the repository variable `BAG_DISCORD` (an `https://discord.gg/...` invite) at release build time; without it the button is hidden.
 
 ## Layout
 

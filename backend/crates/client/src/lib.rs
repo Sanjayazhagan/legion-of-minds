@@ -429,6 +429,21 @@ impl Client {
         self.post(&format!("/v1/me/gifts/{id}/claim"), &serde_json::json!({}))
     }
 
+    // ------------------------------------------------------------ play data
+
+    /// Upload anonymous play data (only for players who opted in). Needs no
+    /// sign-in, and sends no session token even when signed in, so the server
+    /// can't tie it to an account.
+    pub fn send_play_data(&self, b: &PlayBatch) -> Result<()> {
+        let r = self.http.post(format!("{}/v1/play-data", self.base));
+        self.send_empty(self.with_json(r, b)?)
+    }
+
+    /// Delete everything sent under this play data id.
+    pub fn forget_play_data(&self, install: Uuid) -> Result<()> {
+        self.send_empty(self.http.delete(format!("{}/v1/play-data/{install}", self.base)))
+    }
+
     /// The operator's controls, for scripts and tests. People normally use
     /// the admin page at `<server>/admin`.
     pub fn admin(&self, key: &str) -> Admin<'_> {

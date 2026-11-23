@@ -22,6 +22,9 @@ pub fn is_open() -> bool {
 }
 
 pub fn set_open(v: bool) {
+    if v && !is_open() {
+        crate::playdata::event("stat_panel", serde_json::json!({}));
+    }
     OPEN.with(|o| o.set(v));
 }
 
