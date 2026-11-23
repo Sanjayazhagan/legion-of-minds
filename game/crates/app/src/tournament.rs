@@ -124,7 +124,7 @@ impl Game {
                 crate::art::draw_portrait(vec2(r.x + 28.0, r.y + 28.0), 18.0, &t.spec);
                 text(&t.name, r.x + 54.0, r.y + 26.0, 22.0, TEXT);
                 text(
-                    &format!("Lv{} {}", t.level, t.spec.name),
+                    &format!("Lv{} {}", t.shown_level(), t.spec.name),
                     r.x + 54.0,
                     r.y + 46.0,
                     16.0,
@@ -210,7 +210,7 @@ impl Game {
             crate::art::draw_portrait(vec2(cols[1] + 14.0, y + 28.0), 16.0, &t.spec);
             text(&t.name, cols[1] + 38.0, y + 26.0, 22.0, TEXT);
             text(
-                &format!("Lv{} {}", t.level, t.spec.name),
+                &format!("Lv{} {}", t.shown_level(), t.spec.name),
                 cols[1] + 38.0,
                 y + 46.0,
                 16.0,

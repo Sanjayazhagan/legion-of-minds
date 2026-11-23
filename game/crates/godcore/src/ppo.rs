@@ -57,12 +57,58 @@ pub fn hidden_for_level(level: u32) -> usize {
     }
 }
 
-/// Every hidden size a troop brain can have. Levels 1 to 5 grow it up to
-/// [`LEVEL_BRAIN_MAX`]; after that a level 5 troop can keep growing its brain
-/// one size at a time (each time its training plateaus) up to what the
-/// player's PC can train in reasonable time. Bigger brains train slower and
-/// need more practice but can play the hardest fights better.
-pub const HIDDEN_SIZES: [usize; 12] = [64, 96, 128, 160, 192, 256, 384, 512, 768, 1024, 1536, 2048];
+/// The brain sizes levels 1 to 5 give (and old player picks).
+const LEVEL_SIZES: [usize; 6] = [64, 96, 128, 160, 192, 256];
+
+/// Past this many neurons per layer the size list stops. It is not a game
+/// rule, only a guard against arithmetic overflow: a brain this big would
+/// need terabytes, so every real PC stops long before (see the app's PC
+/// check, which is what really limits brain size).
+const SIZE_GUARD: usize = 1 << 20;
+
+/// Every hidden size a troop brain can have, smallest first. Levels 1 to 5
+/// grow it up to [`LEVEL_BRAIN_MAX`]; after that each level grows it one
+/// size: 384, 512, 768, 1024, 1536, 2048, 3072, 4096, ... (two sizes per
+/// doubling) with no fixed top. How far a troop goes is set only by what
+/// the player's PC can train and run. Bigger brains train slower and need
+/// more practice but can play the hardest fights better.
+pub fn brain_sizes() -> impl Iterator<Item = usize> {
+    let grown = (0usize..).map(|k| {
+        let base = LEVEL_BRAIN_MAX << (k / 2);
+        if k % 2 == 0 {
+            base * 3 / 2
+        } else {
+            base * 2
+        }
+    });
+    LEVEL_SIZES.into_iter().chain(grown).take_while(|&h| h <= SIZE_GUARD)
+}
+
+/// Is `h` one of the [`brain_sizes`]?
+pub fn is_brain_size(h: usize) -> bool {
+    brain_sizes().take_while(|&s| s <= h).any(|s| s == h)
+}
+
+/// The next bigger brain size after `h`.
+pub fn next_brain_size(h: usize) -> Option<usize> {
+    brain_sizes().find(|&s| s > h)
+}
+
+/// How many sizes past [`LEVEL_BRAIN_MAX`] a brain of `h` neurons is: 0 up
+/// to 256, 1 for 384, 2 for 512, ...
+pub fn growths_past_levels(h: usize) -> u32 {
+    brain_sizes().filter(|&s| s > LEVEL_BRAIN_MAX && s <= h).count() as u32
+}
+
+/// The level a brain of `h` neurons stands for: levels 1 to 5 by their
+/// sizes, then one level per size (384 = level 6, 512 = 7, 1024 = 9, ...).
+pub fn level_for_brain(h: usize) -> u32 {
+    if h <= LEVEL_BRAIN_MAX {
+        (1..=5).rev().find(|&l| hidden_for_level(l) <= h).unwrap_or(1)
+    } else {
+        5 + growths_past_levels(h)
+    }
+}
 
 /// The biggest brain levels alone give (level 5).
 pub const LEVEL_BRAIN_MAX: usize = 256;
@@ -87,18 +133,18 @@ pub fn brain_params(h: usize) -> usize {
     OBS_DIM * h + h + h * h + h + h * N_ACTIONS + N_ACTIONS
 }
 
-/// Total training steps a level 5 troop may have with a brain of `h`
+/// Total training steps a level 5+ troop may have with a brain of `h`
 /// neurons: bigger brains hold more, so they get more practice before they
-/// top out (about +40% per size step past 256).
+/// top out (about +40% per size step past 256, with no top).
 pub fn brain_cap(h: usize) -> u64 {
-    match h {
-        0..=256 => 3_500_000,
-        257..=384 => 5_000_000,
-        385..=512 => 7_000_000,
-        513..=768 => 10_000_000,
-        769..=1024 => 14_000_000,
-        1025..=1536 => 20_000_000,
-        _ => 28_000_000,
+    const GROWN: [u64; 6] = [5_000_000, 7_000_000, 10_000_000, 14_000_000, 20_000_000, 28_000_000];
+    match growths_past_levels(h) as usize {
+        0 => 3_500_000,
+        k if k <= GROWN.len() => GROWN[k - 1],
+        k => {
+            let m = 28.0 * 1.4f64.powi((k - GROWN.len()) as i32);
+            (m.round() as u64).saturating_mul(1_000_000)
+        }
     }
 }
 
@@ -106,8 +152,8 @@ pub fn brain_cap(h: usize) -> u64 {
 /// level-ups before it (level 5 cost 2500, the first growth 3600, then
 /// 4900, ...).
 pub fn brain_grow_cost(h: usize) -> u32 {
-    let k = HIDDEN_SIZES.iter().filter(|&&s| s > LEVEL_BRAIN_MAX && s <= h).count() as u32;
-    100 * (5 + k) * (5 + k)
+    let k = growths_past_levels(h).min(10_000);
+    100u32.saturating_mul((5 + k) * (5 + k))
 }
 
 pub fn actor_dims(level: u32) -> Vec<usize> {
@@ -128,7 +174,7 @@ pub fn critic_dims_h(h: usize) -> Vec<usize> {
 
 /// Whether `dims` is a valid actor shape for a troop of any level.
 pub fn actor_dims_ok(dims: &[usize]) -> bool {
-    dims.len() == 4 && dims[0] == OBS_DIM && dims[1] == dims[2] && HIDDEN_SIZES.contains(&dims[1]) && dims[3] == N_ACTIONS
+    dims.len() == 4 && dims[0] == OBS_DIM && dims[1] == dims[2] && is_brain_size(dims[1]) && dims[3] == N_ACTIONS
 }
 
 /// Whether `dims` is the right actor shape for a troop of this level.

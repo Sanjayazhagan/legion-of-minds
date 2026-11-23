@@ -124,7 +124,7 @@ fn draw_troop_stats(t: &Troop, p: Rect) {
     text(&t.name, x + 72.0, y, 34.0, TEXT);
     let role = if spec.role == Role::Defend { "defender" } else { "attacker" };
     let kind = if spec.is_hybrid() { "hybrid" } else { "class" };
-    let mut sub = format!("Level {} {}  ·  {kind}  ·  {role}", t.level, spec.name);
+    let mut sub = format!("Level {} {}  ·  {kind}  ·  {role}", t.shown_level(), spec.name);
     let mix = spec.mix_label();
     if !mix.is_empty() {
         sub += &format!("  ·  {mix}");

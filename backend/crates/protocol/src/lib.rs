@@ -543,7 +543,7 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
     if !godcore::ppo::actor_dims_ok(dims) {
         return bad(format!(
             "troop brain size must be one of {:?} neurons per layer",
-            godcore::ppo::HIDDEN_SIZES
+            godcore::ppo::brain_sizes().take_while(|&h| h <= ONLINE_BRAIN_MAX).collect::<Vec<_>>()
         ));
     }
     let h = dims[1];
@@ -1162,9 +1162,9 @@ mod tests {
 
     #[test]
     fn any_listed_brain_size_is_accepted() {
-        use godcore::ppo::HIDDEN_SIZES;
+        let sizes = || godcore::ppo::brain_sizes().take_while(|&h| h <= 2048);
         let s = canonical_snapshot(&snapshot()).unwrap();
-        for h in HIDDEN_SIZES.into_iter().filter(|&h| h <= LEVEL_BRAIN_MAX) {
+        for h in sizes().filter(|&h| h <= LEVEL_BRAIN_MAX) {
             let mut a = army();
             assert!(a[0].troop.set_brain(h), "{h}");
             // The human moves a troop may use come from its brain, not
@@ -1179,7 +1179,7 @@ mod tests {
             assert_eq!(army_bracket(&c), 0);
         }
         // Past 256 only level 5 troops, and online only up to 1024.
-        for h in HIDDEN_SIZES.into_iter().filter(|&h| h > LEVEL_BRAIN_MAX) {
+        for h in sizes().filter(|&h| h > LEVEL_BRAIN_MAX) {
             let mut a = army();
             assert!(a[0].troop.set_brain(h), "{h}");
             assert!(canonical_army(&a, 5).is_err(), "level 1 with {h}");

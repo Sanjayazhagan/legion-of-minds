@@ -102,11 +102,17 @@ impl Game {
     fn poll_pc_check(&mut self) {
         match pc_check::take() {
             Some(Ok(r)) => {
-                let max = r.max_brain();
-                println!("PC check: {} -> brains up to {max} ({:.0} steps/s at 256)", r.device, r.steps_per_sec(256));
+                let (max, top) = (r.max_brain(), r.max_level());
+                println!(
+                    "PC check: {} -> brains up to {max}, level {top} ({:.0} steps/s at 256, {:.0} MB memory, 1024 thinks in {:.2} ms)",
+                    r.device,
+                    r.steps_per_sec(256),
+                    r.ram_mb,
+                    r.think_ms(1024) / crate::pc_check::BATTLE_BRAINS
+                );
                 self.settings.pc = Some(r);
                 self.settings.save(&self.store.home);
-                self.toast(format!("PC speed test done: this PC can train brains up to {max} neurons"));
+                self.toast(format!("PC test done: troops can reach level {top} on this PC (brains up to {max} neurons)"));
             }
             Some(Err(e)) => self.toast(format!("PC speed test failed: {e}")),
             None => return,

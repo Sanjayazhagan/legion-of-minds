@@ -97,7 +97,7 @@ fn main() {
             troop.sync_moves();
             match arg(&args, "--brain") {
                 // Neurons per layer; without it a new troop gets the size for its level.
-                Some(h) => assert!(troop.set_brain(h.parse().unwrap()), "brain must be one of {:?} and not smaller than now", godcore::ppo::HIDDEN_SIZES),
+                Some(h) => assert!(troop.set_brain(h.parse().unwrap()), "brain must be one of {:?}... and not smaller than now", godcore::ppo::brain_sizes().take(14).collect::<Vec<_>>()),
                 None => {
                     if arg(&args, "--from").is_none() {
                         troop.brain = None;

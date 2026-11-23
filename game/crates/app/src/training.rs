@@ -469,7 +469,7 @@ impl Game {
         crate::art::draw_portrait(vec2(rx + 24.0, 96.0), 22.0, &t.spec);
         text(&t.name, rx + 56.0, 104.0, 30.0, TEXT);
         text(
-            &format!("Lv {} {}", t.level, t.spec.name),
+            &format!("Lv {} {}", t.shown_level(), t.spec.name),
             rx + 56.0,
             126.0,
             18.0,

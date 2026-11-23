@@ -231,7 +231,7 @@ impl Game {
 
     /// How big a brain this PC can train, from the speed test.
     fn pc_panel(&mut self, c: Rect) {
-        use crate::pc_check::{PcResult, TRAIN_HOURS};
+        use crate::pc_check::{duration_words, Limit, PcResult, TRAIN_DAYS};
         panel(c);
         let (x, y) = (c.x + 24.0, c.y + 34.0);
         let running = crate::pc_check::running();
@@ -242,34 +242,44 @@ impl Game {
                 text(&format!("Timing a real training round ({k} of {n}). Takes 10 to 60 seconds."), x, y + 28.0, 16.0, MUTED);
             }
             (Some(pc), None) => {
-                let max = pc.max_brain();
-                text(&format!("Your PC can train brains up to {max} neurons"), x, y, 22.0, GOOD);
-                text(
+                let (max, top) = (pc.max_brain(), pc.max_level());
+                text(&format!("Your PC: brains up to {max} neurons, troops up to level {top}"), x, y, 22.0, GOOD);
+                let card = if pc.gpu { "trains on the graphics card" } else { "no graphics card" };
+                let ram = if pc.ram_mb > 0.0 { format!(", {:.0} GB memory", pc.ram_mb / 1024.0) } else { String::new() };
+                // Kept left of the Test button.
+                crate::recruit::wrap(
                     &format!(
-                        "Tested on {}. Level 5 troops grow past 256 one size per plateau, up to sizes this PC trains fully in {TRAIN_HOURS:.0} hours.",
+                        "Tested on {}, {card}{ram}. No fixed top: each level past 5 grows the brain, while it trains fully within {TRAIN_DAYS:.0} days in the background, battles stay smooth and it fits in memory.",
                         pc.device
                     ),
                     x,
-                    y + 26.0,
+                    y + 24.0,
+                    c.w - 250.0,
                     15.0,
                     MUTED,
                 );
+                // Every size this PC handles past 256, then the first one it can't.
                 let mut bx = x;
-                for h in godcore::ppo::HIDDEN_SIZES.into_iter().filter(|&h| h >= 256) {
-                    let hrs = pc.hours_to_full(h);
-                    let t = if hrs < 1.0 { format!("{h}: {:.0} min", hrs * 60.0) } else { format!("{h}: {hrs:.0} h") };
+                let shown = godcore::ppo::brain_sizes().filter(|&h| h > 256).take_while(|&h| h <= max).count() + 1;
+                for h in godcore::ppo::brain_sizes().filter(|&h| h > 256).take(shown.max(2)).skip(shown.saturating_sub(7)) {
+                    let t = format!("Lv{} {h}: {}", godcore::ppo::level_for_brain(h), duration_words(pc.hours_to_full(h)));
                     let col = if h <= max { GOOD } else { MUTED };
-                    text(&t, bx, y + 58.0, 17.0, col);
-                    bx += text_width(&t, 17.0) + 26.0;
+                    text(&t, bx, y + 67.0, 17.0, col);
+                    bx += text_width(&t, 17.0) + 24.0;
                 }
-                let online = format!("Online: up to {} (in categories)", godcore::ppo::ONLINE_BRAIN_MAX);
-                text(&online, x, y + 82.0, 15.0, MUTED);
-                let mem = format!("Memory to train {max}: about {:.0} MB", PcResult::train_mb(max));
-                text(&mem, x + text_width(&online, 15.0) + 30.0, y + 82.0, 15.0, MUTED);
+                let next = godcore::ppo::next_brain_size(max).unwrap_or(max);
+                let why = match pc.limit(next) {
+                    Some(Limit::TrainTime) => format!("Level {} ({next}) would take {} to train", top + 1, duration_words(pc.hours_to_full(next))),
+                    Some(Limit::BattleSpeed) => format!("Level {} ({next}) would make battles stutter ({:.0} ms a tick)", top + 1, pc.think_ms(next)),
+                    Some(Limit::Memory) => format!("Level {} ({next}) needs {:.1} GB to train", top + 1, PcResult::train_mb(next) / 1024.0),
+                    None => String::new(),
+                };
+                let online = format!("Online: up to {} in categories.  {why}.", godcore::ppo::ONLINE_BRAIN_MAX);
+                text(&online, x, y + 89.0, 15.0, MUTED);
             }
             (None, None) => {
                 text("Your PC: not tested yet", x, y, 22.0, TEXT);
-                text("The test times a real training round to find the biggest brain this PC can train.", x, y + 28.0, 16.0, MUTED);
+                text("The test times real training and battles, and reads memory, to find how big a brain (and how high a level) this PC can handle.", x, y + 28.0, 16.0, MUTED);
             }
         }
         let br = Rect::new(c.x + c.w - 190.0, c.y + 20.0, 166.0, 40.0);
