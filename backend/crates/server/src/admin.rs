@@ -3,8 +3,10 @@
 //! the server's ADMIN_KEY. Without ADMIN_KEY set, all of it is switched off.
 //!
 //! From here the operator can start and stop events (double gold weekend),
-//! give gold to everyone or one player, rename or end the season or move
-//! its end, and change rewards and timings. Battle rules are not here on
+//! give gold, weapons or a trained troop to everyone or one player, rename
+//! or end the season or move its end, change rewards and timings (the
+//! weekly cup's prizes, closing time and pause included), and run one-off
+//! tournaments with their own prizes. Battle rules are not here on
 //! purpose: changing them needs a new game build (a SIM_VERSION bump).
 
 use crate::error::{ApiError, ApiResult};
@@ -17,11 +19,17 @@ use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use crate::liveops::{weapons_from, weapons_to};
+use crate::tournaments;
 use bag_protocol::{
-    clean_text, AdminGift, AdminLogEntry, AdminOverview, LiveEvent, NewEvent, NewGift, Season,
-    SeasonEdit, SettingView, EVENT_GOLD_PCT_MAX, EVENT_MAX_DAYS, EVENT_MESSAGE_MAX,
-    EVENT_TITLE_MAX, EVENT_WIN_GOLD_MAX, GIFT_GOLD_MAX, SEASON_NAME_MAX,
+    canonical_troop, check_bands, clean_text, cup_close_offset, cup_week_at, cup_week_end_at,
+    describe_bands, describe_reward, AdminGift, AdminLogEntry, AdminOverview, CupAdmin, LiveEvent,
+    NewEvent, NewGift, NewTournament, Season, SeasonEdit, SettingView, TournamentInfo, BRACKETS,
+    EVENT_GOLD_PCT_MAX, EVENT_MAX_DAYS, EVENT_MESSAGE_MAX, EVENT_TITLE_MAX, EVENT_WIN_GOLD_MAX,
+    GIFT_GOLD_MAX, REWARD_WEAPONS_MAX, SEASON_NAME_MAX, TOURNAMENT_MAX_DAYS,
+    TOURNAMENT_MESSAGE_MAX, TOURNAMENT_TITLE_MAX,
 };
+use godcore::troop::{Troop, MAX_LEVEL};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -45,6 +53,9 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/admin/season", get(season).patch(edit_season))
         .route("/v1/admin/season/end", post(end_season))
         .route("/v1/admin/settings", get(settings).put(change_settings))
+        .route("/v1/admin/tournaments", post(new_tournament))
+        .route("/v1/admin/tournaments/{id}/end", post(end_tournament))
+        .route("/v1/admin/tournaments/{id}/cancel", post(cancel_tournament))
 }
 
 /// The admin page. It holds no data or secrets itself: it asks for the key
@@ -155,6 +166,13 @@ async fn overview(State(st): State<AppState>, _: Admin) -> ApiResult<Json<AdminO
         gifts: gifts(&st.db).await?,
         players,
         active_today,
+        cup: Some(cup_admin(&st).await?),
+        tournaments: tournaments::infos(
+            &st.db,
+            "t.ends_at > now() - interval '30 days' OR t.paid_at IS NULL",
+            30,
+        )
+        .await?,
         log: log
             .into_iter()
             .map(|(at, action, detail)| AdminLogEntry {
@@ -166,12 +184,45 @@ async fn overview(State(st): State<AppState>, _: Admin) -> ApiResult<Json<AdminO
     }))
 }
 
-type GiftRow = (Uuid, i64, String, Option<String>, DateTime<Utc>, DateTime<Utc>, i64);
+async fn cup_admin(st: &AppState) -> ApiResult<CupAdmin> {
+    let live = Live::load(&st.db, &st.cfg).await?;
+    let week = live.cup_week(Utc::now().timestamp());
+    let counts: Vec<(i16, i64)> = sqlx::query_as(
+        "SELECT category, count(*) FROM cup_entries WHERE week = $1 GROUP BY category",
+    )
+    .bind(week as i32)
+    .fetch_all(&st.db)
+    .await?;
+    Ok(CupAdmin {
+        week,
+        open: live.cup_open(),
+        ends_at: DateTime::<Utc>::from_timestamp(cup_week_end_at(week, live.cup_offset()), 0)
+            .unwrap_or_default()
+            .to_rfc3339(),
+        entries: (0..BRACKETS.len() as i16)
+            .map(|c| counts.iter().find(|x| x.0 == c).map(|x| x.1).unwrap_or(0))
+            .collect(),
+        categories: BRACKETS.iter().map(|b| b.1.to_string()).collect(),
+        prizes: live.cup_prizes().to_vec(),
+    })
+}
+
+type GiftRow = (
+    Uuid,
+    i64,
+    String,
+    Option<String>,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    i64,
+    String,
+    Option<String>,
+);
 
 async fn gifts(db: &PgPool) -> ApiResult<Vec<AdminGift>> {
     let rows: Vec<GiftRow> = sqlx::query_as(
         "SELECT g.id, g.gold, g.message, u.display_name, g.created_at, g.expires_at,
-                (SELECT count(*) FROM gift_claims c WHERE c.gift_id = g.id)
+                (SELECT count(*) FROM gift_claims c WHERE c.gift_id = g.id), g.weapons, g.troop_name
          FROM gifts g LEFT JOIN users u ON u.id = g.user_id
          WHERE g.expires_at > now() - interval '30 days'
          ORDER BY g.created_at DESC LIMIT 30",
@@ -180,9 +231,11 @@ async fn gifts(db: &PgPool) -> ApiResult<Vec<AdminGift>> {
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, gold, message, player, c, e, claims)| AdminGift {
+        .map(|(id, gold, message, player, c, e, claims, weapons, troop_name)| AdminGift {
             id,
             gold,
+            weapons: weapons_from(&weapons),
+            troop_name,
             message,
             player: player.unwrap_or_default(),
             created_at: c.to_rfc3339(),
@@ -295,10 +348,18 @@ async fn stop_event(
 async fn give(
     State(st): State<AppState>,
     _: Admin,
-    Json(req): Json<NewGift>,
+    Json(mut req): Json<NewGift>,
 ) -> ApiResult<Json<AdminGift>> {
-    if !(1..=GIFT_GOLD_MAX).contains(&req.gold) {
-        return Err(ApiError::bad_request(format!("gold must be 1 to {GIFT_GOLD_MAX}")));
+    req.weapons = weapons_from(&weapons_to(&req.weapons));
+    if !(0..=GIFT_GOLD_MAX).contains(&req.gold) {
+        return Err(ApiError::bad_request(format!("gold must be 0 to {GIFT_GOLD_MAX}")));
+    }
+    if req.weapons.len() > REWARD_WEAPONS_MAX {
+        return Err(ApiError::bad_request("too many weapons"));
+    }
+    let troop = req.troop.as_ref().map(gift_troop).transpose()?;
+    if req.gold == 0 && req.weapons.is_empty() && troop.is_none() {
+        return Err(ApiError::bad_request("a gift needs gold, a weapon or a troop"));
     }
     let message = clean_text(&req.message, 0, EVENT_MESSAGE_MAX, "the message")?;
     let days = req.days.unwrap_or(14);
@@ -335,23 +396,29 @@ async fn give(
     };
     let id = Uuid::new_v4();
     let expires = Utc::now() + chrono::Duration::days(days);
+    let troop_name = troop.as_ref().map(|t| t.name.trim().to_string());
     sqlx::query(
-        "INSERT INTO gifts (id, user_id, gold, message, expires_at) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO gifts (id, user_id, gold, message, expires_at, weapons, troop, troop_name)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(id)
     .bind(player.as_ref().map(|p| p.0))
     .bind(req.gold)
     .bind(&message)
     .bind(expires)
+    .bind(weapons_to(&req.weapons))
+    .bind(troop.as_ref().map(serde_json::to_string).transpose().map_err(ApiError::internal)?)
+    .bind(&troop_name)
     .execute(&st.db)
     .await?;
     let who = player.as_ref().map(|p| p.1.clone()).unwrap_or_default();
+    let what = describe_reward(req.gold, &req.weapons, troop_name.as_deref());
     log(
         &st.db,
         "gift",
         format!(
-            "{} gold to {}{}",
-            req.gold,
+            "{} to {}{}",
+            what,
             if who.is_empty() { "everyone" } else { &who },
             if message.is_empty() { String::new() } else { format!(": {message}") }
         ),
@@ -360,6 +427,8 @@ async fn give(
     Ok(Json(AdminGift {
         id,
         gold: req.gold,
+        weapons: req.weapons,
+        troop_name,
         message,
         player: who,
         created_at: Utc::now().to_rfc3339(),
@@ -374,14 +443,20 @@ async fn cancel_gift(
     _: Admin,
     Path(id): Path<Uuid>,
 ) -> ApiResult<StatusCode> {
-    let gold: Option<i64> = sqlx::query_scalar(
-        "UPDATE gifts SET expires_at = now() WHERE id = $1 AND expires_at > now() RETURNING gold",
+    let gift: Option<(i64, String, Option<String>)> = sqlx::query_as(
+        "UPDATE gifts SET expires_at = now() WHERE id = $1 AND expires_at > now()
+         RETURNING gold, weapons, troop_name",
     )
     .bind(id)
     .fetch_optional(&st.db)
     .await?;
-    let gold = gold.ok_or_else(|| ApiError::not_found("open gift"))?;
-    log(&st.db, "gift cancelled", format!("{gold} gold")).await?;
+    let (gold, weapons, troop) = gift.ok_or_else(|| ApiError::not_found("open gift"))?;
+    log(
+        &st.db,
+        "gift cancelled",
+        describe_reward(gold, &weapons_from(&weapons), troop.as_deref()),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -485,6 +560,20 @@ async fn change_settings(
             )));
         }
     }
+    // Moving the cup's closing time must not end the running week early or
+    // open a finished one again.
+    if req.contains_key("cup_close_day") || req.contains_key("cup_close_hour") {
+        let live = Live::load(&st.db, &st.cfg).await?;
+        let day = req.get("cup_close_day").copied().unwrap_or(live.get("cup_close_day"));
+        let hour = req.get("cup_close_hour").copied().unwrap_or(live.get("cup_close_hour"));
+        let now = Utc::now().timestamp();
+        if cup_week_at(now, cup_close_offset(day, hour)) != live.cup_week(now) {
+            return Err(ApiError::bad_request(
+                "that closing time has already passed this week, so it would end the running cup early; \
+                 pick a later time, or change it after this week's cup closes",
+            ));
+        }
+    }
     let mut tx = st.db.begin().await?;
     let mut changed = Vec::new();
     for (key, value) in &req {
@@ -511,4 +600,119 @@ async fn change_settings(
         log(&st.db, "settings", changed.join(", ")).await?;
     }
     Ok(Json(settings_view(&st).await?))
+}
+
+// ---------------------------------------------------------- tournaments
+
+/// A troop the operator hands out: brought up to date the way the game
+/// does when it loads an older troop file, then checked like an online
+/// troop (real class, brain size allowed online, level 1 to 5).
+fn gift_troop(t: &Troop) -> ApiResult<Troop> {
+    let json = serde_json::to_string(t).map_err(ApiError::internal)?;
+    let t = Troop::load_json(&json).map_err(|e| ApiError::bad_request(format!("not a troop file: {e}")))?;
+    let mut t = canonical_troop(&t, t.spec.role, MAX_LEVEL)?;
+    t.name = clean_text(&t.name, 1, 24, "the troop's name")?;
+    Ok(t)
+}
+
+async fn new_tournament(
+    State(st): State<AppState>,
+    _: Admin,
+    Json(mut req): Json<NewTournament>,
+) -> ApiResult<Json<TournamentInfo>> {
+    let title = clean_text(&req.title, 3, TOURNAMENT_TITLE_MAX, "the tournament name")?;
+    let message = clean_text(&req.message, 0, TOURNAMENT_MESSAGE_MAX, "the message")?;
+    let now = Utc::now();
+    let starts = match req.starts_at.as_deref().map(str::trim) {
+        None | Some("") => now,
+        Some(s) => time(s, "the start")?.max(now - chrono::Duration::minutes(5)),
+    };
+    let ends = time(&req.ends_at, "the end")?;
+    if ends <= starts || ends <= now + chrono::Duration::minutes(5) {
+        return Err(ApiError::bad_request(
+            "the tournament must end after it starts, at least 5 minutes from now",
+        ));
+    }
+    if ends - starts > chrono::Duration::days(TOURNAMENT_MAX_DAYS) {
+        return Err(ApiError::bad_request(format!(
+            "a tournament can last at most {TOURNAMENT_MAX_DAYS} days"
+        )));
+    }
+    if let Some(c) = req.category {
+        if c as usize >= BRACKETS.len() {
+            return Err(ApiError::bad_request("unknown brain-size category"));
+        }
+    }
+    check_bands(&req.prizes)?;
+    for b in &mut req.prizes {
+        if let Some(t) = &b.reward.troop {
+            b.reward.troop = Some(gift_troop(t)?);
+        }
+    }
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO tournaments (id, title, message, starts_at, ends_at, category, class, prizes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(id)
+    .bind(&title)
+    .bind(&message)
+    .bind(starts)
+    .bind(ends)
+    .bind(req.category.map(|c| c as i16))
+    .bind(req.class.map(tournaments::class_key))
+    .bind(serde_json::to_string(&req.prizes).map_err(ApiError::internal)?)
+    .execute(&st.db)
+    .await?;
+    let t = tournaments::info(&st.db, id).await?;
+    log(
+        &st.db,
+        "tournament",
+        format!(
+            "{title} ({}) {} to {}. Prizes {}",
+            t.rules(),
+            starts.format(LOG_TIME),
+            ends.format(LOG_TIME),
+            describe_bands(&req.prizes)
+        ),
+    )
+    .await?;
+    Ok(Json(t))
+}
+
+/// End a running tournament now and hand out its prizes.
+async fn end_tournament(
+    State(st): State<AppState>,
+    _: Admin,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<TournamentInfo>> {
+    let title: Option<String> = sqlx::query_scalar(
+        "UPDATE tournaments SET ends_at = now(), starts_at = least(starts_at, now() - interval '1 second')
+         WHERE id = $1 AND ends_at > now() AND starts_at <= now() AND paid_at IS NULL RETURNING title",
+    )
+    .bind(id)
+    .fetch_optional(&st.db)
+    .await?;
+    let title = title.ok_or_else(|| ApiError::not_found("running tournament"))?;
+    log(&st.db, "tournament ended", format!("{title} ended early")).await?;
+    tournaments::pay_finished(&st.db).await?;
+    Ok(Json(tournaments::info(&st.db, id).await?))
+}
+
+/// Call off a tournament that hasn't paid out: entries and all go, and no
+/// prizes are given.
+async fn cancel_tournament(
+    State(st): State<AppState>,
+    _: Admin,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    let title: Option<String> = sqlx::query_scalar(
+        "DELETE FROM tournaments WHERE id = $1 AND paid_at IS NULL RETURNING title",
+    )
+    .bind(id)
+    .fetch_optional(&st.db)
+    .await?;
+    let title = title.ok_or_else(|| ApiError::not_found("unpaid tournament"))?;
+    log(&st.db, "tournament cancelled", format!("{title}: no prizes")).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

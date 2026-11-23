@@ -8,9 +8,10 @@ use crate::players::load_user;
 use crate::AppState;
 use axum::extract::{Path, State};
 use axum::Json;
+use crate::liveops::Live;
 use bag_protocol::{
-    canonical_troop, cup_prize, cup_score, cup_week, cup_week_end, CupEntry, CupReplay, CupRow,
-    CupStandings, PublicPlayer, CUP_PRIZES, SIM_VERSION,
+    canonical_troop, cup_score, cup_week_end_at, CupEntry, CupReplay, CupRow, CupStandings,
+    PublicPlayer, SIM_VERSION,
 };
 use chrono::{DateTime, Utc};
 use godcore::classes::Role;
@@ -75,7 +76,8 @@ async fn rows(db: &PgPool, week: i64, filter: &str, arg: Option<Uuid>, category:
 /// Standings in one category: `category` if asked, else the player's
 /// entry's, else the first.
 async fn standings_for(st: &AppState, me: Uuid, category: Option<u8>) -> ApiResult<CupStandings> {
-    let week = cup_week(Utc::now().timestamp());
+    let live = Live::load(&st.db, &st.cfg).await?;
+    let week = live.cup_week(Utc::now().timestamp());
     let mine = rows(&st.db, week, "WHERE user_id = $2", Some(me), 0).await?.pop();
     let category = category.or(mine.as_ref().map(|m| m.category)).unwrap_or(0);
     let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM cup_entries WHERE week = $1 AND category = $2")
@@ -85,7 +87,7 @@ async fn standings_for(st: &AppState, me: Uuid, category: Option<u8>) -> ApiResu
         .await?;
     Ok(CupStandings {
         week,
-        ends_at: DateTime::<Utc>::from_timestamp(cup_week_end(week), 0)
+        ends_at: DateTime::<Utc>::from_timestamp(cup_week_end_at(week, live.cup_offset()), 0)
             .unwrap_or_default()
             .to_rfc3339(),
         entries: entries as u32,
@@ -93,6 +95,8 @@ async fn standings_for(st: &AppState, me: Uuid, category: Option<u8>) -> ApiResu
         top: rows(&st.db, week, "WHERE rank <= 50 AND category = $3", None, category).await?,
         mine,
         last_week: rows(&st.db, week - 1, "WHERE rank <= 3 AND category = $3", None, category).await?,
+        prizes: live.cup_prizes().to_vec(),
+        open: live.cup_open(),
     })
 }
 
@@ -116,6 +120,10 @@ pub async fn enter(
     user: AuthUser,
     SameRulesJson(req): SameRulesJson<CupEntry>,
 ) -> ApiResult<Json<CupStandings>> {
+    let live = Live::load(&st.db, &st.cfg).await?;
+    if !live.cup_open() {
+        return Err(ApiError::conflict("cup_paused", "the weekly cup is paused; try again later"));
+    }
     let paid = load_user(&st.db, user.id).await?.upgrades;
     let troop = canonical_troop(&req.troop, Role::Attack, max_troop_level(paid.town_hall))?;
     if let Some(why) = paid.blocker(&troop) {
@@ -133,7 +141,7 @@ pub async fn enter(
              troop_name = EXCLUDED.troop_name, class_name = EXCLUDED.class_name,
              score = EXCLUDED.score, category = EXCLUDED.category, entered_at = now()",
     )
-    .bind(cup_week(Utc::now().timestamp()) as i32)
+    .bind(live.cup_week(Utc::now().timestamp()) as i32)
     .bind(user.id)
     .bind(serde_json::to_string(&troop).map_err(ApiError::internal)?)
     .bind(&troop.name)
@@ -169,9 +177,9 @@ pub async fn entry(
 }
 
 /// Pay every finished week that hasn't been paid: one statement, so a week
-/// is never paid twice. Returns how many entries were paid.
-pub async fn pay_finished(db: &PgPool, current_week: i64) -> Result<u64, sqlx::Error> {
-    debug_assert_eq!(cup_prize(1), CUP_PRIZES[0]);
+/// is never paid twice. `prizes` are the operator's at payout time (1st,
+/// 2nd, 3rd, 4th to 10th, the rest). Returns how many entries were paid.
+pub async fn pay_finished(db: &PgPool, current_week: i64, prizes: [i64; 5]) -> Result<u64, sqlx::Error> {
     let paid = sqlx::query(
         "WITH ranked AS (
              SELECT week, user_id,
@@ -189,11 +197,11 @@ pub async fn pay_finished(db: &PgPool, current_week: i64) -> Result<u64, sqlx::E
          WHERE u.id = p.user_id",
     )
     .bind(current_week as i32)
-    .bind(CUP_PRIZES[0])
-    .bind(CUP_PRIZES[1])
-    .bind(CUP_PRIZES[2])
-    .bind(CUP_PRIZES[3])
-    .bind(CUP_PRIZES[4])
+    .bind(prizes[0])
+    .bind(prizes[1])
+    .bind(prizes[2])
+    .bind(prizes[3])
+    .bind(prizes[4])
     .execute(db)
     .await?;
     Ok(paid.rows_affected())

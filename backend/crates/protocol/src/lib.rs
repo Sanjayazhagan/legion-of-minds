@@ -31,6 +31,8 @@ pub mod competition;
 pub use competition::*;
 pub mod liveops;
 pub use liveops::*;
+pub mod tournaments;
+pub use tournaments::*;
 
 pub const MAX_DEFENDERS: usize = 4;
 pub const MAX_ARMY: usize = 5;
@@ -437,6 +439,17 @@ pub struct CupStandings {
     pub mine: Option<CupRow>,
     /// Last week's top three.
     pub last_week: Vec<CupRow>,
+    /// Gold for 1st, 2nd, 3rd, 4th to 10th and everyone else, as the
+    /// operator set them. Empty from older servers: use CUP_PRIZES.
+    #[serde(default)]
+    pub prizes: Vec<i64>,
+    /// False while the operator has paused the cup: no new entries.
+    #[serde(default = "yes")]
+    pub open: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// One cup entry with its troop, to replay its proving-grounds raids.
@@ -776,22 +789,49 @@ pub const CUP_PRIZES: [i64; 5] = [500, 300, 200, 100, 25];
 
 /// Cup weeks run Monday to Monday (UTC). `unix_secs` -> week number.
 pub fn cup_week(unix_secs: i64) -> i64 {
-    (unix_secs.div_euclid(86_400) + 3).div_euclid(CUP_DAYS)
+    cup_week_at(unix_secs, 0)
 }
 
 /// When `week` closes, in unix seconds.
 pub fn cup_week_end(week: i64) -> i64 {
-    ((week + 1) * CUP_DAYS - 3) * 86_400
+    cup_week_end_at(week, 0)
+}
+
+/// Cup week of `unix_secs` when the cup closes `offset` seconds after
+/// Monday 00:00 UTC (negative: before it). The operator moves the closing
+/// time; the offset stays within half a week so week numbers barely move.
+pub fn cup_week_at(unix_secs: i64, offset: i64) -> i64 {
+    (unix_secs - offset + 3 * 86_400).div_euclid(CUP_DAYS * 86_400)
+}
+
+/// When `week` closes, in unix seconds, with the closing time moved by
+/// `offset` seconds.
+pub fn cup_week_end_at(week: i64, offset: i64) -> i64 {
+    ((week + 1) * CUP_DAYS - 3) * 86_400 + offset
+}
+
+/// Seconds from Monday 00:00 UTC to the cup's close, for a closing day
+/// (0 = Monday ... 6 = Sunday) and hour (UTC). Friday to Sunday count as
+/// before Monday, Tuesday to Thursday as after.
+pub fn cup_close_offset(day: i64, hour: i64) -> i64 {
+    let day = day.rem_euclid(7);
+    let day = if day >= 4 { day - 7 } else { day };
+    day * 86_400 + hour.clamp(0, 23) * 3_600
+}
+
+/// Gold for `rank` from a prize list (1st, 2nd, 3rd, 4th-10th, the rest).
+pub fn cup_prize_from(prizes: &[i64; 5], rank: u32) -> i64 {
+    match rank {
+        1 => prizes[0],
+        2 => prizes[1],
+        3 => prizes[2],
+        4..=10 => prizes[3],
+        _ => prizes[4],
+    }
 }
 
 pub fn cup_prize(rank: u32) -> i64 {
-    match rank {
-        1 => CUP_PRIZES[0],
-        2 => CUP_PRIZES[1],
-        3 => CUP_PRIZES[2],
-        4..=10 => CUP_PRIZES[3],
-        _ => CUP_PRIZES[4],
-    }
+    cup_prize_from(&CUP_PRIZES, rank)
 }
 
 /// A troop's cup score: the game's Tournament (the same seeded solo and

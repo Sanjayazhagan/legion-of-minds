@@ -137,8 +137,12 @@ All bodies are JSON. Publishing, matchmaking and raids need the header `x-sim-ve
 | `POST /v1/attacks/{id}/revenge` | ✓ | Raid back the attacker of a raid on you (`can_revenge` in the log), once; their shield doesn't count → snapshot to fight, `kind: "revenge"` |
 | `GET /v1/raid-of-the-day` | ✓ | Replay of the best raid of the last 24 hours (stars, then destruction, then speed) |
 | `GET /v1/cup` | ✓ | This week's cup: top 50, your entry, last week's podium |
-| `POST /v1/cup/entry` `{troop}` | ✓ | Enter an attacker (or replace your entry). Scored with `godcore::battle::tournament`. Weeks run Monday to Monday UTC; when one closes the cleanup pays 500/300/200, 100 for the rest of the top ten and 25 to everyone else |
+| `POST /v1/cup/entry` `{troop}` | ✓ | Enter an attacker (or replace your entry). Scored with `godcore::battle::tournament`. Weeks run Monday to Monday UTC by default (the operator can move the close and pause the cup); when one closes the server pays 500/300/200, 100 for the rest of the top ten and 25 to everyone else, or the prizes set on the admin page |
 | `GET /v1/cup/{week}/{player}` | ✓ | An entry with its troop, to replay its cup raids |
+| `GET /v1/tournaments` | ✓ | One-off tournaments: running, starting within a week, or ended in the last three days |
+| `GET /v1/tournaments/{id}?category=` | ✓ | One tournament's table: top 50 and your entry |
+| `POST /v1/tournaments/{id}/entry` `{troop}` | ✓ | Enter an attacker (or replace your entry); scored like the cup, plus the tournament's class and brain-size rules |
+| `GET /v1/tournaments/{id}/entries/{player}` | ✓ | An entry with its troop, to replay it |
 | `POST /v1/attacks/{id}` `{army, client_result}` | ✓ | Submit the raid; the server re-runs and scores it. Shields last 25%, 50% or 100% of `SHIELD_MINUTES` for 1, 2 or 3 stars. `bonus_gold` is what the server added (first win of the day, practice) |
 | `GET /v1/me/attacks?role=defense\|attack\|all` | ✓ | Battle log |
 | `GET /v1/attacks/{id}/replay` | ✓ | Snapshot + army, for either player |
@@ -153,11 +157,13 @@ All bodies are JSON. Publishing, matchmaking and raids need the header `x-sim-ve
 The server has an admin page for the game's operator at `<PUBLIC_URL>/admin`. It is off until `ADMIN_KEY` is set (at least 20 characters; put it in `deploy.env`, never in the repo or chat). Open the page, paste the key, and from there:
 
 - **Events**: start or schedule a time-limited boost every player sees on the Online screen, for example a double gold weekend (`gold_pct` 200) or "+50 gold per win". Running events add up. They only change gold, never battle rules, so raids still check out on the server. Extra gold is new gold: the defender only loses normal loot.
-- **Give gold**: a gift to every player or one player (name or id), claimed in the game with one click; close it any time.
+- **Give a gift**: gold, weapons unlocked online, and/or a trained troop (a `.troop.json` the game saved) to every player or one player (name or id), claimed in the game with one click; close it any time. A gifted troop gets a fresh id from the server (from 2^40 up, so it never clashes with the player's own), its level counts online and its weapon is unlocked with it.
+- **Weekly cup**: see when it closes and how many entered per brain-size category; pause it (no new entries) or open it again. Its prizes (1st, 2nd, 3rd, 4th to 10th, everyone else) and closing day and hour (UTC) are under Rewards and timings. A new closing time that already passed this week is refused, so the running cup is never ended early by accident.
+- **Tournaments**: one-off tournaments next to the weekly cup, with a start and end, optional rules (one brain-size category, one main class) and prize bands by rank (gold, a weapon, a troop). Ranked within each category like the cup. When one ends (or you press End now) the prizes go out as gifts ("1st in Weekend Clash", 30 days to claim). Call off deletes it without prizes.
 - **Season**: rename the running season, move its end, or end it now (pays every player by league, halves trophies above 800, starts the next one).
-- **Rewards and timings**: season length, end-of-season gold per league, league win bonus, shield length, war rewards and starting gold. Changes apply at once; set a value back to its default to undo.
+- **Rewards and timings**: season length, end-of-season gold per league, league win bonus, shield length, war rewards, starting gold and the weekly cup. Changes apply at once; set a value back to its default to undo.
 
-Every change is listed under Recent changes (table `admin_log`). The API behind it is under `/v1/admin` with the header `x-admin-key` (`overview`, `events`, `events/{id}/stop`, `gifts`, `gifts/{id}/cancel`, `season`, `season/end`, `settings`); `bag_client::Client::admin(key)` wraps it for scripts. Changing how battles play still needs a game release with a new SIM_VERSION.
+Every change is listed under Recent changes (table `admin_log`). The API behind it is under `/v1/admin` with the header `x-admin-key` (`overview`, `events`, `events/{id}/stop`, `gifts`, `gifts/{id}/cancel`, `season`, `season/end`, `settings`, `tournaments`, `tournaments/{id}/end`, `tournaments/{id}/cancel`); `bag_client::Client::admin(key)` wraps it for scripts. Changing how battles play still needs a game release with a new SIM_VERSION.
 
 ## Layout
 

@@ -472,7 +472,7 @@ async fn practice_revenge_rewards_and_raid_of_the_day() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn weekly_cup_ranks_and_pays() {
-    use bag_client::bag_protocol::{cup_score, cup_week};
+    use bag_client::bag_protocol::{cup_score, cup_week, CUP_PRIZES};
     let db = fresh_db().await;
     let db2 = db.clone();
     let url = serve(|u| test_config(db, u, vec![])).await;
@@ -506,10 +506,10 @@ async fn weekly_cup_ranks_and_pays() {
     .await;
     assert_eq!(week, cup_week(chrono::Utc::now().timestamp()));
     // The week is still open: nothing is paid.
-    assert_eq!(bag_server::cup::pay_finished(&pool, week).await.unwrap(), 0);
+    assert_eq!(bag_server::cup::pay_finished(&pool, week, CUP_PRIZES).await.unwrap(), 0);
     // Once it closes, everyone is paid once.
-    assert_eq!(bag_server::cup::pay_finished(&pool, week + 1).await.unwrap(), 2);
-    assert_eq!(bag_server::cup::pay_finished(&pool, week + 1).await.unwrap(), 0);
+    assert_eq!(bag_server::cup::pay_finished(&pool, week + 1, CUP_PRIZES).await.unwrap(), 2);
+    assert_eq!(bag_server::cup::pay_finished(&pool, week + 1, CUP_PRIZES).await.unwrap(), 0);
     let golds: Vec<i64> = sqlx::query_scalar("SELECT gold FROM users WHERE NOT is_bot ORDER BY gold DESC")
         .fetch_all(&pool)
         .await

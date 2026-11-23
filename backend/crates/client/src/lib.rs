@@ -408,6 +408,36 @@ impl Client {
         self.get(&format!("/v1/cup/{week}/{player}"))
     }
 
+    // ---------------------------------------------------- tournaments
+
+    /// One-off tournaments: running, starting within a week, or just over.
+    pub fn tournaments(&self) -> Result<Vec<TournamentInfo>> {
+        self.get("/v1/tournaments")
+    }
+
+    /// One tournament's table in the category of your entry (or the
+    /// tournament's, or the first); `category` picks another.
+    pub fn tournament(&self, id: Uuid, category: Option<u8>) -> Result<TournamentStandings> {
+        match category {
+            Some(c) => self.get(&format!("/v1/tournaments/{id}?category={c}")),
+            None => self.get(&format!("/v1/tournaments/{id}")),
+        }
+    }
+
+    /// Enter (or replace) your troop in a tournament. Checked locally first.
+    pub fn enter_tournament(&self, id: Uuid, troop: &Troop) -> Result<TournamentStandings> {
+        let paid = self.me()?.upgrades;
+        let t = canonical_troop(troop, godcore::classes::Role::Attack, godcore::scenario::max_troop_level(paid.town_hall))?;
+        if let Some(why) = paid.blocker(&t) {
+            return Err(Error::Invalid(why));
+        }
+        self.post(&format!("/v1/tournaments/{id}/entry"), &CupEntry { troop: t })
+    }
+
+    pub fn tournament_replay(&self, id: Uuid, player: Uuid) -> Result<CupReplay> {
+        self.get(&format!("/v1/tournaments/{id}/entries/{player}"))
+    }
+
     // ------------------------------------------------------------ seasons
 
     pub fn season(&self) -> Result<Season> {
@@ -656,5 +686,19 @@ impl Admin<'_> {
     pub fn change_settings(&self, values: &[(&str, i64)]) -> Result<Vec<SettingView>> {
         let m: std::collections::BTreeMap<&str, i64> = values.iter().copied().collect();
         self.c.send(self.req(reqwest::Method::PUT, "/v1/admin/settings").json(&m))
+    }
+
+    pub fn new_tournament(&self, t: &NewTournament) -> Result<TournamentInfo> {
+        self.c.send(self.req(reqwest::Method::POST, "/v1/admin/tournaments").json(t))
+    }
+
+    /// End a running tournament now; its prizes go out as gifts.
+    pub fn end_tournament(&self, id: Uuid) -> Result<TournamentInfo> {
+        self.c.send(self.req(reqwest::Method::POST, &format!("/v1/admin/tournaments/{id}/end")))
+    }
+
+    /// Call off a tournament without prizes.
+    pub fn cancel_tournament(&self, id: Uuid) -> Result<()> {
+        self.c.send_empty(self.req(reqwest::Method::POST, &format!("/v1/admin/tournaments/{id}/cancel")))
     }
 }

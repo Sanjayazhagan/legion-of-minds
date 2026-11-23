@@ -1,11 +1,15 @@
 //! Leagues, seasons, clans, lent troops, clan wars and the operator's live
-//! controls (events, gifts, season and reward settings), end to end against a
+//! controls (events, gifts, season and reward settings, the weekly cup's
+//! settings, one-off tournaments), end to end against a
 //! real Postgres (TEST_DATABASE_URL, default postgres://bag:bag@localhost/bag).
 
 use bag_client::bag_protocol::{
-    loot, scale_gold, BaseSnapshot, ClanRole, League, NewEvent, NewGift, Placement, SeasonEdit,
-    WarResult, WarState, KIND_PRACTICE, MAX_LOANS,
+    cup_close_offset, cup_week_at, loot, scale_gold, BaseSnapshot, ClanRole, League, NewEvent,
+    NewGift, NewTournament, Placement, PrizeBand, Reward, SeasonEdit, WarResult, WarState,
+    KIND_PRACTICE, MAX_LOANS,
 };
+use godcore::classes::BaseClass;
+use godcore::weapons::Weapon;
 use bag_client::{army_spots, defender_spots, snapshot_from, Client, Error};
 use bag_server::config::Config;
 use bag_server::{router, AppState};
@@ -536,18 +540,18 @@ async fn gifts_are_claimed_once() {
         let bob = login(&url, "Bob");
         let admin = alice.admin(ADMIN_KEY);
         let all = admin
-            .give(&NewGift { gold: 300, message: "Sorry for the downtime".into(), player: None, days: None })
+            .give(&NewGift { gold: 300, message: "Sorry for the downtime".into(), ..Default::default() })
             .unwrap();
         let just_bob = admin
-            .give(&NewGift { gold: 1000, message: "Cup winner".into(), player: Some("bob".into()), days: Some(3) })
+            .give(&NewGift { gold: 1000, message: "Cup winner".into(), player: Some("bob".into()), days: Some(3), ..Default::default() })
             .unwrap();
         assert_eq!(just_bob.player, "Bob");
         assert_eq!(
-            api_code(admin.give(&NewGift { gold: 5, message: String::new(), player: Some("Nobody".into()), days: None })),
+            api_code(admin.give(&NewGift { gold: 5, player: Some("Nobody".into()), ..Default::default() })),
             "not_found"
         );
         assert_eq!(
-            api_code(admin.give(&NewGift { gold: 0, message: String::new(), player: None, days: None })),
+            api_code(admin.give(&NewGift::default())),
             "bad_request"
         );
 
@@ -626,6 +630,210 @@ async fn operator_runs_the_season_and_rewards() {
         let log: Vec<String> = admin.overview().unwrap().log.into_iter().map(|l| l.action).collect();
         assert!(log.contains(&"season ended".to_string()));
         assert!(log.contains(&"settings".to_string()));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gifts_can_give_weapons_and_troops() {
+    let db = fresh_db().await;
+    let url = serve(db.clone()).await;
+    blocking(move || {
+        let alice = login(&url, "Alice");
+        let admin = alice.admin(ADMIN_KEY);
+        // A defender may be gifted too, but not a made-up class or a
+        // nonsense troop name.
+        let mut bad = fixture("fighter", 7);
+        bad.spec.parents = vec![(BaseClass::Fighter, 0.5)];
+        assert_eq!(
+            api_code(admin.give(&NewGift { troop: Some(bad), ..Default::default() })),
+            "invalid"
+        );
+        let mut champ = fixture("fighter", 7);
+        champ.name = "Old Champion".into();
+        let g = admin
+            .give(&NewGift {
+                weapons: vec![Weapon::Crossbow, Weapon::Crossbow],
+                troop: Some(champ.clone()),
+                message: "For the testers".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!((g.gold, g.troop_name.as_deref()), (0, Some("Old Champion")));
+        assert_eq!(g.weapons, vec![Weapon::Crossbow]);
+
+        let gifts = alice.live().unwrap().gifts;
+        assert_eq!(gifts[0].describe(), "Crossbow, troop Old Champion");
+        assert!(!alice.me().unwrap().upgrades.weapons.contains(&Weapon::Crossbow));
+        let got = alice.claim_gift(g.id).unwrap();
+        assert_eq!(got.gold, 0);
+        assert!(got.user.upgrades.weapons.contains(&Weapon::Crossbow));
+        let t = got.troop.expect("the troop comes with the claim");
+        assert!(t.id >= bag_server::liveops::GIFT_TROOP_ID_BASE, "a fresh id: {}", t.id);
+        assert_eq!(t.actor.params, champ.actor.params);
+        // It fights online straight away.
+        alice.enter_cup(&t).unwrap();
+        assert_eq!(api_code(alice.claim_gift(g.id)), "already_claimed");
+        let o = admin.overview().unwrap();
+        assert_eq!(o.gifts[0].troop_name.as_deref(), Some("Old Champion"));
+        assert!(o.log.iter().any(|l| l.detail.starts_with("Crossbow, troop Old Champion to everyone")));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_tunes_and_pauses_the_weekly_cup() {
+    let db = fresh_db().await;
+    let url = serve(db.clone()).await;
+    let pool = sqlx::PgPool::connect(&db).await.unwrap();
+    let week = blocking(move || {
+        let alice = login(&url, "Alice");
+        let bob = login(&url, "Bob");
+        let admin = alice.admin(ADMIN_KEY);
+        let c = alice.cup().unwrap();
+        assert_eq!((c.prizes.clone(), c.open), (vec![500, 300, 200, 100, 25], true));
+
+        admin
+            .change_settings(&[("cup_prize_1", 2000), ("cup_prize_2", 1000), ("cup_prize_rest", 0)])
+            .unwrap();
+        assert_eq!(alice.cup().unwrap().prizes, vec![2000, 1000, 200, 100, 0]);
+        let o = admin.overview().unwrap().cup.unwrap();
+        assert_eq!((o.prizes[0], o.open), (2000, true));
+
+        // Paused: no new entries, but the table still shows.
+        admin.change_settings(&[("cup_open", 0)]).unwrap();
+        assert!(!alice.cup().unwrap().open);
+        assert_eq!(api_code(alice.enter_cup(&fixture("fighter", 1))), "cup_paused");
+        admin.change_settings(&[("cup_open", 1)]).unwrap();
+        alice.enter_cup(&fixture("fighter", 1)).unwrap();
+        bob.enter_cup(&fixture("healer", 1)).unwrap();
+        assert_eq!(admin.overview().unwrap().cup.unwrap().entries[0], 2);
+
+        // Moving the close is refused only when it would end this week's
+        // cup early; otherwise "Ends" follows it.
+        let now = chrono::Utc::now().timestamp();
+        let week = alice.cup().unwrap().week;
+        for day in 0..7 {
+            let r = admin.change_settings(&[("cup_close_day", day), ("cup_close_hour", 12)]);
+            if cup_week_at(now, cup_close_offset(day, 12)) == week {
+                r.unwrap();
+                let c = alice.cup().unwrap();
+                assert_eq!(c.week, week);
+                let end = chrono::DateTime::parse_from_rfc3339(&c.ends_at).unwrap();
+                assert_eq!(end.format("%H:%M").to_string(), "12:00");
+                // The unix epoch was a Thursday, so Monday is day 4.
+                assert_eq!(end.timestamp().div_euclid(86_400).rem_euclid(7), (day + 4) % 7, "day {day}");
+            } else {
+                assert_eq!(api_code(r), "bad_request", "day {day}");
+            }
+        }
+        admin.change_settings(&[("cup_close_day", 0), ("cup_close_hour", 0)]).unwrap();
+        week
+    })
+    .await;
+    // The week pays the tuned prizes.
+    let l = live(&pool).await;
+    assert_eq!(bag_server::cup::pay_finished(&pool, week + 1, l.cup_prizes()).await.unwrap(), 2);
+    let golds: Vec<i64> = sqlx::query_scalar("SELECT gold FROM users WHERE NOT is_bot ORDER BY gold DESC")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(golds, vec![500 + 2000, 500 + 1000]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_off_tournaments_pay_prizes_as_gifts() {
+    let db = fresh_db().await;
+    let url = serve(db.clone()).await;
+    let db2 = db.clone();
+    blocking(move || {
+        let alice = login(&url, "Alice");
+        let bob = login(&url, "Bob");
+        let carol = login(&url, "Carol");
+        let admin = alice.admin(ADMIN_KEY);
+        let mut prize_troop = fixture("healer", 9);
+        prize_troop.name = "Sol the Second".into();
+        let band = |from, to, reward| PrizeBand { from, to, reward };
+        let mut t = NewTournament {
+            title: "Fighter Clash".into(),
+            message: "Fighters only, this weekend.".into(),
+            ends_at: in_hours(48),
+            class: Some(BaseClass::Fighter),
+            prizes: vec![
+                band(1, 1, Reward { gold: 1500, troop: Some(prize_troop), ..Default::default() }),
+                band(2, 3, Reward { weapons: vec![Weapon::Daggers], ..Default::default() }),
+            ],
+            ..Default::default()
+        };
+        // Bad prize tables and times are refused.
+        let bad = NewTournament { prizes: vec![band(1, 3, Reward::default())], ..t.clone() };
+        assert_eq!(api_code(admin.new_tournament(&bad)), "invalid");
+        let bad = NewTournament { ends_at: in_hours(-1), ..t.clone() };
+        assert_eq!(api_code(admin.new_tournament(&bad)), "bad_request");
+
+        let info = admin.new_tournament(&t).unwrap();
+        assert!(info.active && !info.finished);
+        assert_eq!(info.rules(), "Fighter troops only");
+        assert_eq!(info.prizes[0].text, "1500 gold, troop Sol the Second");
+        assert_eq!(info.prizes[1].ranks(), "2nd to 3rd");
+        // One that starts later can't be entered yet.
+        t.title = "Next week".into();
+        t.starts_at = Some(in_hours(24));
+        t.ends_at = in_hours(30);
+        let later = admin.new_tournament(&t).unwrap();
+        assert!(!later.active);
+        assert_eq!(api_code(alice.enter_tournament(later.id, &fixture("fighter", 1))), "tournament_not_started");
+        assert_eq!(alice.tournaments().unwrap().len(), 2);
+
+        // The class rule.
+        assert!(matches!(
+            bob.enter_tournament(info.id, &fixture("healer", 1)),
+            Err(Error::Api { .. }) | Err(Error::Invalid(_))
+        ));
+        let s = alice.enter_tournament(info.id, &fixture("fighter", 1)).unwrap();
+        assert_eq!((s.entries, s.mine.unwrap().rank), (1, 1));
+        let mut slower = fixture("fighter", 2);
+        slower.name = "Bob's fighter".into();
+        bob.enter_tournament(info.id, &slower).unwrap();
+        let s = carol.enter_tournament(info.id, &fixture("fighter", 3)).unwrap();
+        assert_eq!(s.entries, 3);
+        let winner = s.top[0].player.id;
+        assert_eq!(carol.tournament_replay(info.id, winner).unwrap().row.rank, 1);
+
+        // Ending it hands out the prizes as gifts.
+        let done = admin.end_tournament(info.id).unwrap();
+        assert!(done.finished && done.paid);
+        assert_eq!(api_code(alice.enter_tournament(info.id, &fixture("fighter", 1))), "tournament_over");
+        let s = alice.tournament(info.id, None).unwrap();
+        assert!(s.top.iter().all(|r| r.prize.is_some()));
+        let mut troops = 0;
+        for c in [&alice, &bob, &carol] {
+            let gifts = c.live().unwrap().gifts;
+            assert_eq!(gifts.len(), 1);
+            let me = c.me().unwrap().id;
+            let got = c.claim_gift(gifts[0].id).unwrap();
+            if me == winner {
+                assert_eq!(gifts[0].message, "1st in Fighter Clash");
+                assert_eq!(got.gold, 1500);
+                assert_eq!(got.troop.unwrap().name, "Sol the Second");
+                troops += 1;
+            } else {
+                assert!(gifts[0].message.ends_with("in Fighter Clash"));
+                assert!(got.user.upgrades.weapons.contains(&Weapon::Daggers));
+            }
+        }
+        assert_eq!(troops, 1);
+        // Paid once only.
+        server_work(&db2, |p| async move {
+            assert_eq!(bag_server::tournaments::pay_finished(&p).await.unwrap(), 0);
+        });
+
+        // Calling one off: no prizes, gone from the list.
+        admin.cancel_tournament(later.id).unwrap();
+        assert_eq!(api_code(admin.cancel_tournament(info.id)), "not_found");
+        let o = admin.overview().unwrap();
+        assert_eq!(o.tournaments.len(), 1);
+        assert!(o.log.iter().any(|l| l.action == "tournament paid"));
     })
     .await;
 }
