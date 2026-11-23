@@ -46,6 +46,8 @@ pub(crate) struct Job {
     mastery_before: u8,
     /// When progress was last written to the troop's file.
     saved_at: f64,
+    /// When this run started (a resumed session is a new run).
+    began: f64,
 }
 
 /// How often a running session is saved, in seconds, so closing the game or
@@ -185,6 +187,7 @@ fn spawn(t: &Troop, target: u64, pool: Option<Opponents>) -> Job {
         skills_before: t.skills,
         mastery_before: t.spec.mastery,
         saved_at: get_time(),
+        began: get_time(),
     }
 }
 
@@ -212,6 +215,17 @@ impl Game {
         }
         let from = from.unwrap_or(t.steps).min(t.steps);
         let job = spawn(t, target, pool);
+        crate::playdata::event(
+            "training_start",
+            serde_json::json!({
+                "kind": "solo",
+                "class": crate::playdata::class_of(t),
+                "level": t.level,
+                "brain": t.hidden(),
+                "steps": target - t.steps,
+                "resumed": from < t.steps,
+            }),
+        );
         self.train_news.remove(&t.id);
         self.solo_runs.push(SoloRun { id: t.id, from, job });
     }
@@ -309,8 +323,20 @@ impl Game {
         if let Some(l) = mastery_up {
             msg += &format!(". {} mastery: {}", t.weapon().name(), godcore::weapons::MASTERY_TITLES[l as usize]);
         }
+        let ended = serde_json::json!({
+            "kind": "solo",
+            "class": crate::playdata::class_of(t),
+            "level": t.level,
+            "brain": t.hidden(),
+            "steps": gained,
+            "mins": ((get_time() - job.began) / 6.0).round() / 10.0,
+            "win": (t.skills.win * 100.0).round() / 100.0,
+            "plateau": t.plateaued,
+        });
         drop(sh);
         self.store.save_troop(&self.troops[idx]);
+        crate::playdata::event("training_end", ended);
+        self.ask_rating("first_training");
         msg
     }
 

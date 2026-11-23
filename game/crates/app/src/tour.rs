@@ -45,6 +45,8 @@ pub fn starter_troops(first_id: u64) -> Vec<Troop> {
 thread_local! {
     /// Buttons the screens drew this frame, by name.
     static MARKS: RefCell<Vec<(&'static str, Rect)>> = const { RefCell::new(Vec::new()) };
+    /// The last tour step sent as play data.
+    static REPORTED: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     /// What the tour is pointing at and its card, from the last frame.
     static LAST: RefCell<(Option<Rect>, Option<Rect>, bool)> = const { RefCell::new((None, None, false)) };
 }
@@ -192,9 +194,11 @@ impl Game {
         self.tour = Some(0);
     }
 
-    fn end_tour(&mut self) {
+    fn end_tour(&mut self, finished: bool) {
+        let step = self.tour.unwrap_or(0);
         self.tour = None;
         if !self.profile.tour_done {
+            crate::playdata::event("tour_end", serde_json::json!({ "finished": finished, "step": step }));
             self.profile.tour_done = true;
             self.store.save_profile(&self.profile);
         }
@@ -236,9 +240,13 @@ impl Game {
             k = AFTER_RAID;
         }
         let Some(st) = step(k, self, screen) else {
-            self.end_tour();
+            self.end_tour(true);
             return;
         };
+        // Play data: how far new players get (the first tour only).
+        if !self.profile.tour_done && REPORTED.with(|r| r.replace(Some(k))) != Some(k) {
+            crate::playdata::event("tour_step", serde_json::json!({ "step": k }));
+        }
         let here = on(screen) == Some(st.on);
         // Has the player done what the step asked?
         let done = match st.wait {
@@ -317,7 +325,7 @@ impl Game {
         let pressed = |g: &Game, r: Rect, label: &str| g.ui.button(r, label) && in_card;
         let last = step(k + 1, self, screen).is_none();
         if !last && pressed(self, Rect::new(card.x + 20.0, by, 120.0, 36.0), "Skip tour") {
-            self.end_tour();
+            self.end_tour(false);
             self.toast("Tour skipped. Replay it any time from Settings.");
             return;
         }
@@ -330,7 +338,7 @@ impl Game {
             if pressed(self, Rect::new(card.x + card.w - 160.0, by, 140.0, 36.0), label) {
                 self.tour = Some(k + 1);
                 if last {
-                    self.end_tour();
+                    self.end_tour(true);
                     self.toast("Have fun! Settings > Replay the tour shows this again.");
                 }
             }
@@ -354,7 +362,7 @@ impl Game {
         text(where_, card.x + 16.0, card.y + 30.0, 18.0, TEXT);
         let r = Rect::new(card.x + card.w - 128.0, card.y + 8.0, 116.0, 32.0);
         if self.ui.button(r, "Skip tour") && card.contains(self.ui.mouse) {
-            self.end_tour();
+            self.end_tour(false);
             self.toast("Tour skipped. Replay it any time from Settings.");
             return;
         }

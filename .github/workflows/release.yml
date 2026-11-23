@@ -72,6 +72,9 @@ jobs:
     runs-on: windows-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      # The Discord invite shown in Settings and after the rating questions
+      # (repository variable BAG_DISCORD, an https:// link; empty = no button).
+      BAG_DISCORD: ${{ vars.BAG_DISCORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

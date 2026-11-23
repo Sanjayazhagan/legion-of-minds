@@ -277,6 +277,11 @@ impl Game {
 
 /// Word-wrapped text.
 pub fn wrap(s: &str, x: f32, y: f32, w: f32, size: f32, c: Color) {
+    wrap_h(s, x, y, w, size, c);
+}
+
+/// `wrap`, returning the height of the lines drawn.
+pub fn wrap_h(s: &str, x: f32, y: f32, w: f32, size: f32, c: Color) -> f32 {
     let mut line = String::new();
     let mut yy = y;
     for word in s.split_whitespace() {
@@ -295,5 +300,7 @@ pub fn wrap(s: &str, x: f32, y: f32, w: f32, size: f32, c: Color) {
     }
     if !line.is_empty() {
         text(&line, x, yy, size, c);
+        yy += size * 1.15;
     }
+    yy - y
 }

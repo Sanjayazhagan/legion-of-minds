@@ -69,6 +69,8 @@ pub struct BattleState {
     speed: f32,
     result: Option<(u32, u32, bool)>,
     replay_ok: Option<bool>,
+    /// The player looked at a troop's thinking during this battle.
+    looked: bool,
     /// The map fills the window, with a small overlay instead of the side panel.
     full: bool,
     /// The troop whose thoughts are shown (unit index), if any.
@@ -102,6 +104,7 @@ impl BattleState {
             speed: 1.0,
             result: None,
             replay_ok: None,
+            looked: false,
             full: false,
             focus,
             paused: false,
@@ -485,9 +488,37 @@ impl Game {
                 self.fx.absorb(&s.battle.world);
             }
             if s.battle.outcome() != Outcome::Running {
+                // Before `settle` records it: the player's first ever star.
+                let first_win = matches!(s.mode, Mode::Raid(_))
+                    && s.battle.world.stars() > 0
+                    && self.profile.best_stars.iter().all(|&b| b == 0);
                 s.result = Some(self.settle(&s));
                 let stars = s.battle.world.stars();
                 let won = if defending { stars == 0 } else { stars > 0 };
+                let (mode, which) = match s.mode {
+                    Mode::Raid(b) => ("raid", BASES[b].name.to_string()),
+                    Mode::Defend(Some(w)) => ("defend", WAVES[w].name.to_string()),
+                    Mode::Defend(None) => ("defend", "own army".to_string()),
+                };
+                crate::playdata::event(
+                    "battle_end",
+                    crate::playdata::with(
+                        serde_json::json!({
+                            "mode": mode,
+                            "against": which,
+                            "stars": stars,
+                            "won": won,
+                            "timeout": s.battle.outcome() == Outcome::Timeout,
+                            "thinking": s.looked,
+                        }),
+                        crate::playdata::squad(&s.battle.troops),
+                    ),
+                );
+                if first_win {
+                    let mins = self.settings.first_played.filter(|&t| t > 1).map(|t| (godcore::troop::unix_now() as i64 - t) / 60);
+                    crate::playdata::event("first_raid_won", serde_json::json!({ "mins": mins }));
+                    self.ask_rating("first_raid");
+                }
                 crate::sfx::play_ui(if won { crate::sfx::Sfx::Victory } else { crate::sfx::Sfx::Defeat });
                 // Determinism check: replay the same battle headless.
                 let mut again = (s.remake)();
@@ -535,6 +566,7 @@ impl Game {
             }
         };
         let thought = s.focus.map(|f| think(w, f, &troops[w.units[f].tag].actor));
+        s.looked |= thought.is_some() && std::env::var_os("BAG_THINK").is_none();
         if let Some(t) = &thought {
             crate::mind_view::draw_on_map(v, w, t, &who);
         }

@@ -121,10 +121,29 @@ impl<T: Send + 'static> Task<T> {
     }
 }
 
+/// Look for a base to raid, noting for play data whether there was one.
+fn find_in(c: &Client, bracket: u8) -> Result<Match, String> {
+    let r = c.find_match_in(bracket);
+    let empty = matches!(&r, Err(bag_client::Error::Api { code, .. }) if code == "no_opponent");
+    if r.is_ok() || empty {
+        crate::playdata::event("find_opponent", serde_json::json!({ "found": r.is_ok(), "category": bracket }));
+    }
+    r.map_err(err)
+}
+
 /// What a failed call shows when the server no longer knows the session.
 const SIGNED_OUT: &str = "Your session ran out: sign in again";
 
 fn err(e: bag_client::Error) -> String {
+    // Play data: what the server refused (an old game version shows up
+    // here as update_required).
+    match &e {
+        bag_client::Error::Api { status, code, .. } if *status != 401 && code != "no_opponent" => {
+            crate::playdata::event("online_error", serde_json::json!({ "code": code, "status": status }));
+        }
+        bag_client::Error::Network(_) => crate::playdata::event("online_error", serde_json::json!({ "code": "network" })),
+        _ => {}
+    }
     match e {
         bag_client::Error::Api { status: 401, .. } => SIGNED_OUT.into(),
         e => e.to_string(),
@@ -144,7 +163,7 @@ fn is_this_computer(server: &str) -> bool {
 }
 
 /// Open a page in the player's browser.
-fn open_browser(url: &str) -> bool {
+pub(crate) fn open_browser(url: &str) -> bool {
     #[cfg(windows)]
     let r = std::process::Command::new("rundll32")
         .args(["url.dll,FileProtocolHandler", url])
@@ -342,6 +361,10 @@ impl Game {
                 task,
             } => {
                 if let Some(r) = task.poll() {
+                    let fail = r.as_ref().err().filter(|e| *e != "cancelled").map(|e| e.chars().take(80).collect::<String>());
+                    if r.is_ok() || fail.is_some() {
+                        crate::playdata::event("sign_in", serde_json::json!({ "provider": provider, "ok": r.is_ok(), "error": fail }));
+                    }
                     match r {
                         Ok((token, u)) => {
                             self.toast(format!("Signed in as {}", u.display_name));
@@ -436,6 +459,10 @@ impl Game {
                             };
                         }
                         Err(e) => {
+                            crate::playdata::event(
+                                "sign_in",
+                                serde_json::json!({ "provider": prov, "ok": false, "error": e.chars().take(80).collect::<String>() }),
+                            );
                             s.error = Some(e);
                             s.phase = Phase::Choose;
                         }
@@ -885,6 +912,15 @@ impl Game {
                     if let Some(r) = t.poll() {
                         match r {
                             Ok((u, replay, bonus, carried)) => {
+                                let stars = replay.log.result.stars;
+                                let army: Vec<Troop> = replay.army.iter().map(|p| p.troop.clone()).collect();
+                                crate::playdata::event(
+                                    "battle_end",
+                                    crate::playdata::with(
+                                        serde_json::json!({ "mode": "online", "kind": replay.log.kind, "stars": stars, "won": stars > 0 }),
+                                        crate::playdata::squad(&army),
+                                    ),
+                                );
                                 self.account.user = Some(u);
                                 // The squad comes home as tired as the server counted.
                                 let now = godcore::troop::unix_now();
@@ -922,6 +958,7 @@ impl Game {
                 }
                 Busy::Cup(t) => t.poll().map(|r| {
                     r.map(|c| {
+                        crate::playdata::event("cup_entry", serde_json::json!({ "category": c.category }));
                         if let Some(m) = &c.mine {
                             s.msg = Some((
                                 format!("{} entered the cup: rank {} of {}", m.troop_name, m.rank, c.entries),
@@ -1180,7 +1217,7 @@ impl Game {
                 ) {
                     let c = self.account.client();
                     s.msg = None;
-                    s.busy = Some(Busy::Find(Task::spawn(move || c.find_match_in(bracket).map_err(err))));
+                    s.busy = Some(Busy::Find(Task::spawn(move || find_in(&c, bracket))));
                 }
                 if !army.is_empty() {
                     let cat = format!("Brain category: {}. You only meet bases in it.", bracket_name(bracket));
@@ -1264,7 +1301,7 @@ impl Game {
                     false,
                 ) {
                     let c = self.account.client();
-                    s.busy = Some(Busy::Find(Task::spawn(move || c.find_match_in(bracket).map_err(err))));
+                    s.busy = Some(Busy::Find(Task::spawn(move || find_in(&c, bracket))));
                 }
             }
         }

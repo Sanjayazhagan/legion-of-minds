@@ -8,6 +8,7 @@
 //! - `league`: seasons (leagues come from trophies)
 //! - `clans`: clans, chat and troops lent to clanmates
 //! - `wars`: clan wars
+//! - `playdata`: anonymous play data from players who opted in
 //! - `liveops`: events, tuned rewards and gifts, as the game sees them
 //! - `admin`: the operator's admin page and API (needs ADMIN_KEY)
 
@@ -20,6 +21,7 @@ pub mod cup;
 pub mod error;
 pub mod league;
 pub mod liveops;
+pub mod playdata;
 pub mod players;
 pub mod ratelimit;
 pub mod shop;
@@ -127,6 +129,9 @@ pub fn router(st: AppState) -> Router {
         )
         .route("/v1/me/clan/war/targets/{id}", post(wars::attack))
         .route("/v1/war-attacks/{id}", post(wars::submit))
+        .route("/v1/play-data", post(playdata::upload))
+        .route("/v1/play-data/{install}", axum::routing::delete(playdata::forget))
+        .route("/v1/admin/play-data", get(playdata::summary))
         .merge(admin::routes())
         // Layers run bottom to top on the way in: the body is size-checked as
         // sent, rate-limited (a refused upload is drained while still
@@ -179,6 +184,7 @@ pub async fn cleanup(db: &PgPool, keep_raids: Duration) -> Result<(), sqlx::Erro
     .bind(keep_raids)
     .execute(db)
     .await?;
+    playdata::cleanup(db).await?;
     cup::pay_finished(db, bag_protocol::cup_week(chrono::Utc::now().timestamp())).await?;
     // Cup entries stay for last week's podium, then go (each holds a troop).
     sqlx::query("DELETE FROM cup_entries WHERE week < $1")

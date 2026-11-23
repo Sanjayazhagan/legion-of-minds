@@ -31,6 +31,8 @@ pub mod competition;
 pub use competition::*;
 pub mod liveops;
 pub use liveops::*;
+pub mod playdata;
+pub use playdata::*;
 
 pub const MAX_DEFENDERS: usize = 4;
 pub const MAX_ARMY: usize = 5;
