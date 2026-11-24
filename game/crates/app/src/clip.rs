@@ -463,7 +463,7 @@ impl ClipState {
                     if let Some(e) = l.ended {
                         let k = ((self.frame - e) as f32 / FPS as f32 * 4.0).min(1.0);
                         let (t, good) = l.result_title();
-                        stamp(r, t, good, l.battle.world().stars(), k);
+                        stamp(r, t, good, Some(l.battle.world().stars()), k);
                     }
                 }
             }
@@ -504,7 +504,7 @@ impl ClipState {
                     if let Some(e) = l.ended {
                         let k = ((self.frame - e) as f32 / FPS as f32 * 4.0).min(1.0);
                         let (t, good) = l.result_title();
-                        stamp(r, t, good, 0, k);
+                        stamp(r, t, good, None, k);
                     }
                 }
             }
@@ -634,10 +634,12 @@ fn result_card(map: Rect, title: &str, good: bool, stars: u32, defending: bool, 
 }
 
 /// A result stamp on one half of a reel.
-fn stamp(r: Rect, title: &str, good: bool, stars: u32, k: f32) {
+fn stamp(r: Rect, title: &str, good: bool, stars: Option<u32>, k: f32) {
     let cy = r.y + r.h * 0.55;
     draw_rectangle(r.x, cy - 46.0, r.w, 92.0, Color::new(0.03, 0.03, 0.06, 0.72 * k));
     ctext(title, r.x + r.w / 2.0, cy + 2.0, 40.0 * (1.0 + (1.0 - k) * 0.4), if good { ACCENT } else { BAD });
+    // Drills have no stars.
+    let Some(stars) = stars else { return };
     for s in 0..3 {
         star(r.x + r.w / 2.0 - 40.0 + s as f32 * 40.0, cy + 28.0, 13.0, s < stars as usize);
     }
