@@ -874,4 +874,6 @@ def main():
         bpy.ops.wm.save_as_mainfile(filepath=args[args.index("--blend") + 1])
 
 
-main()
+# hybrids.py imports the mesh helpers from here.
+if __name__ == "__main__":
+    main()

@@ -1412,6 +1412,36 @@ fn slot_of(piece: &str) -> Slot {
 /// A second part with at least this share lends the hybrid its body.
 const BODY_SHARE: f32 = 0.4;
 
+/// The hand-made piece a named hybrid wears (in the "Hybrids" model, made by
+/// tools/blender/hybrids.py), and the slot whose gear it replaces. Capes stay
+/// under a back piece.
+fn signature(a: godcore::classes::BaseClass, b: godcore::classes::BaseClass) -> Option<(&'static str, Option<Slot>)> {
+    use godcore::classes::BaseClass::*;
+    godcore::classes::hybrid_name(a, b)?;
+    let pair = |x, y| (a == x && b == y) || (a == y && b == x);
+    Some(if pair(Fighter, Healer) {
+        // A sun standard raised behind the head.
+        ("Sig_BattlePriest", Some(Slot::Back))
+    } else if pair(Archer, Healer) {
+        // A leaf mantle and spirit wisps.
+        ("Sig_SpiritRanger", Some(Slot::Chest))
+    } else if pair(Fighter, Archer) {
+        // Rune blades fanned on the back.
+        ("Sig_Spellblade", Some(Slot::Back))
+    } else if pair(Guard, Sentry) {
+        // A crenellated tower shield on the back.
+        ("Sig_Bastion", Some(Slot::Back))
+    } else if pair(Guard, Keeper) {
+        // A candle nimbus behind the head.
+        ("Sig_TempleKnight", None)
+    } else if pair(Sentry, Keeper) {
+        // A floating eye in brass rings over the shoulder.
+        ("Sig_Oracle", None)
+    } else {
+        return None;
+    })
+}
+
 /// What one character wears, holds and plays, put together from parts.
 ///
 /// Pure classes wear their own loadout. A hybrid mixes its two biggest
@@ -1469,6 +1499,20 @@ fn dress(fig: &Figure, npc_guard: bool) -> Dress {
             d.body = sec;
             d.body_from_second = true;
             lo.model = other.model;
+            // A named hybrid (an even pair such as the Battle Priest) also
+            // wears its own hand-made piece, in place of whatever filled
+            // that spot.
+            if let Some((piece, replaces)) = signature(fig.main, sec) {
+                match replaces {
+                    Some(Slot::Back) => {
+                        d.pieces.retain(|p| slot_of(p.1) != Slot::Back || p.1.ends_with("_Cape"));
+                        d.back_taken = true;
+                    }
+                    Some(slot) => d.pieces.retain(|p| slot_of(p.1) != slot),
+                    None => {}
+                }
+                d.pieces.push(("Hybrids", piece, false));
+            }
         }
     }
     if let Some(w) = fig.weapon.filter(|_| !npc_guard && !fig.raider) {
@@ -2542,6 +2586,39 @@ mod tests {
     }
 
     #[test]
+    fn named_hybrids_wear_their_signature_piece() {
+        use godcore::classes::{hybrid_name, BaseClass, BaseClass::*, ClassSpec};
+        let all: Vec<BaseClass> = BaseClass::ALL.into_iter().chain(BaseClass::DEFENDERS).collect();
+        let mut seen = Vec::new();
+        for &a in &all {
+            for &b in &all {
+                let named = a != b && hybrid_name(a, b).is_some();
+                assert_eq!(signature(a, b).is_some(), named, "{a:?}+{b:?}");
+                if !named {
+                    continue;
+                }
+                let d = dress(&Figure::of(&ClassSpec::blend(&[(a, 50.0), (b, 50.0)])), false);
+                let sig: Vec<_> = d.pieces.iter().filter(|p| p.0 == "Hybrids").collect();
+                assert_eq!(sig.len(), 1, "{a:?}+{b:?}");
+                seen.push(sig[0].1);
+            }
+        }
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 6);
+        // A back piece takes the quiver's place and nothing is slung over it,
+        // but the cape stays under it.
+        let d = dress(&Figure::of(&ClassSpec::blend(&[(Fighter, 50.0), (Archer, 50.0)])), false);
+        assert!(d.pieces.iter().any(|p| p.1 == "Sig_Spellblade"));
+        assert!(!d.pieces.iter().any(|p| p.1 == "Archer_Quiver"));
+        assert!(d.pieces.iter().any(|p| p.1 == "Rogue_Cape"));
+        assert!(d.back_taken);
+        // An uneven mix of the same pair is not the named hybrid's look.
+        let d = dress(&Figure::of(&ClassSpec::blend(&[(Fighter, 80.0), (Archer, 20.0)])), false);
+        assert!(!d.pieces.iter().any(|p| p.0 == "Hybrids"));
+    }
+
+    #[test]
     fn every_piece_has_a_slot() {
         use godcore::classes::BaseClass;
         let heads = ["Barbarian_Hat", "Fighter_Horns", "Knight_Helmet", "Guard_Plume", "Mage_Hat", "Warlock_Horns", "Sentry_Goggles", "Archer_Feather", "Assassin_Mask"];
@@ -2607,6 +2684,8 @@ pub fn draw_hybrid_gallery() {
     use godcore::classes::{BaseClass::*, ClassSpec};
     let Some(lib) = library() else { return };
     let special = std::env::var("BAG_HYBRID_POSE").as_deref() == Ok("special");
+    // BAG_HYBRID_TURN (radians) turns them, e.g. 3.1 to see their backs.
+    let turn: f32 = std::env::var("BAG_HYBRID_TURN").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0);
     let mixes: [(godcore::classes::BaseClass, f32, godcore::classes::BaseClass, f32); 8] = [
         (Fighter, 50.0, Healer, 50.0),
         (Archer, 50.0, Healer, 50.0),
@@ -2614,7 +2693,7 @@ pub fn draw_hybrid_gallery() {
         (Guard, 50.0, Keeper, 50.0),
         (Sentry, 50.0, Keeper, 50.0),
         (Paladin, 50.0, Warlock, 50.0),
-        (Mage, 60.0, Assassin, 40.0),
+        (Guard, 50.0, Sentry, 50.0),
         (Hunter, 70.0, Mage, 30.0),
     ];
     let t = crate::record::now() as f32;
@@ -2635,7 +2714,7 @@ pub fn draw_hybrid_gallery() {
             } else {
                 CharPose::new(0, t)
             };
-            draw_character(&lib, &Figure::of(&spec), false, Vec3::ZERO, -0.25, pose, 1.0);
+            draw_character(&lib, &Figure::of(&spec), false, Vec3::ZERO, -0.25 + turn, pose, 1.0);
             end_3d();
             if spec.is_hybrid() {
                 labels.push((spec.name.clone(), c.x, y0 + 176.0, 17.0));

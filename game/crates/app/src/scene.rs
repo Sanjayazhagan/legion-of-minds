@@ -640,6 +640,9 @@ const FILES: &[(&str, &str)] = &[
     ("Mage", "troops/Mage.glb"),
     ("Rogue", "troops/Rogue.glb"),
     ("Rogue_Hooded", "troops/Rogue_Hooded.glb"),
+    // The named hybrids' signature pieces, on the bare troop skeleton
+    // (tools/blender/hybrids.py).
+    ("Hybrids", "troops/Hybrids.glb"),
     ("Skeleton_Minion", "skeletons/Skeleton_Minion.glb"),
     ("Skeleton_Warrior", "skeletons/Skeleton_Warrior.glb"),
     ("axe", "adventurers/axe_1handed.gltf"),
