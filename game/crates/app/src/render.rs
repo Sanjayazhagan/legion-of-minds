@@ -1084,6 +1084,7 @@ fn draw_sight(w: &World) {
 // ------------------------------------------------------------- Characters
 
 /// What a character model wears and how it moves.
+#[derive(Clone, Copy)]
 struct Loadout {
     model: &'static str,
     /// Accessory meshes in the model to show (skinned body parts always show).
@@ -1289,13 +1290,13 @@ fn back_prop(c: godcore::classes::BaseClass) -> Option<&'static str> {
 /// Drawing only: the sim's sizes and ranges are untouched.
 const CHAR_SCALE: f32 = 1.15;
 
-/// Body build per class: heavies a bit broader, sneaks a bit slighter.
-fn build_of(fig: &Figure) -> Vec3 {
+/// Body build per class (of whichever parent lends a hybrid its body): heavies a bit broader, sneaks a bit slighter.
+fn build_of(fig: &Figure, body: godcore::classes::BaseClass) -> Vec3 {
     use godcore::classes::BaseClass::*;
     if fig.raider {
         return Vec3::ONE;
     }
-    match fig.main {
+    match body {
         Fighter | Hunter => vec3(1.1, 1.04, 1.1),
         Guard | Paladin => vec3(1.08, 1.06, 1.08),
         Assassin => vec3(0.94, 0.97, 0.94),
@@ -1384,20 +1385,113 @@ fn tint_of(fig: &Figure) -> Color {
     Color::new(0.15 + 0.85 * c.r, 0.15 + 0.85 * c.g, 0.15 + 0.85 * c.b, 1.0)
 }
 
-/// What this character wears, holds and plays.
-fn gear(fig: &Figure, npc_guard: bool) -> (Loadout, Vec<&'static str>) {
-    let mut lo = if npc_guard { NPC_GUARD } else { loadout(fig.main, fig.raider) };
-    let mut show: Vec<&'static str> = lo.show.to_vec();
+/// Where a piece of gear sits on the body. A hybrid fills each slot from
+/// one of its parents.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Slot {
+    Hands,
+    Head,
+    Shoulders,
+    Back,
+    Chest,
+    Waist,
+}
+
+fn slot_of(piece: &str) -> Slot {
+    match piece {
+        p if WEAPON_MESHES.contains(&p) => Slot::Hands,
+        p if p.contains("Pauldron") => Slot::Shoulders,
+        p if p.ends_with("_Cape") => Slot::Back,
+        "Paladin_Wings" | "Archer_Quiver" | "Hunter_Pelt" | "Mage_Orbs" => Slot::Back,
+        "Healer_Charm" | "Keeper_Collar" | "Warlock_Collar" | "Hunter_Necklace" => Slot::Chest,
+        "Fighter_Belt" | "Keeper_Lantern" | "Assassin_Sash" => Slot::Waist,
+        _ => Slot::Head,
+    }
+}
+
+/// A second part with at least this share lends the hybrid its body.
+const BODY_SHARE: f32 = 0.4;
+
+/// What one character wears, holds and plays, put together from parts.
+///
+/// Pure classes wear their own loadout. A hybrid mixes its two biggest
+/// parents slot by slot: its hands (weapon, swings and special move) and
+/// head always come from the leading class, because the battle rules give a
+/// hybrid its leader's weapon and skill. The body comes from the second
+/// class when it has a real share (`BODY_SHARE`), and the back, chest and
+/// waist gear come from the second class wherever it has any.
+struct Dress {
+    /// Hands and moves; `model` is the body's model.
+    lo: Loadout,
+    /// The class whose body (and build) this is.
+    body: godcore::classes::BaseClass,
+    body_from_second: bool,
+    /// Each piece worn: (model it comes from, mesh name, from the second parent).
+    pieces: Vec<(&'static str, &'static str, bool)>,
+    /// The back already holds wings, a quiver, orbs or a pelt (from the
+    /// second parent, or a Paladin leader's own wings), so there is no room
+    /// to sling the second class's weapon there.
+    back_taken: bool,
+}
+
+fn dress(fig: &Figure, npc_guard: bool) -> Dress {
+    let lead = if npc_guard { NPC_GUARD } else { loadout(fig.main, fig.raider) };
+    let mut lo = lead;
+    let mine = |l: &Loadout, from2: bool| -> Vec<(&'static str, &'static str, bool)> {
+        l.show.iter().map(|&n| (l.model, n, from2)).collect()
+    };
+    let mut d = Dress { lo, body: fig.main, body_from_second: false, pieces: mine(&lead, false), back_taken: false };
+    if let (Some(sec), false, false) = (fig.second, npc_guard, fig.raider) {
+        let other = loadout(sec, false);
+        let theirs = mine(&other, true);
+        let mut pieces: Vec<_> =
+            d.pieces.iter().copied().filter(|p| matches!(slot_of(p.1), Slot::Hands | Slot::Head | Slot::Shoulders)).collect();
+        for slot in [Slot::Back, Slot::Chest, Slot::Waist] {
+            let from2: Vec<_> = theirs.iter().copied().filter(|p| slot_of(p.1) == slot).collect();
+            if from2.is_empty() {
+                pieces.extend(d.pieces.iter().copied().filter(|p| slot_of(p.1) == slot));
+            } else {
+                let real_back = slot == Slot::Back && from2.iter().any(|p| !p.1.ends_with("_Cape"));
+                d.back_taken |= real_back;
+                // A Paladin leader keeps its wings over the second class's
+                // cape; they only give way to a real back item (quiver, orbs,
+                // pelt, wings) so the two never overlap.
+                if slot == Slot::Back && !real_back {
+                    let wings: Vec<_> = d.pieces.iter().copied().filter(|p| p.1 == "Paladin_Wings").collect();
+                    d.back_taken |= !wings.is_empty();
+                    pieces.extend(wings);
+                }
+                pieces.extend(from2);
+            }
+        }
+        d.pieces = pieces;
+        if fig.second_share >= BODY_SHARE - 1e-3 {
+            d.body = sec;
+            d.body_from_second = true;
+            lo.model = other.model;
+        }
+    }
     if let Some(w) = fig.weapon.filter(|_| !npc_guard && !fig.raider) {
-        show.retain(|n| !WEAPON_MESHES.contains(n));
+        d.pieces.retain(|p| slot_of(p.1) != Slot::Hands);
         (lo.props, lo.idle, lo.attack) = weapon_gear(w);
     }
-    (lo, show)
+    d.lo = lo;
+    d
+}
+
+/// A class colour leaning toward one parent's own colour, so a hybrid's
+/// pieces show where they came from while the whole still reads as a blend.
+fn lean(fig: &Figure, c: Option<godcore::classes::BaseClass>) -> Color {
+    let Some(c) = c.filter(|_| fig.second.is_some()) else { return fig.outfit };
+    let own = c.spec().color;
+    let k = 0.5;
+    let o = fig.outfit;
+    Color::new(o.r + (own[0] - o.r) * k, o.g + (own[1] - o.g) * k, o.b + (own[2] - o.b) * k, 1.0)
 }
 
 /// Seconds one attack swing of this character takes on screen.
 fn swing_len(lib: &Library, fig: &Figure, npc_guard: bool) -> f32 {
-    let (lo, _) = gear(fig, npc_guard);
+    let lo = dress(fig, npc_guard).lo;
     lib.models.get(lo.model).and_then(|m| m.clip_len(lo.attack)).unwrap_or(1.0).max(0.3) / ATTACK_RATE
 }
 
@@ -1418,7 +1512,8 @@ fn draw_character_ex(
     extra: Extra,
     blend: Option<&mut Blend>,
 ) -> bool {
-    let (lo, show) = gear(fig, npc_guard);
+    let d = dress(fig, npc_guard);
+    let lo = d.lo;
     let Some(m) = lib.models.get(lo.model) else { return false };
     let skeleton = npc_guard || fig.raider;
     let pick = |names: &[&'static str]| names[pose.seed % names.len()];
@@ -1479,41 +1574,82 @@ fn draw_character_ex(
         }
         None => m.pose(Some(clip), now_clip.1, looped),
     };
-    let build = if npc_guard { Vec3::ONE } else { build_of(fig) };
+    let build = if npc_guard { Vec3::ONE } else { build_of(fig, d.body) };
     let world = Mat4::from_scale_rotation_translation(build * scale, Quat::from_rotation_y(heading), pos);
     let hurt = |c: Color| {
         let h = extra.hurt;
         Color::new(c.r, c.g * (1.0 - 0.55 * h), c.b * (1.0 - 0.6 * h), c.a)
     };
     let plain = !npc_guard && !fig.raider;
-    let class_col = tint_of(fig);
+    // Each piece is painted in a colour leaning toward the parent it came from.
+    let lead_col = tint_of(&Figure { outfit: lean(fig, Some(fig.main)), ..*fig });
+    let sec_col = tint_of(&Figure { outfit: lean(fig, fig.second), ..*fig });
+    let body_col = if d.body_from_second { sec_col } else { lead_col };
     // Skeletons' pale bone is toned down a little so it doesn't glare.
     let body = if plain { WHITE } else { Color::new(0.84, 0.8, 0.78, 1.0) };
     let paint = |n: &str| {
         let k = if plain { class_paint(n) } else { 0.0 };
         if k > 0.0 {
-            (hurt(class_col), k)
+            let col = match d.pieces.iter().find(|p| p.1 == n) {
+                Some(p) if p.2 => sec_col,
+                Some(_) => lead_col,
+                None => body_col,
+            };
+            (hurt(col), k)
         } else {
             (hurt(body), 0.0)
         }
     };
+    // Pieces the body's own model has are drawn with it; the rest are worn
+    // from the model they belong to, on this body's bones.
+    let own: Vec<&str> = d.pieces.iter().filter(|p| p.0 == lo.model || m.is_rigid_mesh(p.1)).map(|p| p.1).collect();
     crate::scene::toon_style(toon_for(extra.hostile), || {
-        m.draw_ex(world, &g, &|n| !is_accessory(m, n) || show.contains(&n), &paint);
+        m.draw_ex(world, &g, &|n| !is_accessory(m, n) || own.contains(&n), &paint);
+        let mut donors: Vec<&'static str> = d.pieces.iter().filter(|p| !own.contains(&p.1)).map(|p| p.0).collect();
+        donors.dedup();
+        for donor in donors {
+            let Some(dm) = lib.models.get(donor) else { continue };
+            let worn: Vec<&str> = d.pieces.iter().filter(|p| p.0 == donor && !own.contains(&p.1)).map(|p| p.1).collect();
+            let dg = dm.worn_by(m, &g);
+            dm.draw_ex(world, &dg, &|n| worn.contains(&n), &paint);
+        }
         for &(prop, bone) in lo.props {
             attach(lib, m, &g, world, prop, bone, Mat4::IDENTITY);
         }
-        draw_blend_gear(lib, m, &g, world, fig, npc_guard);
+        draw_blend_gear(lib, m, &g, world, fig, npc_guard, d.back_taken);
     });
+    if plain && pose.clip_kind == 6 && fig.second.is_some() {
+        // A hybrid's special move flares in its second class's colour.
+        let own = fig.second.map_or([1.0; 3], |c| c.spec().color);
+        flourish(world, pose.t, Color::new(own[0], own[1], own[2], 1.0));
+    }
     true
 }
 
+/// The ring of light a hybrid's special move throws out, `t` seconds in.
+fn flourish(world: Mat4, t: f32, col: Color) {
+    let k = (t / 0.9).clamp(0.0, 1.0);
+    if k >= 1.0 {
+        return;
+    }
+    let fade = (1.0 - k) * (1.0 - k);
+    let c = [(col.r * 255.0) as u8, (col.g * 255.0) as u8, (col.b * 255.0) as u8, (fade * 230.0) as u8];
+    // One ring sweeping out along the ground, one rising around the body.
+    ring(world * Mat4::from_translation(vec3(0.0, 0.08, 0.0)), 0.35 + 1.1 * k, 0.07 * (1.0 - 0.5 * k), c);
+    ring(world * Mat4::from_translation(vec3(0.0, 0.3 + 1.3 * k, 0.0)), 0.55 - 0.15 * k, 0.05, c);
+}
+
 /// Blend parts beyond the first show as gear on the character.
-fn draw_blend_gear(lib: &Library, m: &Model, g: &[Mat4], world: Mat4, fig: &Figure, npc_guard: bool) {
+fn draw_blend_gear(lib: &Library, m: &Model, g: &[Mat4], world: Mat4, fig: &Figure, npc_guard: bool, back_taken: bool) {
     if !npc_guard && !fig.raider {
         // Blend parts beyond the first show as gear: the second slung across the
         // back over the right shoulder, the third over the left.
         for (slot, part) in [fig.second, fig.third].into_iter().enumerate() {
             let Some(part) = part else { continue };
+            // The second class's wings, quiver or orbs already fill its back.
+            if slot == 0 && back_taken && part != godcore::classes::BaseClass::Healer {
+                continue;
+            }
             if let Some(p) = back_prop(part) {
                 let side = if slot == 0 { 1.0 } else { -1.0 };
                 let off = Mat4::from_scale_rotation_translation(
@@ -1543,8 +1679,12 @@ fn attach(lib: &Library, m: &Model, g: &[Mat4], world: Mat4, prop: &str, bone: &
 }
 
 fn halo(at: Mat4) {
+    ring(at, 0.32, 0.06, [255, 222, 90, 255]);
+}
+
+/// A flat glowing ring of radius `r` and half-width `w`, unlit.
+fn ring(at: Mat4, r: f32, w: f32, color: [u8; 4]) {
     let n = 20;
-    let (r, w) = (0.32, 0.06);
     let mut vs = Vec::new();
     let mut ix = Vec::new();
     for k in 0..=n {
@@ -1552,7 +1692,7 @@ fn halo(at: Mat4) {
         let (c, s) = (a.cos(), a.sin());
         for (rr, hh) in [(r - w, 0.0), (r + w, 0.0), (r, w * 0.8)] {
             let p = at.transform_point3(vec3(c * rr, hh, s * rr));
-            vs.push(Vertex { position: p, uv: Vec2::ZERO, color: [255, 222, 90, 255], normal: Vec4::ZERO });
+            vs.push(Vertex { position: p, uv: Vec2::ZERO, color, normal: Vec4::ZERO });
         }
         if k < n {
             let b = (k * 3) as u16;
@@ -1876,7 +2016,7 @@ fn draw_world_inner(v: View, w: &World, fx: &Effects, look: &dyn Fn(usize, &Unit
         let rising = (fig.raider || npc)
             && u.team == Team::Attack
             && ((now - a.born) as f32) < SPAWN_LEN / SPAWN_SPEED
-            && lib.models.get(gear(&fig, npc).0.model).is_some_and(|m| m.clip_len("Spawn_Ground_Skeletons").is_some());
+            && lib.models.get(dress(&fig, npc).lo.model).is_some_and(|m| m.clip_len("Spawn_Ground_Skeletons").is_some());
         // Once the battle is over the winners celebrate.
         let cheering = match w.outcome() {
             Outcome::Victory if u.team == Team::Attack => Some(t),
@@ -2364,6 +2504,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hybrids_mix_their_parents_gear() {
+        use godcore::classes::{BaseClass::*, ClassSpec};
+        // Pure classes wear exactly their own loadout.
+        for c in godcore::classes::BaseClass::ALL.into_iter().chain(godcore::classes::BaseClass::DEFENDERS) {
+            let d = dress(&Figure::of(&c.spec()), false);
+            let lo = loadout(c, false);
+            assert_eq!(d.lo.model, lo.model);
+            assert_eq!(d.pieces.iter().map(|p| p.1).collect::<Vec<_>>(), lo.show.to_vec());
+        }
+        // Battle Priest: Healer body, Fighter's axe, helmet and swing.
+        let d = dress(&Figure::of(&ClassSpec::blend(&[(Fighter, 50.0), (Healer, 50.0)])), false);
+        assert_eq!(d.lo.model, "Mage");
+        assert_eq!(d.lo.attack, loadout(Fighter, false).attack);
+        assert!(d.pieces.contains(&("Barbarian", "2H_Axe", false)));
+        assert!(d.pieces.contains(&("Barbarian", "Barbarian_Hat", false)));
+        assert!(d.pieces.contains(&("Mage", "Healer_Charm", true)));
+        assert!(!d.pieces.iter().any(|p| p.1 == "2H_Staff" || p.1 == "Mage_Hat"));
+        // A small second share keeps the leader's body but still lends gear.
+        let d = dress(&Figure::of(&ClassSpec::blend(&[(Hunter, 70.0), (Mage, 30.0)])), false);
+        assert_eq!(d.lo.model, "Barbarian");
+        assert!(d.pieces.contains(&("Mage", "Mage_Orbs", true)));
+        assert!(d.back_taken);
+        // A Paladin leader keeps its wings when the second class only has a
+        // cape, and nothing is slung over them...
+        let d = dress(&Figure::of(&ClassSpec::blend(&[(Paladin, 60.0), (Healer, 40.0)])), false);
+        assert!(d.pieces.contains(&("Knight", "Paladin_Wings", false)));
+        assert!(d.pieces.contains(&("Mage", "Mage_Cape", true)));
+        assert!(!d.pieces.iter().any(|p| p.1 == "Knight_Cape"));
+        assert!(d.back_taken);
+        // ...but drops them for a real back item, so the two never overlap.
+        for sec in [Archer, Mage, Hunter] {
+            let d = dress(&Figure::of(&ClassSpec::blend(&[(Paladin, 60.0), (sec, 40.0)])), false);
+            assert!(!d.pieces.iter().any(|p| p.1 == "Paladin_Wings"), "{sec:?}");
+            assert!(d.back_taken);
+        }
+    }
+
+    #[test]
+    fn every_piece_has_a_slot() {
+        use godcore::classes::BaseClass;
+        let heads = ["Barbarian_Hat", "Fighter_Horns", "Knight_Helmet", "Guard_Plume", "Mage_Hat", "Warlock_Horns", "Sentry_Goggles", "Archer_Feather", "Assassin_Mask"];
+        for c in BaseClass::ALL.into_iter().chain(BaseClass::DEFENDERS) {
+            for p in loadout(c, false).show {
+                assert!(slot_of(p) != Slot::Head || heads.contains(p), "{p} falls into the head slot");
+            }
+        }
+    }
+
+    #[test]
     fn clicks_map_back_to_the_ground_point() {
         let v = View::new(Rect::new(20.0, 66.0, 714.0, 714.0));
         for &(x, y) in &[(16.0, 16.0), (4.0, 4.0), (25.0, 9.0), (10.0, 28.0)] {
@@ -2409,5 +2598,57 @@ pub fn draw_gallery() {
         } else {
             text_centered(name, c.x, c.y + 98.0, 17.0, TEXT);
         }
+    }
+}
+
+/// Test hook: hybrids next to the two classes they are made from. With
+/// BAG_HYBRID_POSE=special they are caught mid special move.
+pub fn draw_hybrid_gallery() {
+    use godcore::classes::{BaseClass::*, ClassSpec};
+    let Some(lib) = library() else { return };
+    let special = std::env::var("BAG_HYBRID_POSE").as_deref() == Ok("special");
+    let mixes: [(godcore::classes::BaseClass, f32, godcore::classes::BaseClass, f32); 8] = [
+        (Fighter, 50.0, Healer, 50.0),
+        (Archer, 50.0, Healer, 50.0),
+        (Fighter, 50.0, Archer, 50.0),
+        (Guard, 50.0, Keeper, 50.0),
+        (Sentry, 50.0, Keeper, 50.0),
+        (Paladin, 50.0, Warlock, 50.0),
+        (Mage, 60.0, Assassin, 40.0),
+        (Hunter, 70.0, Mage, 30.0),
+    ];
+    let t = crate::record::now() as f32;
+    let mut labels: Vec<(String, f32, f32, f32)> = Vec::new();
+    for (k, (a, wa, b, wb)) in mixes.into_iter().enumerate() {
+        let x0 = 20.0 + (k % 2) as f32 * 630.0;
+        let y0 = 8.0 + (k / 2) as f32 * 197.0;
+        let s = ClassSpec::blend(&[(a, wa), (b, wb)]);
+        let cells = [(a.spec(), 62.0, 70.0), (s.clone(), 86.0, 300.0), (b.spec(), 62.0, 530.0)];
+        for (spec, r, cx) in cells {
+            let c = vec2(x0 + cx, y0 + 92.0);
+            draw_circle(c.x, c.y, r, Color::new(0.2, 0.22, 0.3, 1.0));
+            let rect = Rect::new(c.x - r, c.y - r, r * 2.0, r * 2.0);
+            let cam = Camera3D { position: vec3(1.4, 1.9, 4.0), target: vec3(0.0, 1.1, 0.0), up: Vec3::Y, fovy: 0.72, ..Default::default() };
+            begin_3d(rect, cam, true);
+            let pose = if special {
+                CharPose { clip_kind: 6, t: 0.35, skill: Some(spec.weapon().stats().skill), seed: 0 }
+            } else {
+                CharPose::new(0, t)
+            };
+            draw_character(&lib, &Figure::of(&spec), false, Vec3::ZERO, -0.25, pose, 1.0);
+            end_3d();
+            if spec.is_hybrid() {
+                labels.push((spec.name.clone(), c.x, y0 + 176.0, 17.0));
+                labels.push((spec.mix_label(), c.x, y0 + 192.0, 14.0));
+            } else {
+                labels.push((spec.name.clone(), c.x, y0 + 176.0, 15.0));
+            }
+        }
+        labels.push(("+".into(), x0 + 160.0, y0 + 98.0, 26.0));
+        labels.push(("+".into(), x0 + 440.0, y0 + 98.0, 26.0));
+    }
+    // Text last, so no 3D view paints over it.
+    for (s, x, y, size) in labels {
+        text_centered(&s, x, y, size, TEXT);
     }
 }

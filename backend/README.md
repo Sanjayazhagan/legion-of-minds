@@ -129,6 +129,7 @@ All bodies are JSON. Publishing, matchmaking and raids need the header `x-sim-ve
 | `GET /v1/auth/{provider}/callback` | | Where the provider sends the browser back |
 | `POST /v1/auth/logout` | ✓ | End this session |
 | `GET /v1/me`, `PATCH /v1/me` `{display_name}` | ✓ | Profile: trophies, online gold, published Town Hall, shield, and `upgrades` (online Town Hall, weapons, troop levels) |
+| `DELETE /v1/me` | ✓ | Delete the account and everything the server keeps about it (leaves the clan first, drops its clan chat). 204 |
 | `POST /v1/me/town-hall` | ✓ | Buy the next Town Hall level with online gold → profile |
 | `POST /v1/me/weapons` `{weapon}` | ✓ | Unlock a weapon online → profile |
 | `POST /v1/me/troops/{troop_id}/level` `{from}` | ✓ | Level a troop up online from `from` (its online level now, so a repeat doesn't pay twice) → profile |

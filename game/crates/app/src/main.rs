@@ -14,6 +14,7 @@ mod battle_screen;
 mod clip;
 mod clan;
 mod home;
+mod legal;
 mod mind_view;
 mod online;
 mod recruit;
@@ -90,6 +91,14 @@ pub struct Game {
     pub team_news: Option<teamtrain::TeamNews>,
     /// Training to resume once the startup PC speed test finishes.
     pub resume_after_pc_check: bool,
+    /// The Terms and Privacy page, while it is showing.
+    pub legal: Option<legal::LegalView>,
+    /// Settings asked to delete the online account (waiting for "Yes").
+    pub confirm_delete_account: bool,
+    /// The account deletion, while the server works on it.
+    pub deleting_account: Option<online::Task<()>>,
+    /// Leave the game (the player chose Quit instead of agreeing).
+    pub quit: bool,
 }
 
 impl Game {
@@ -339,6 +348,10 @@ async fn main() {
         train_news: Default::default(),
         team_news: None,
         resume_after_pc_check: false,
+        legal: None,
+        confirm_delete_account: false,
+        deleting_account: None,
+        quit: false,
     };
     game.settings = settings::Settings::load(&game.store.home);
     game.settings.apply();
@@ -348,6 +361,11 @@ async fn main() {
     let scripted = ["BAG_SCREEN", "BAG_RECORD", "BAG_SCREENSHOT", "BAG_CLIP_OUT"].iter().any(|v| std::env::var_os(v).is_some());
     if !game.settings.pc.as_ref().is_some_and(|p| p.fresh()) && !scripted {
         pc_check::start();
+    }
+    // First launch, or the Terms or Privacy Policy changed: the player reads
+    // and agrees before anything else.
+    if (game.terms_needed() && !scripted) || std::env::var("BAG_SCREEN").as_deref() == Ok("legal") {
+        game.legal = Some(legal::LegalView::new(true));
     }
     #[cfg(feature = "cheats")]
     if game.settings.test_mode {
@@ -395,8 +413,13 @@ async fn main() {
     prevent_quit();
     loop {
         game.ui.begin();
-        if std::env::var("BAG_SCREEN").as_deref() == Ok("gallery") {
-            render::draw_gallery();
+        let gallery = std::env::var("BAG_SCREEN");
+        if matches!(gallery.as_deref(), Ok("gallery") | Ok("hybrids")) {
+            if gallery.as_deref() == Ok("hybrids") {
+                render::draw_hybrid_gallery();
+            } else {
+                render::draw_gallery();
+            }
             frame += 1;
             if let Some(p) = &autoshot {
                 if frame == shot_frame {
@@ -411,7 +434,9 @@ async fn main() {
             game.profile.gold = save::TEST_GOLD;
         }
         let click = game.tour_input(&screen);
-        if game.settings_open {
+        if game.legal.is_some() {
+            game.legal_screen();
+        } else if game.settings_open {
             game.settings_screen();
         } else {
             if std::mem::take(&mut game.go_barracks) {
@@ -455,13 +480,14 @@ async fn main() {
             }
         }
         game.poll_pc_check();
+        game.poll_account_deletion();
         game.tick_training();
         game.tour_frame(&screen, click);
         if let Some(n) = save::take_notice() {
             game.toast = Some((n, 6.0));
         }
         game.draw_toast();
-        if is_quit_requested() {
+        if is_quit_requested() || game.quit {
             // Keep running training sessions' progress (they carry on next
             // time), then everything else.
             game.pause_all_training();

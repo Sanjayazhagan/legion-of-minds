@@ -23,11 +23,13 @@ pub struct Settings {
     pub test_mode: bool,
     /// The last PC speed test: how big a brain this computer can train.
     pub pc: Option<crate::pc_check::PcResult>,
+    /// The version of the Terms and Privacy Policy the player agreed to.
+    pub accepted_terms: Option<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { volume: 0.8, muted: false, shake: true, sight: false, test_mode: false, pc: None }
+        Settings { volume: 0.8, muted: false, shake: true, sight: false, test_mode: false, pc: None, accepted_terms: None }
     }
 }
 
@@ -146,12 +148,38 @@ impl Game {
                 text(&format!("Signed in as {}", u.display_name), x, y, 20.0, TEXT);
                 y += 26.0;
                 text(&format!("Trophies {}   Server: {}", u.trophies, self.account.server), x, y, 16.0, MUTED);
-                y += 50.0;
-                if self.ui.button(Rect::new(x, y, 200.0, 40.0), "Sign out") {
-                    self.sign_out();
+                y += 24.0;
+                let busy = self.deleting_account.is_some();
+                if self.confirm_delete_account || busy {
+                    crate::recruit::wrap(
+                        "Delete your online account? Your bases, raids, cup entries, clan place and chat go from the server for good. Troops on this computer stay.",
+                        x,
+                        y + 16.0,
+                        a.w - 48.0,
+                        15.0,
+                        BAD,
+                    );
+                    y += 62.0;
+                    let label = if busy { "Deleting..." } else { "Yes, delete it" };
+                    if self.ui.button_ex(Rect::new(x, y, 200.0, 40.0), label, !busy, false) {
+                        let mut c = self.account.client();
+                        self.deleting_account = Some(crate::online::Task::spawn(move || c.delete_account().map_err(|e| e.to_string())));
+                    }
+                    if self.ui.button_ex(Rect::new(x + 216.0, y, 140.0, 40.0), "Cancel", !busy, false) {
+                        self.confirm_delete_account = false;
+                    }
+                } else {
+                    y += 26.0;
+                    if self.ui.button(Rect::new(x, y, 200.0, 40.0), "Sign out") {
+                        self.sign_out();
+                    }
+                    if self.ui.button(Rect::new(x + 216.0, y, 250.0, 40.0), "Delete online account") {
+                        self.confirm_delete_account = true;
+                    }
                 }
             }
             None => {
+                self.confirm_delete_account = false;
                 text("Playing offline", x, y, 20.0, TEXT);
                 y += 26.0;
                 crate::recruit::wrap(
@@ -162,12 +190,15 @@ impl Game {
                     16.0,
                     MUTED,
                 );
-                y += 76.0;
+                y += 60.0;
                 if self.ui.button(Rect::new(x, y, 200.0, 40.0), "Sign in") {
                     self.settings_open = false;
                     self.open_sign_in = true;
                 }
             }
+        }
+        if self.ui.button(Rect::new(a.x + a.w - 224.0, a.y + 16.0, 200.0, 36.0), "Terms and privacy") {
+            self.legal = Some(crate::legal::LegalView::new(false));
         }
 
         // ---- Graphics, training and saves
@@ -226,6 +257,22 @@ impl Game {
         if changed {
             self.settings.apply();
             self.settings.save(&self.store.home);
+        }
+    }
+
+    /// Finish an account deletion once the server answers.
+    pub fn poll_account_deletion(&mut self) {
+        let Some(r) = self.deleting_account.as_ref().and_then(|t| t.poll()) else { return };
+        self.deleting_account = None;
+        self.confirm_delete_account = false;
+        match r {
+            Ok(()) => {
+                self.account.token = None;
+                self.account.user = None;
+                self.account.save(&self.store.home);
+                self.toast("Your online account is deleted. Your troops on this computer are still here.");
+            }
+            Err(e) => self.toast(format!("Couldn't delete the account: {e}")),
         }
     }
 

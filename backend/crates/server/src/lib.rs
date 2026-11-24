@@ -86,7 +86,7 @@ pub fn router(st: AppState) -> Router {
         .route("/v1/auth/logins/{id}/poll", post(auth::login_poll))
         .route("/v1/auth/{provider}/callback", get(auth::callback))
         .route("/v1/auth/logout", post(auth::logout))
-        .route("/v1/me", get(players::me).patch(players::rename))
+        .route("/v1/me", get(players::me).patch(players::rename).delete(players::delete_me))
         .route(
             "/v1/me/base",
             put(players::publish_base).get(players::my_base),
