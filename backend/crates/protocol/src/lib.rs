@@ -613,6 +613,9 @@ pub fn canonical_troop(t: &Troop, role: Role, max_level: u32) -> Result<Troop, I
         rest: Default::default(),
         // Learned signal meanings are only for the player's own screens.
         signals: Vec::new(),
+        // Learning moments are only for the player's own screens.
+        moments: Vec::new(),
+        lessons: Default::default(),
     };
     // Move practice comes from the troop's own practice record, never from
     // the client's copy in the spec.

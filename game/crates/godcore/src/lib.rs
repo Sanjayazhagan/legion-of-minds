@@ -14,6 +14,7 @@ pub mod classes;
 pub mod env;
 pub mod human_moves;
 pub mod mind;
+pub mod moments;
 pub mod moves;
 pub mod nn;
 pub mod ppo;

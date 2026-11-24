@@ -1,5 +1,6 @@
-//! Shareable videos made in one click: a battle clip, or a "before vs after
-//! training" reel of one troop.
+//! Shareable videos made in one click: a battle clip, a "before vs after
+//! training" reel of one troop, or one of its learning moments (the same
+//! test drill played by its brain before and after it learned something).
 //!
 //! Battles are deterministic, so a clip never records the screen: it rebuilds
 //! the battle from scratch and plays it again into an off-screen picture at a
@@ -15,6 +16,8 @@ use crate::ui::*;
 use crate::video::{Frame, VideoWriter, FPS};
 use crate::{Game, Screen};
 use godcore::battle::Battle;
+use godcore::moments::{Moment, Run};
+use godcore::nn::Mlp;
 use godcore::classes::Role;
 use godcore::scenario::{BASES, DEPLOY_RADIUS};
 use godcore::sim::{Outcome, Team, ARENA};
@@ -62,9 +65,45 @@ impl Shape {
 
 const PX: f32 = 2.0;
 
+/// What a lane shows: a real battle, or a test drill from a learning
+/// moment, played by one brain.
+enum Fight {
+    Battle(Battle),
+    Drill { run: Box<Run>, brain: Rc<Mlp>, spec: Rc<godcore::ClassSpec>, name: Rc<str> },
+}
+
+impl Fight {
+    fn world(&self) -> &godcore::sim::World {
+        match self {
+            Fight::Battle(b) => &b.world,
+            Fight::Drill { run, .. } => &run.world,
+        }
+    }
+
+    fn running(&self) -> bool {
+        match self {
+            Fight::Battle(b) => b.outcome() == Outcome::Running,
+            Fight::Drill { run, .. } => !run.over(),
+        }
+    }
+
+    fn step(&mut self) {
+        match self {
+            Fight::Battle(b) => b.step(),
+            Fight::Drill { run, brain, .. } => run.step(brain),
+        }
+    }
+
+    fn run_to_end(&mut self) {
+        while self.running() {
+            self.step();
+        }
+    }
+}
+
 /// One battle shown in the clip.
 struct Lane {
-    battle: Battle,
+    battle: Fight,
     fx: Effects,
     acc: f32,
     /// Shown over the map ("0 training steps").
@@ -75,12 +114,15 @@ struct Lane {
 }
 
 impl Lane {
-    fn new(battle: Battle, defending: bool, label: Option<(String, Color)>) -> Lane {
+    fn new(battle: Fight, defending: bool, label: Option<(String, Color)>) -> Lane {
         Lane { battle, fx: Effects::new(), acc: 0.0, label, defending, ended: None }
     }
 
     fn won(&self) -> bool {
-        let stars = self.battle.world.stars();
+        if let Fight::Drill { run, .. } = &self.battle {
+            return run.won();
+        }
+        let stars = self.battle.world().stars();
         if self.defending {
             stars == 0
         } else {
@@ -89,16 +131,26 @@ impl Lane {
     }
 
     fn result_title(&self) -> (&'static str, bool) {
-        let stars = self.battle.world.stars();
+        let w = self.battle.world();
+        if let Fight::Drill { run, .. } = &self.battle {
+            return match (run.defense, run.won()) {
+                (true, true) => ("BASE HELD", true),
+                (true, false) => ("BASE FALLEN", false),
+                (false, true) => ("DRILL WON", true),
+                (false, false) if !w.units[0].alive => ("FELL IN BATTLE", false),
+                (false, false) => ("OUT OF TIME", false),
+            };
+        }
+        let stars = w.stars();
         if self.defending {
-            match self.battle.outcome() {
+            match w.outcome() {
                 Outcome::Victory => ("BASE FALLEN", false),
                 _ if stars > 0 => ("RAIDERS SCORED", false),
-                _ if self.battle.world.destruction() < 0.01 => ("FLAWLESS DEFENCE", true),
+                _ if w.destruction() < 0.01 => ("FLAWLESS DEFENCE", true),
                 _ => ("RAID REPELLED", true),
             }
         } else {
-            match self.battle.outcome() {
+            match w.outcome() {
                 Outcome::Victory => ("TOTAL VICTORY", true),
                 _ if stars > 0 => (["", "1 STAR", "2 STARS", "3 STARS"][stars.min(3) as usize], true),
                 _ => ("DEFEAT", false),
@@ -112,6 +164,9 @@ enum Kind {
     Battle { title: String, sub: String },
     /// One troop with a blank brain (top) and its trained brain (bottom).
     Reel { name: String, class: String },
+    /// A learning moment: the same test drill before (top) and after
+    /// (bottom), and the tick the new behaviour shows at.
+    Moment { name: String, class: String, caption: String, tick: u32 },
 }
 
 pub struct ClipState {
@@ -130,13 +185,23 @@ pub struct ClipState {
     zoom: f32,
     /// The screen to go back to.
     back: Option<Box<Screen>>,
-    remake: Vec<Rc<dyn Fn() -> Battle>>,
+    remake: Vec<Rc<dyn Fn() -> Fight>>,
     started: bool,
+    /// The learning moment this clip shows (troop id, moment id), so the
+    /// saved file can be remembered for sharing.
+    pub moment_of: Option<(u64, u64)>,
 }
 
-/// How a unit in battle `b` is drawn (the player's troops in class colours).
-fn look_in(b: &Battle, defending: bool, u: &godcore::sim::Unit) -> Look {
-    if u.tag < b.troops.len() {
+/// How unit `i` in a lane is drawn (the player's troops in class colours).
+fn look_in(f: &Fight, defending: bool, i: usize, u: &godcore::sim::Unit) -> Look {
+    let b = match f {
+        Fight::Battle(b) => b,
+        Fight::Drill { run, spec, name, .. } => {
+            let mine = run.world.units[run.controlled[0]].team;
+            return crate::art::drill_look(i, u, &run.controlled, mine, Figure::of(spec), name);
+        }
+    };
+    if u.tag < b.troops.len() && u.control == godcore::sim::Control::External {
         let mut l = Game::look_for(&b.troops[u.tag], true);
         l.hostile = defending && u.team == Team::Attack;
         l
@@ -160,7 +225,8 @@ impl ClipState {
         } else {
             String::new()
         };
-        let lanes = vec![Lane::new(b, defending, None)];
+        let lanes = vec![Lane::new(Fight::Battle(b), defending, None)];
+        let remake: Rc<dyn Fn() -> Fight> = Rc::new(move || Fight::Battle(remake()));
         ClipState::new(Kind::Battle { title, sub }, lanes, vec![remake], back)
     }
 
@@ -173,7 +239,7 @@ impl ClipState {
         blank.critic = godcore::nn::Mlp::new(&t.critic.dims, 1.0, &mut rng);
         blank.steps = 0;
         let (base, spot) = best_stage(t);
-        let make = |troop: Troop| -> Rc<dyn Fn() -> Battle> { Rc::new(move || Battle::new(&BASES[base], vec![(troop.clone(), spot)])) };
+        let make = |troop: Troop| -> Rc<dyn Fn() -> Fight> { Rc::new(move || Fight::Battle(Battle::new(&BASES[base], vec![(troop.clone(), spot)]))) };
         let remake = vec![make(blank), make(t.clone())];
         let lanes = vec![
             Lane::new(remake[0](), false, Some(("0 training steps".into(), BAD))),
@@ -183,16 +249,39 @@ impl ClipState {
         ClipState::new(kind, lanes, remake, back)
     }
 
-    fn new(kind: Kind, lanes: Vec<Lane>, remake: Vec<Rc<dyn Fn() -> Battle>>, back: Screen) -> ClipState {
+    /// A learning moment: the test drill it happened in, played by the
+    /// brain from before (top) and after (bottom).
+    pub fn moment(t: &Troop, m: &Moment, before: Mlp, after: Mlp, back: Screen) -> ClipState {
+        let spec: Rc<godcore::ClassSpec> = Rc::new(m.spec.clone());
+        let name: Rc<str> = t.name.as_str().into();
+        let make = |brain: Mlp| -> Rc<dyn Fn() -> Fight> {
+            let (brain, spec, name, m) = (Rc::new(brain), spec.clone(), name.clone(), m.clone());
+            Rc::new(move || Fight::Drill { run: Box::new(m.replay()), brain: brain.clone(), spec: spec.clone(), name: name.clone() })
+        };
+        let remake = vec![make(before), make(after)];
+        let defending = m.spec.role == godcore::classes::Role::Defend;
+        let lanes = vec![
+            Lane::new(remake[0](), defending, Some((format!("BEFORE  ·  {} steps", fmt_steps(m.steps_before)), BAD))),
+            Lane::new(remake[1](), defending, Some((format!("AFTER  ·  {} steps", fmt_steps(m.steps)), GOOD))),
+        ];
+        let kind = Kind::Moment { name: t.name.clone(), class: t.spec.name.clone(), caption: m.caption().to_string(), tick: m.tick };
+        let mut s = ClipState::new(kind, lanes, remake, back);
+        s.moment_of = Some((t.id, m.id));
+        s
+    }
+
+    fn new(kind: Kind, lanes: Vec<Lane>, remake: Vec<Rc<dyn Fn() -> Fight>>, back: Screen) -> ClipState {
         // Play fast enough that the battle fits. In a reel the clip follows
         // the shortest battle (the trained troop's, usually): the other one
         // is cut a moment after it, so nobody watches a blank brain idle.
+        // A learning moment plays both drills to the end: the moment may
+        // come late in the "after" one.
         let lens = remake.iter().map(|m| {
             let mut b = m();
-            b.run();
-            b.world.tick
+            b.run_to_end();
+            b.world().tick
         });
-        let ticks = if remake.len() > 1 { lens.min() } else { lens.max() }.unwrap_or(1);
+        let ticks = if matches!(kind, Kind::Reel { .. }) { lens.min() } else { lens.max() }.unwrap_or(1);
         let tps = (ticks as f32 / MAX_ACTION_SECS).max(MIN_TPS);
         ClipState {
             kind,
@@ -210,6 +299,7 @@ impl ClipState {
             back: Some(Box::new(back)),
             remake,
             started: false,
+            moment_of: None,
         }
     }
 
@@ -249,7 +339,8 @@ impl ClipState {
         let dt = 1.0 / FPS as f32;
         let t = self.secs();
         let first_end = self.lanes.iter().filter_map(|l| l.ended).min();
-        let cut = first_end.is_some_and(|e| self.frame >= e + (CUT_SECS * FPS as f32) as u64);
+        let reel = matches!(self.kind, Kind::Reel { .. });
+        let cut = reel && first_end.is_some_and(|e| self.frame >= e + (CUT_SECS * FPS as f32) as u64);
         if t >= INTRO_SECS {
             for l in &mut self.lanes {
                 if l.ended.is_some() {
@@ -262,12 +353,12 @@ impl ClipState {
                     continue;
                 }
                 l.acc += dt * self.tps;
-                while l.acc >= 1.0 && l.battle.outcome() == Outcome::Running {
+                while l.acc >= 1.0 && l.battle.running() {
                     l.acc -= 1.0;
                     l.battle.step();
-                    l.fx.absorb(&l.battle.world);
+                    l.fx.absorb(l.battle.world());
                 }
-                if l.battle.outcome() != Outcome::Running {
+                if !l.battle.running() {
                     l.ended = Some(self.frame);
                     crate::sfx::play_ui(if l.won() { crate::sfx::Sfx::Victory } else { crate::sfx::Sfx::Defeat });
                 }
@@ -343,7 +434,7 @@ impl ClipState {
                 draw_stats(l, stats, tall);
                 if since_end > 0.0 {
                     let (t, good) = l.result_title();
-                    result_card(map, t, good, l.battle.world.stars(), l.defending, since_end);
+                    result_card(map, t, good, l.battle.world().stars(), l.defending, since_end);
                 }
             }
             Kind::Reel { name, class } => {
@@ -365,18 +456,64 @@ impl ClipState {
                     if let Some((label, col)) = &l.label {
                         pill(label, r.x + 12.0, r.y + 12.0, 24.0, *col);
                     }
-                    let d = l.battle.world.destruction();
+                    let d = l.battle.world().destruction();
                     let line = format!("{:.0}% destroyed", d * 100.0);
                     let tw = twidth(&line, 22.0);
                     pill(&line, r.x + r.w - tw - 36.0, r.y + 12.0, 22.0, Color::new(0.1, 0.1, 0.14, 1.0));
                     if let Some(e) = l.ended {
                         let k = ((self.frame - e) as f32 / FPS as f32 * 4.0).min(1.0);
                         let (t, good) = l.result_title();
-                        stamp(r, t, good, l.battle.world.stars(), k);
+                        stamp(r, t, good, Some(l.battle.world().stars()), k);
+                    }
+                }
+            }
+            Kind::Moment { name, class, caption, tick } => {
+                let (a, b) = if tall {
+                    (Rect::new(0.0, 170.0, cw, 385.0), Rect::new(0.0, 565.0, cw, 385.0))
+                } else {
+                    (Rect::new(0.0, 110.0, 475.0, 430.0), Rect::new(485.0, 110.0, 475.0, 430.0))
+                };
+                let line = format!("{name} {caption}!");
+                if tall {
+                    ctext("LEGION OF MINDS", cw / 2.0, 34.0, 18.0, ACCENT);
+                    let lines = wrap_lines(&line, 34.0, cw - 40.0, 2);
+                    for (k, l) in lines.iter().enumerate() {
+                        ctext(l, cw / 2.0, 82.0 + k as f32 * 40.0, 34.0, TEXT);
+                    }
+                    ctext(&format!("{name} the {class}  ·  same drill, before and after"), cw / 2.0, 82.0 + lines.len() as f32 * 40.0 - 4.0, 17.0, MUTED);
+                } else {
+                    ctext("LEGION OF MINDS", cw / 2.0, 30.0, 18.0, ACCENT);
+                    fit_text(&line, cw / 2.0, 66.0, 30.0, cw - 40.0, TEXT);
+                    ctext(&format!("{name} the {class}  ·  same drill, before and after"), cw / 2.0, 94.0, 17.0, MUTED);
+                }
+                for (k, (l, r)) in self.lanes.iter().zip([a, b]).enumerate() {
+                    draw_lane(l, r);
+                    if let Some((label, col)) = &l.label {
+                        pill(label, r.x + 12.0, r.y + 12.0, 22.0, *col);
+                    }
+                    // In the "after" drill, point out when the new behaviour shows.
+                    let now = l.battle.world().tick;
+                    if k == 1 && *tick > 0 && now >= *tick && now < *tick + (self.tps * 2.5) as u32 && l.ended.is_none() {
+                        let mark = "IT HAPPENS HERE";
+                        let tw = twidth(mark, 22.0);
+                        pill(mark, r.x + r.w - tw - 36.0, r.y + 12.0, 22.0, Color::new(0.85, 0.55, 0.1, 1.0));
+                        if let Fight::Drill { run, .. } = &l.battle {
+                            ring_on(l, r, run.controlled[0], now - *tick);
+                        }
+                    }
+                    if let Some(e) = l.ended {
+                        let k = ((self.frame - e) as f32 / FPS as f32 * 4.0).min(1.0);
+                        let (t, good) = l.result_title();
+                        stamp(r, t, good, None, k);
                     }
                 }
             }
         }
+        // A small watermark in the corner, on every frame.
+        let wm = "LEGION OF MINDS";
+        let ww = twidth(wm, 14.0);
+        draw_rectangle(cw - ww - 22.0, ch - 30.0, ww + 14.0, 22.0, Color::new(0.0, 0.0, 0.0, 0.45));
+        tleft(wm, cw - ww - 15.0, ch - 14.0, 14.0, Color::new(ACCENT.r, ACCENT.g, ACCENT.b, 0.85));
         if since_end > RESULT_SECS {
             end_card(cw, ch, ((since_end - RESULT_SECS) * 3.0).min(1.0));
         }
@@ -393,15 +530,46 @@ fn draw_lane(l: &Lane, r: Rect) {
     let aspect = r.w / r.h;
     crate::render::set_zoom(if aspect < 1.0 { 0.84 / aspect } else { 0.7 });
     let v = View::new(r);
-    draw_ground(v, false, false, &l.battle.world);
+    let w = l.battle.world();
+    draw_ground(v, false, false, w);
     let b = &l.battle;
     let defending = l.defending;
-    draw_world(v, &b.world, &l.fx, &|_, u| look_in(b, defending, u));
+    draw_world(v, w, &l.fx, &|i, u| look_in(b, defending, i, u));
+}
+
+/// A pulsing ring around unit `i` of a lane, `age` ticks into the moment.
+fn ring_on(l: &Lane, r: Rect, i: usize, age: u32) {
+    let u = &l.battle.world().units[i];
+    if !u.alive {
+        return;
+    }
+    let v = View::new(r);
+    let p = v.p(u.x, u.y);
+    let s = v.s();
+    let k = (age as f32 * 0.35).sin().abs();
+    draw_circle_lines(p.x, p.y, s * (1.1 + 0.3 * k), 3.0, Color::new(1.0, 0.75, 0.2, 0.9));
+}
+
+/// Words split into at most `max` lines that fit `w` (the last one shrinks
+/// if it still doesn't).
+fn wrap_lines(s: &str, size: f32, w: f32, max: usize) -> Vec<String> {
+    let mut lines: Vec<String> = vec![String::new()];
+    for word in s.split_whitespace() {
+        let last = lines.last_mut().unwrap();
+        let try_line = if last.is_empty() { word.to_string() } else { format!("{last} {word}") };
+        if twidth(&try_line, size) > w && !last.is_empty() && lines.len() < max {
+            lines.push(word.to_string());
+        } else {
+            *lines.last_mut().unwrap() = try_line;
+        }
+    }
+    lines
 }
 
 /// Destruction, stars, time and the squad's health.
 fn draw_stats(l: &Lane, r: Rect, tall: bool) {
-    let w = &l.battle.world;
+    let Fight::Battle(battle) = &l.battle else { return };
+    let w = &battle.world;
     let pad = 22.0;
     let (x, mut y) = (r.x + pad, r.y + 34.0);
     let d = w.destruction();
@@ -417,13 +585,13 @@ fn draw_stats(l: &Lane, r: Rect, tall: bool) {
         .units
         .iter()
         .enumerate()
-        .filter(|(_, u)| u.kind == godcore::sim::Kind::Troop && u.tag < l.battle.troops.len())
+        .filter(|(_, u)| u.kind == godcore::sim::Kind::Troop && u.tag < battle.troops.len())
         .collect();
     let n = mine.len().max(1);
     if tall {
         let cell = (r.w - 2.0 * pad) / n as f32;
         for (k, (_, u)) in mine.iter().enumerate() {
-            let t = &l.battle.troops[u.tag];
+            let t = &battle.troops[u.tag];
             let cx = x + cell * (k as f32 + 0.5);
             if u.alive {
                 crate::art::draw_portrait(vec2(cx, y + 18.0), 18.0, &t.spec);
@@ -436,7 +604,7 @@ fn draw_stats(l: &Lane, r: Rect, tall: bool) {
         ctext(PITCH, r.x + r.w / 2.0, r.y + r.h - 14.0, 16.0, MUTED);
     } else {
         for (_, u) in mine.iter().take(6) {
-            let t = &l.battle.troops[u.tag];
+            let t = &battle.troops[u.tag];
             if u.alive {
                 crate::art::draw_portrait(vec2(x + 18.0, y + 18.0), 16.0, &t.spec);
             } else {
@@ -466,10 +634,12 @@ fn result_card(map: Rect, title: &str, good: bool, stars: u32, defending: bool, 
 }
 
 /// A result stamp on one half of a reel.
-fn stamp(r: Rect, title: &str, good: bool, stars: u32, k: f32) {
+fn stamp(r: Rect, title: &str, good: bool, stars: Option<u32>, k: f32) {
     let cy = r.y + r.h * 0.55;
     draw_rectangle(r.x, cy - 46.0, r.w, 92.0, Color::new(0.03, 0.03, 0.06, 0.72 * k));
     ctext(title, r.x + r.w / 2.0, cy + 2.0, 40.0 * (1.0 + (1.0 - k) * 0.4), if good { ACCENT } else { BAD });
+    // Drills have no stars.
+    let Some(stars) = stars else { return };
     for s in 0..3 {
         star(r.x + r.w / 2.0 - 40.0 + s as f32 * 40.0, cy + 28.0, 13.0, s < stars as usize);
     }
@@ -606,6 +776,7 @@ impl Game {
                 let stem = match &s.kind {
                     Kind::Battle { title, .. } => title.clone(),
                     Kind::Reel { name, .. } => format!("{name} before and after"),
+                    Kind::Moment { name, caption, .. } => format!("{name} {caption}"),
                 };
                 let out = match std::env::var_os("BAG_CLIP_OUT") {
                     Some(p) => PathBuf::from(p),
@@ -685,14 +856,22 @@ impl Game {
                 }
             }
             Some(Ok(p)) => {
+                let p = p.clone();
+                // A learning moment remembers its video, for sharing later.
+                if let Some((tid, mid)) = s.moment_of.take() {
+                    self.moment_video_saved(tid, mid, &p);
+                }
                 text("Clip saved!", x, 150.0, 34.0, GOOD);
                 text(&p.file_name().unwrap_or_default().to_string_lossy(), x, 186.0, 20.0, TEXT);
                 text(&format!("in {}", p.parent().map(|d| d.display().to_string()).unwrap_or_default()), x, 212.0, 16.0, MUTED);
-                text("Post it to YouTube Shorts, Reels, TikTok or Reddit.", x, 250.0, 18.0, MUTED);
-                if self.ui.button(Rect::new(x, 280.0, 200.0, 46.0), "Show in folder") {
-                    show_in_folder(p);
-                }
-                if self.ui.button(Rect::new(x + 210.0, 280.0, 150.0, 46.0), "Done") {
+                let post = match &s.kind {
+                    Kind::Moment { name, caption, .. } => crate::share::post_text(&format!("{name} {caption}!")),
+                    Kind::Reel { name, .. } => crate::share::post_text(&format!("{name}: same troop, same raid, only the brain is different.")),
+                    Kind::Battle { title, .. } => crate::share::post_text(title),
+                };
+                text("Share it:", x, 252.0, 20.0, TEXT);
+                crate::share::share_buttons(self, Rect::new(x, 266.0, 560.0, 160.0), &p, &post);
+                if self.ui.button(Rect::new(x, 440.0, 150.0, 46.0), "Done") {
                     return *s.back.take().unwrap();
                 }
             }
@@ -711,7 +890,7 @@ impl Game {
 impl ClipState {
     /// Frames the finished clip will have (for the progress bar).
     fn estimate_frames(&self) -> u64 {
-        let cut = if self.lanes.len() > 1 { CUT_SECS } else { 0.0 };
+        let cut = if matches!(self.kind, Kind::Reel { .. }) { CUT_SECS } else { 0.0 };
         ((INTRO_SECS + self.ticks as f32 / self.tps + cut + RESULT_SECS + END_CARD_SECS) * FPS as f32) as u64
     }
 }
@@ -735,27 +914,11 @@ fn add_sound(out: &std::path::Path, sound: &[f32]) {
     let _ = std::fs::remove_file(&wav);
 }
 
-fn no_window(_cmd: &mut std::process::Command) {
+pub fn no_window(_cmd: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         // CREATE_NO_WINDOW: no console flashing up.
         _cmd.creation_flags(0x0800_0000);
-    }
-}
-
-fn show_in_folder(p: &std::path::Path) {
-    #[cfg(windows)]
-    let r = {
-        let mut c = std::process::Command::new("explorer");
-        c.arg(format!("/select,{}", p.display()));
-        c.spawn()
-    };
-    #[cfg(target_os = "macos")]
-    let r = std::process::Command::new("open").arg("-R").arg(p).spawn();
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let r = std::process::Command::new("xdg-open").arg(p.parent().unwrap_or(p)).spawn();
-    if let Err(e) = r {
-        eprintln!("could not open the folder: {e}");
     }
 }

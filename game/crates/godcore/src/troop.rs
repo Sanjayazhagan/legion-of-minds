@@ -216,6 +216,14 @@ pub struct Troop {
     /// team session it trained in; empty for none, "" where unknown.
     #[serde(default)]
     pub signals: Vec<String>,
+    /// Learning moments found while it trained, oldest first (see `moments`).
+    /// Their brains are kept in separate files.
+    #[serde(default)]
+    pub moments: Vec<crate::moments::Moment>,
+    /// The highest level each behaviour reached when it became a moment, so
+    /// the same lesson only comes back as a moment when it is beaten.
+    #[serde(default)]
+    pub lessons: BTreeMap<String, f32>,
 }
 
 /// Starting score for actions a grown brain has never tried (dodge, block,
@@ -248,6 +256,8 @@ impl Troop {
             born: true,
             rest: Rest::default(),
             signals: Vec::new(),
+            moments: Vec::new(),
+            lessons: BTreeMap::new(),
         }
         .synced()
     }

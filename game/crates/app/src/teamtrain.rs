@@ -77,6 +77,16 @@ impl TeamRun {
         self.job.stop.store(true, Ordering::Relaxed);
     }
 
+    /// Steps member `k` has trained in this run so far.
+    pub fn trained(&self, k: usize) -> u64 {
+        self.job.shared.lock().unwrap().steps.get(k).copied().unwrap_or(0)
+    }
+
+    /// A copy of member `k`'s newest brain, once the first update is done.
+    pub fn newest_brain(&self, k: usize) -> Option<Mlp> {
+        self.job.shared.lock().unwrap().actors.get(k).cloned()
+    }
+
     /// Steps each member has trained this run, as of the last save.
     pub fn done(&self) -> u64 {
         self.job.saved.iter().copied().min().unwrap_or(0)

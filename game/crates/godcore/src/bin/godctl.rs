@@ -219,6 +219,84 @@ fn main() {
                 steps as f32 / secs
             );
         }
+        Some("moments") => {
+            // godctl moments --class healer --steps 300000 [--every 25000] [--seed S] [--from t.json]
+            //               [--save DIR --name Sol]
+            // Trains like the game does and prints the learning moments the
+            // game would show, with the probe stats behind each check.
+            // --save writes the troop and its moments into a game save
+            // folder (for BAG_SAVE_DIR), as the game would keep them.
+            let spec = parse_class(&arg(&args, "--class").unwrap_or("healer".into()));
+            let steps: u64 = arg(&args, "--steps").map(|s| s.parse().unwrap()).unwrap_or(300_000);
+            let every: u64 = arg(&args, "--every").map(|s| s.parse().unwrap()).unwrap_or(25_000);
+            let seed: u64 = arg(&args, "--seed").map(|s| s.parse().unwrap()).unwrap_or(1);
+            let mut troop = match arg(&args, "--from") {
+                Some(p) => Troop::load_json(&std::fs::read_to_string(p).unwrap()).unwrap(),
+                None => Troop::new(seed, arg(&args, "--name").unwrap_or("Cli".into()), spec, seed),
+            };
+            let save = arg(&args, "--save").map(std::path::PathBuf::from);
+            use godcore::moments::{compare, probe_seed, Moment, MomentBrains, Probe, N_STATS};
+            let base_actor = troop.actor.clone();
+            let base = Probe::run(&troop.spec, &base_actor, troop.seed);
+            let mut best = std::collections::BTreeMap::new();
+            let show = |p: &Probe| (0..N_STATS).map(|s| p.mean(s).map_or("  -  ".into(), |v| format!("{v:5.2}"))).collect::<Vec<_>>().join(" ");
+            println!("stats: wins surv healfirst dist dodge block parry skill destr pace calls kills");
+            println!("{:>8}  score {:.2}  {}", troop.steps, base.score(), show(&base));
+            let mut tr = Trainer::new(&troop.spec, troop.actor.clone(), troop.critic.clone(), seed, PpoConfig::default());
+            tr.steps_done = troop.steps;
+            let mut next = troop.steps + every;
+            let mut found_keys: Vec<String> = Vec::new();
+            while tr.steps_done < troop.steps + steps {
+                tr.iterate();
+                if tr.steps_done >= next {
+                    next += every;
+                    let t0 = std::time::Instant::now();
+                    let p = Probe::run(&troop.spec, &tr.actor, troop.seed);
+                    println!("{:>8}  score {:.2}  {}  ({:.1}s probe)", tr.steps_done, p.score(), show(&p), t0.elapsed().as_secs_f32());
+                    for f in compare(&troop.spec, &base, &base_actor, &p, &tr.actor, &best) {
+                        if found_keys.contains(&f.key) {
+                            continue;
+                        }
+                        println!("   MOMENT: {} {}  (size {:.2}, {:.2} -> {:.2}, drill {} tick {})", troop.name, f.text, f.size, f.before, f.after, f.probe, f.tick);
+                        found_keys.push(f.key.clone());
+                        best.insert(f.key.clone(), f.after);
+                        if let Some(dir) = &save {
+                            let id = troop.moments.len() as u64 + 1;
+                            let d = dir.join("moments").join(troop.id.to_string());
+                            std::fs::create_dir_all(&d).unwrap();
+                            let b = MomentBrains { before: base_actor.clone(), after: tr.actor.clone() };
+                            std::fs::write(d.join(format!("{id}.json")), serde_json::to_string(&b).unwrap()).unwrap();
+                            troop.moments.push(Moment {
+                                id,
+                                text: f.text.clone(),
+                                title: None,
+                                key: f.key.clone(),
+                                before: f.before,
+                                after: f.after,
+                                size: f.size,
+                                steps_before: troop.steps,
+                                steps: tr.steps_done,
+                                when: godcore::troop::unix_now(),
+                                probe: f.probe,
+                                seed: probe_seed(troop.seed, f.probe),
+                                tick: f.tick,
+                                spec: troop.spec.clone(),
+                                video: None,
+                            });
+                            troop.lessons.insert(f.key.clone(), f.after);
+                        }
+                    }
+                }
+            }
+            if let Some(dir) = &save {
+                troop.add_training(tr.steps_done - troop.steps);
+                troop.actor = tr.actor;
+                troop.critic = tr.critic;
+                std::fs::create_dir_all(dir.join("troops")).unwrap();
+                std::fs::write(dir.join("troops").join(format!("{}.troop.json", troop.id)), troop.save_json()).unwrap();
+                println!("saved {} with {} moments in {}", troop.name, troop.moments.len(), dir.display());
+            }
+        }
         Some("team") => {
             // godctl team --troops a.json,b.json --steps N [--seed S] [--vs d.json,..] [--suffix .team]
             let files: Vec<String> = arg(&args, "--troops").expect("--troops a.json,b.json").split(',').map(String::from).collect();
