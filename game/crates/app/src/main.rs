@@ -15,12 +15,14 @@ mod clip;
 mod clan;
 mod home;
 mod mind_view;
+mod moments;
 mod online;
 mod recruit;
 mod render;
 mod scene;
 mod pc_check;
 mod settings;
+mod share;
 mod sfx;
 mod stat_panel;
 mod teamtrain;
@@ -56,6 +58,8 @@ pub enum Screen {
     /// Saving a battle clip or training reel.
     Clip(clip::ClipState),
     Clan(clan::ClanState),
+    /// A troop's "What it learned" timeline of learning moments.
+    Moments(moments::MomentsState),
 }
 
 pub struct Game {
@@ -90,6 +94,8 @@ pub struct Game {
     pub team_news: Option<teamtrain::TeamNews>,
     /// Training to resume once the startup PC speed test finishes.
     pub resume_after_pc_check: bool,
+    /// Learning moments: the sessions being watched and the pop-ups waiting.
+    pub moments: moments::Tracker,
 }
 
 impl Game {
@@ -197,6 +203,24 @@ fn demo_screen(g: &mut Game) -> Option<Screen> {
             b.clip(Screen::Barracks)
         }
         "reel" => Screen::Clip(clip::ClipState::reel(&g.troops[0], Screen::Barracks)),
+        // The first troop's learning moments, with the newest one's pop-up.
+        "moments" | "moment_popup" => {
+            let t = &g.troops[0];
+            if let Some(m) = t.moments.last() {
+                g.moments.popups.push_back((t.id, m.id));
+            }
+            if which == "moment_popup" {
+                Screen::Barracks
+            } else {
+                Screen::Moments(moments::MomentsState::open(g, t.id, None, Screen::Barracks))
+            }
+        }
+        "moment_clip" => {
+            let t = g.troops[0].clone();
+            let m = t.moments.last().cloned().expect("BAG_SCREEN=moment_clip needs a troop with a learning moment");
+            let b = g.store.load_moment_brains(t.id, m.id).expect("moment brains");
+            Screen::Clip(clip::ClipState::moment(&t, &m, b.before, b.after, Screen::Barracks))
+        }
         "clan" => {
             g.account.user = g.account.client().me().ok();
             Screen::Clan(clan::ClanState::new(g))
@@ -339,6 +363,7 @@ async fn main() {
         train_news: Default::default(),
         team_news: None,
         resume_after_pc_check: false,
+        moments: Default::default(),
     };
     game.settings = settings::Settings::load(&game.store.home);
     game.settings.apply();
@@ -411,6 +436,12 @@ async fn main() {
             game.profile.gold = save::TEST_GOLD;
         }
         let click = game.tour_input(&screen);
+        // A learning moment's pop-up sits over every screen but its own.
+        let popup_here = !game.settings_open && !matches!(screen, Screen::Moments(_) | Screen::Clip(_));
+        if let Some((tid, mid)) = popup_here.then(|| game.moment_popup_input()).flatten() {
+            let back = std::mem::replace(&mut screen, Screen::Barracks);
+            screen = Screen::Moments(moments::MomentsState::open(&game, tid, Some(mid), back));
+        }
         if game.settings_open {
             game.settings_screen();
         } else {
@@ -442,6 +473,7 @@ async fn main() {
                 Screen::OnlineWatch(s) => game.online_watch(s),
                 Screen::Clip(s) => game.clip(s),
                 Screen::Clan(s) => game.clan(s),
+                Screen::Moments(s) => game.moments_screen(s),
             };
             // Test hook: BAG_CLIP_OUT saves a clip and quits when it is written.
             if let (Screen::Clip(c), Some(_)) = (&screen, std::env::var_os("BAG_CLIP_OUT")) {
@@ -457,6 +489,9 @@ async fn main() {
         game.poll_pc_check();
         game.tick_training();
         game.tour_frame(&screen, click);
+        if !game.settings_open && !matches!(screen, Screen::Moments(_) | Screen::Clip(_)) {
+            game.draw_moment_popup();
+        }
         if let Some(n) = save::take_notice() {
             game.toast = Some((n, 6.0));
         }

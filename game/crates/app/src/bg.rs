@@ -52,6 +52,7 @@ impl Game {
         if before > 0 {
             self.sync_training_list();
         }
+        self.tick_moments();
     }
 
     /// What is running now, as the profile stores it.

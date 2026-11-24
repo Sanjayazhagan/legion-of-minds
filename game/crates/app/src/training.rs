@@ -85,6 +85,16 @@ impl SoloRun {
         self.job.stop.store(true, Ordering::Relaxed);
     }
 
+    /// Steps trained in this run so far.
+    pub fn trained(&self) -> u64 {
+        self.job.shared.lock().unwrap().steps.saturating_sub(self.job.start)
+    }
+
+    /// A copy of the newest brain, once the first update is done.
+    pub fn newest_brain(&self) -> Option<godcore::nn::Mlp> {
+        self.job.shared.lock().unwrap().actor.clone()
+    }
+
     /// The step count the session trains up to.
     pub fn target(&self) -> u64 {
         self.job.target

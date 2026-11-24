@@ -367,6 +367,20 @@ impl Game {
                 return Screen::Clip(crate::clip::ClipState::reel(t, Screen::Barracks));
             }
         }
+        // Its learning moments: what it picked up while training.
+        let lr = Rect::new(d.x + d.w - 494.0, y - 22.0, 230.0, 30.0);
+        let fresh = self.moments.popups.iter().filter(|p| p.0 == t.id).count();
+        let label = match (t.moments.len(), fresh) {
+            (0, _) => "What it learned".to_string(),
+            (n, 0) => format!("What it learned ({n})"),
+            (n, f) => format!("What it learned ({n}, {f} new)"),
+        };
+        crate::tour::mark("moments", lr);
+        if self.ui.button(lr, &label) {
+            let id = t.id;
+            self.moments.popups.retain(|p| p.0 != id);
+            return Screen::Moments(crate::moments::MomentsState::open(self, id, None, Screen::Barracks));
+        }
         y += 10.0;
         let mut bx = x;
         if t.skills.episodes == 0 {
@@ -484,6 +498,7 @@ impl Game {
         if self.ui.button_ex(Rect::new(x + 530.0, y, 170.0, 44.0), rl, busy.is_none(), false) {
             if self.confirm_release {
                 self.store.delete_troop(id);
+                self.store.delete_moments(id);
                 let name = self.troops.remove(i).name;
                 self.selected = if self.troops.is_empty() {
                     None
