@@ -57,6 +57,10 @@ pub struct Model {
     inv_bind: Vec<Mat4>,
     clips: HashMap<String, Clip>,
     textures: Vec<Texture2D>,
+    /// Node index by name.
+    by_name: HashMap<String, usize>,
+    /// Nodes that carry a mesh.
+    mesh_nodes: Vec<bool>,
 }
 
 fn load_err(p: &Path, e: impl std::fmt::Display) -> String {
@@ -174,7 +178,58 @@ impl Model {
             }
             clips.insert(a.name().unwrap_or("").to_string(), Clip { duration, channels });
         }
-        Ok(Model { nodes, order, parts, joints, inv_bind, clips, textures })
+        let by_name = nodes.iter().enumerate().map(|(i, n)| (n.name.clone(), i)).collect();
+        let mut mesh_nodes = vec![false; nodes.len()];
+        for p in &parts {
+            mesh_nodes[p.node] = true;
+        }
+        Ok(Model { nodes, order, parts, joints, inv_bind, clips, textures, by_name, mesh_nodes })
+    }
+
+    /// Copy the clips named `prefix*` that `other` has and this model lacks,
+    /// matching animated nodes by name. The troop models share one
+    /// skeleton, so any body can play any class's special move.
+    pub fn adopt_clips(&mut self, other: &Model, prefix: &str) {
+        for (name, c) in &other.clips {
+            if !name.starts_with(prefix) || self.clips.contains_key(name) {
+                continue;
+            }
+            let channels: Vec<Channel> = c
+                .channels
+                .iter()
+                .filter_map(|ch| {
+                    let node = *self.by_name.get(&other.nodes[ch.node].name)?;
+                    let values = match &ch.values {
+                        Values::V3(v) => Values::V3(v.clone()),
+                        Values::Q(v) => Values::Q(v.clone()),
+                    };
+                    Some(Channel { node, prop: ch.prop, times: ch.times.clone(), values })
+                })
+                .collect();
+            self.clips.insert(name.clone(), Clip { duration: c.duration, channels });
+        }
+    }
+
+    /// Node globals for this model's gear worn by `host` in its pose
+    /// `host_g`: bones the host also has follow the host, and this model's
+    /// own gear hangs off them as in this model's rest pose. Drawing this
+    /// model's rigid parts with these puts its gear on the host's body.
+    pub fn worn_by(&self, host: &Model, host_g: &[Mat4]) -> Vec<Mat4> {
+        let mut g = vec![Mat4::IDENTITY; self.nodes.len()];
+        for &i in &self.order {
+            let n = &self.nodes[i];
+            g[i] = match host.by_name.get(&n.name) {
+                Some(&h) if !self.mesh_nodes[i] => host_g[h],
+                _ => {
+                    let local = Mat4::from_scale_rotation_translation(n.s, n.r, n.t);
+                    match n.parent {
+                        Some(p) => g[p] * local,
+                        None => local,
+                    }
+                }
+            };
+        }
+        g
     }
 
     /// True for a mesh node that is not skinned (weapons, hats, shields).
@@ -574,6 +629,9 @@ thread_local! {
     static LIB: RefCell<Option<std::rc::Rc<Library>>> = RefCell::new(None);
 }
 
+/// The five troop bodies, which share one skeleton.
+pub const TROOP_MODELS: [&str; 5] = ["Barbarian", "Knight", "Mage", "Rogue", "Rogue_Hooded"];
+
 const FILES: &[(&str, &str)] = &[
     // Troop models rebuilt in Blender from the KayKit originals
     // (tools/blender/troops.py).
@@ -647,6 +705,17 @@ pub fn load_library() {
             }
             Err(e) => eprintln!("asset not loaded: {e}"),
         }
+    }
+    // Every troop body gets every class's special move, so a hybrid can
+    // wear one parent's body and still play the other parent's special.
+    for host in TROOP_MODELS {
+        let Some(mut m) = models.remove(host) else { continue };
+        for donor in TROOP_MODELS.iter().filter(|d| **d != host) {
+            if let Some(d) = models.get(donor) {
+                m.adopt_clips(d, "Special_");
+            }
+        }
+        models.insert(host, m);
     }
     LIB.with(|l| *l.borrow_mut() = Some(std::rc::Rc::new(Library { models })));
 }

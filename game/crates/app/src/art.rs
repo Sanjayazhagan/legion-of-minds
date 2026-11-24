@@ -12,6 +12,8 @@ use macroquad::prelude::*;
 pub struct Figure {
     pub main: BaseClass,
     pub second: Option<BaseClass>,
+    /// The second part's share of the blend (0 to 1).
+    pub second_share: f32,
     /// A third blend part, if any (shown as more gear).
     pub third: Option<BaseClass>,
     pub outfit: Color,
@@ -28,6 +30,7 @@ impl Figure {
         Figure {
             main: ps[0].0,
             second: ps.get(1).map(|p| p.0),
+            second_share: ps.get(1).map_or(0.0, |p| p.1 / ps.iter().map(|p| p.1).sum::<f32>().max(1e-6)),
             third: ps.get(2).map(|p| p.0),
             outfit: rgb(spec.color),
             raider: false,
@@ -39,6 +42,7 @@ impl Figure {
         Figure {
             main: BaseClass::Fighter,
             second: None,
+            second_share: 0.0,
             third: None,
             weapon: None,
             outfit: Color::new(0.42, 0.40, 0.44, 1.0),
@@ -51,6 +55,7 @@ impl Figure {
         Figure {
             main: BaseClass::Guard,
             second: None,
+            second_share: 0.0,
             third: None,
             weapon: None,
             outfit: Color::new(0.62, 0.16, 0.18, 1.0),

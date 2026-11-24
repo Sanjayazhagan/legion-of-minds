@@ -413,8 +413,13 @@ async fn main() {
     prevent_quit();
     loop {
         game.ui.begin();
-        if std::env::var("BAG_SCREEN").as_deref() == Ok("gallery") {
-            render::draw_gallery();
+        let gallery = std::env::var("BAG_SCREEN");
+        if matches!(gallery.as_deref(), Ok("gallery") | Ok("hybrids")) {
+            if gallery.as_deref() == Ok("hybrids") {
+                render::draw_hybrid_gallery();
+            } else {
+                render::draw_gallery();
+            }
             frame += 1;
             if let Some(p) = &autoshot {
                 if frame == shot_frame {
