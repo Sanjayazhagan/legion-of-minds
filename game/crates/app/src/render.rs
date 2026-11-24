@@ -1428,8 +1428,9 @@ struct Dress {
     body_from_second: bool,
     /// Each piece worn: (model it comes from, mesh name, from the second parent).
     pieces: Vec<(&'static str, &'static str, bool)>,
-    /// The second parent gave a back piece other than a cape (wings,
-    /// quiver, orbs, pelt), so there is no room to sling its weapon there.
+    /// The back already holds wings, a quiver, orbs or a pelt (from the
+    /// second parent, or a Paladin leader's own wings), so there is no room
+    /// to sling the second class's weapon there.
     back_taken: bool,
 }
 
@@ -1450,7 +1451,16 @@ fn dress(fig: &Figure, npc_guard: bool) -> Dress {
             if from2.is_empty() {
                 pieces.extend(d.pieces.iter().copied().filter(|p| slot_of(p.1) == slot));
             } else {
-                d.back_taken |= slot == Slot::Back && from2.iter().any(|p| !p.1.ends_with("_Cape"));
+                let real_back = slot == Slot::Back && from2.iter().any(|p| !p.1.ends_with("_Cape"));
+                d.back_taken |= real_back;
+                // A Paladin leader keeps its wings over the second class's
+                // cape; they only give way to a real back item (quiver, orbs,
+                // pelt, wings) so the two never overlap.
+                if slot == Slot::Back && !real_back {
+                    let wings: Vec<_> = d.pieces.iter().copied().filter(|p| p.1 == "Paladin_Wings").collect();
+                    d.back_taken |= !wings.is_empty();
+                    pieces.extend(wings);
+                }
                 pieces.extend(from2);
             }
         }
@@ -2516,6 +2526,19 @@ mod tests {
         assert_eq!(d.lo.model, "Barbarian");
         assert!(d.pieces.contains(&("Mage", "Mage_Orbs", true)));
         assert!(d.back_taken);
+        // A Paladin leader keeps its wings when the second class only has a
+        // cape, and nothing is slung over them...
+        let d = dress(&Figure::of(&ClassSpec::blend(&[(Paladin, 60.0), (Healer, 40.0)])), false);
+        assert!(d.pieces.contains(&("Knight", "Paladin_Wings", false)));
+        assert!(d.pieces.contains(&("Mage", "Mage_Cape", true)));
+        assert!(!d.pieces.iter().any(|p| p.1 == "Knight_Cape"));
+        assert!(d.back_taken);
+        // ...but drops them for a real back item, so the two never overlap.
+        for sec in [Archer, Mage, Hunter] {
+            let d = dress(&Figure::of(&ClassSpec::blend(&[(Paladin, 60.0), (sec, 40.0)])), false);
+            assert!(!d.pieces.iter().any(|p| p.1 == "Paladin_Wings"), "{sec:?}");
+            assert!(d.back_taken);
+        }
     }
 
     #[test]
