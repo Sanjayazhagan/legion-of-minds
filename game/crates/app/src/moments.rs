@@ -64,6 +64,8 @@ struct Session {
     base_steps: u64,
     best: BTreeMap<String, f32>,
     found: usize,
+    /// Kinds of change already found this session (each counts once).
+    seen: Vec<String>,
 }
 
 /// Keeps track of the training sessions being watched, and the moments
@@ -104,7 +106,7 @@ fn checker(jobs: Receiver<Job>, out: Sender<Out>) {
             match std::mem::replace(&mut batch[k], Job::End { id: u64::MAX }) {
                 Job::Start { id, spec, actor, steps, seed, best } => {
                     let base = Probe::run(&spec, &actor, seed);
-                    sessions.insert(id, Session { spec, seed, base, base_actor: actor, base_steps: steps, best, found: 0 });
+                    sessions.insert(id, Session { spec, seed, base, base_actor: actor, base_steps: steps, best, found: 0, seen: Vec::new() });
                 }
                 Job::End { id } => {
                     sessions.remove(&id);
@@ -119,6 +121,10 @@ fn checker(jobs: Receiver<Job>, out: Sender<Out>) {
                         if s.found >= PER_SESSION {
                             break;
                         }
+                        if s.seen.contains(&f.key) {
+                            continue;
+                        }
+                        s.seen.push(f.key.clone());
                         s.found += 1;
                         s.best.insert(f.key.clone(), f.after);
                         let o = Out {

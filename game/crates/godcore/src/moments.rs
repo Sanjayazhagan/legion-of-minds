@@ -394,8 +394,8 @@ fn first_use_text(a: u8) -> Option<&'static str> {
 /// After "<name> now ": what it does more of.
 fn verb(a: u8) -> Option<&'static str> {
     Some(match a {
-        ACT_IDLE => "waits",
-        1..=8 => return None,
+        // Waiting and walking more is rarely what makes a moment.
+        ACT_IDLE | 1..=8 => return None,
         ACT_HIT_UNIT => "fights enemies",
         ACT_HIT_BUILDING => "hits buildings",
         ACT_HEAL | ACT_HEAL_2 => "heals",
