@@ -191,7 +191,7 @@ fn demo_screen(g: &mut Game) -> Option<Screen> {
         "armoury" => Screen::Armoury(armoury::ArmouryState { idx: 0 }),
         "team" => Screen::Team(teamtrain::TeamState::demo(g)),
         "signin" => Screen::SignIn(online::SignInState::from_game(&g.account)),
-        "online" | "cup" => online::OnlineState::demo(g),
+        "online" | "cup" | "online-tournament" => online::OnlineState::demo(g),
         "clip" => {
             let b = battle_screen::BattleState::demo(g, 1, all);
             b.clip(Screen::Barracks)

@@ -5,6 +5,8 @@
 //! - `attacks`: matchmaking, server-checked raids, battle log, replays
 //! - `shop`: Town Hall, weapons and troop levels bought with online gold
 //! - `cup`: the weekly cup, one troop per player, paid in gold
+//! - `tournaments`: one-off tournaments the operator runs, with gold,
+//!   weapon and troop prizes
 //! - `league`: seasons (leagues come from trophies)
 //! - `clans`: clans, chat and troops lent to clanmates
 //! - `wars`: clan wars
@@ -23,6 +25,7 @@ pub mod liveops;
 pub mod players;
 pub mod ratelimit;
 pub mod shop;
+pub mod tournaments;
 pub mod wars;
 
 use axum::routing::{get, post, put};
@@ -105,6 +108,10 @@ pub fn router(st: AppState) -> Router {
         .route("/v1/cup", get(cup::standings))
         .route("/v1/cup/entry", post(cup::enter))
         .route("/v1/cup/{week}/{player}", get(cup::entry))
+        .route("/v1/tournaments", get(tournaments::list))
+        .route("/v1/tournaments/{id}", get(tournaments::standings))
+        .route("/v1/tournaments/{id}/entry", post(tournaments::enter))
+        .route("/v1/tournaments/{id}/entries/{player}", get(tournaments::entry))
         .route("/v1/season", get(league::get_season))
         .route("/v1/me/seasons", get(league::my_seasons))
         .route("/v1/live", get(liveops::live))
@@ -144,12 +151,16 @@ pub fn router(st: AppState) -> Router {
 }
 
 /// Background work, every few minutes: close a finished season, score
-/// finished wars, then `cleanup`.
+/// finished wars, pay the weekly cup and finished tournaments, then
+/// `cleanup`.
 pub async fn tick(st: &AppState) -> Result<(), String> {
     let live = liveops::Live::load(&st.db, &st.cfg).await.map_err(|e| e.to_string())?;
     league::current(&st.db, live.season_length()).await.map_err(|e| e.message)?;
     league::roll(&st.db, &live).await.map_err(|e| e.to_string())?;
     wars::settle(&st.db, &live).await.map_err(|e| e.message)?;
+    let week = live.cup_week(chrono::Utc::now().timestamp());
+    cup::pay_finished(&st.db, week, live.cup_prizes()).await.map_err(|e| e.to_string())?;
+    tournaments::pay_finished(&st.db).await.map_err(|e| e.message)?;
     cleanup(&st.db, st.cfg.keep_raids).await.map_err(|e| e.to_string())
 }
 
@@ -179,12 +190,19 @@ pub async fn cleanup(db: &PgPool, keep_raids: Duration) -> Result<(), sqlx::Erro
     .bind(keep_raids)
     .execute(db)
     .await?;
-    cup::pay_finished(db, bag_protocol::cup_week(chrono::Utc::now().timestamp())).await?;
-    // Cup entries stay for last week's podium, then go (each holds a troop).
-    sqlx::query("DELETE FROM cup_entries WHERE week < $1")
+    // Cup entries stay for last week's podium, then go (each holds a
+    // troop). Only paid weeks: `tick` pays them first.
+    sqlx::query("DELETE FROM cup_entries WHERE week < $1 AND prize IS NOT NULL")
         .bind(bag_protocol::cup_week(chrono::Utc::now().timestamp()) as i32 - 4)
         .execute(db)
         .await?;
+    // Tournament troops go a month after the prizes; the table stays.
+    sqlx::query(
+        "UPDATE tournament_entries e SET troop = '' FROM tournaments t
+         WHERE t.id = e.tournament_id AND t.paid_at < now() - interval '30 days' AND e.troop <> ''",
+    )
+    .execute(db)
+    .await?;
     sqlx::query(
         "DELETE FROM snapshots s
          WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.current_snapshot = s.id)

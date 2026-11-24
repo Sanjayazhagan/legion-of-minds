@@ -14,7 +14,8 @@ use crate::{Game, Screen};
 use bag_client::bag_protocol::{
     AttackLog, CupReplay, CupStandings, LoginStart, Match, Providers, PublicPlayer, Published,
     Replay, Upgrades, User, KIND_PRACTICE, KIND_REVENGE, ClanSummary, League, Loan, Season,
-    MAX_BORROWED, GiftClaimed, LiveView, bracket_name, troop_bracket,
+    MAX_BORROWED, GiftClaimed, LiveView, bracket_name, troop_bracket, CUP_PRIZES,
+    TournamentStandings,
 };
 use godcore::ppo::ONLINE_BRAIN_MAX;
 use bag_client::{
@@ -642,6 +643,7 @@ struct Refreshed {
     loans: Vec<Loan>,
     cup: Option<CupStandings>,
     live: Option<LiveView>,
+    tours: Vec<TournamentStandings>,
 }
 
 enum Busy {
@@ -654,6 +656,8 @@ enum Busy {
     /// Entering the weekly cup.
     Cup(Task<CupStandings>),
     CupWatch(Task<CupReplay>),
+    /// Entering a one-off tournament.
+    Tour(Task<TournamentStandings>),
     /// An online upgrade, and what to say once it's paid.
     Buy(Task<User>, String),
     /// Claiming a gift from the game's operator.
@@ -677,6 +681,11 @@ pub struct OnlineState {
     cup: Option<CupStandings>,
     /// The right panel shows the weekly cup instead of the top players.
     show_cup: bool,
+    /// One-off tournaments the operator runs (running, coming up or just
+    /// over), shown next to the weekly cup.
+    tours: Vec<TournamentStandings>,
+    /// Which cup the panel shows: 0 the weekly cup, k tournament k - 1.
+    cup_pick: usize,
 }
 
 impl OnlineState {
@@ -685,8 +694,13 @@ impl OnlineState {
     pub fn demo(g: &mut Game) -> Screen {
         g.account.user = g.account.client().me().ok();
         let mut s = OnlineState::new(g);
-        // BAG_SCREEN=cup opens on the Weekly cup tab.
-        s.show_cup = std::env::var("BAG_SCREEN").as_deref() == Ok("cup");
+        // BAG_SCREEN=cup opens on the Weekly cup tab, BAG_SCREEN=online-tournament
+        // on the first one-off tournament.
+        let screen = std::env::var("BAG_SCREEN").unwrap_or_default();
+        s.show_cup = screen == "cup" || screen == "online-tournament";
+        if screen == "online-tournament" {
+            s.cup_pick = 1;
+        }
         Screen::Online(s)
     }
 
@@ -704,6 +718,8 @@ impl OnlineState {
             msg: None,
             cup: None,
             show_cup: false,
+            tours: Vec::new(),
+            cup_pick: 0,
         };
         s.refresh(g);
         s
@@ -730,6 +746,14 @@ impl OnlineState {
                 user,
                 // An older server has no cup: the panel just stays empty.
                 cup: c.cup().ok(),
+                // Nor tournaments.
+                tours: c
+                    .tournaments()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(3)
+                    .filter_map(|t| c.tournament(t.id, None).ok())
+                    .collect(),
             })
         })));
     }
@@ -866,6 +890,10 @@ impl Game {
                         s.loans = f.loans;
                         s.cup = f.cup;
                         s.live = f.live;
+                        s.tours = f.tours;
+                        if s.cup_pick > s.tours.len() {
+                            s.cup_pick = 0;
+                        }
                     })
                 }),
                 Busy::Publish(t) => t.poll().map(|r| {
@@ -931,6 +959,20 @@ impl Game {
                         s.cup = Some(c);
                     })
                 }),
+                Busy::Tour(t) => t.poll().map(|r| {
+                    r.map(|ts| {
+                        if let Some(m) = &ts.mine {
+                            s.msg = Some((
+                                format!("{} entered {}: rank {} of {}", m.troop_name, ts.info.title, m.rank, ts.entries),
+                                GOOD,
+                            ));
+                        }
+                        match s.tours.iter_mut().find(|x| x.info.id == ts.info.id) {
+                            Some(x) => *x = ts,
+                            None => s.tours.push(ts),
+                        }
+                    })
+                }),
                 Busy::CupWatch(t) => {
                     if let Some(r) = t.poll() {
                         match r {
@@ -948,7 +990,27 @@ impl Game {
                     }
                     r.map(|g| {
                         self.account.user = Some(g.user);
-                        s.msg = Some((format!("Gift claimed: {} online gold", g.gold), GOOD));
+                        let mut got = Vec::new();
+                        if g.gold > 0 {
+                            got.push(format!("{} online gold", g.gold));
+                        }
+                        for w in &g.weapons {
+                            got.push(format!("{} unlocked", w.name()));
+                        }
+                        // A troop from the server joins the barracks with the
+                        // id the server gave it: its level counts online
+                        // under that id.
+                        if let Some(t) = g.troop {
+                            if !self.troops.iter().any(|x| x.id == t.id) {
+                                got.push(format!("{} joined your barracks", t.name.trim()));
+                                self.troops.push(t);
+                                self.save_all();
+                            }
+                        }
+                        if got.is_empty() {
+                            got.push("nothing new".into());
+                        }
+                        s.msg = Some((format!("Gift claimed: {}", got.join(", ")), GOOD));
                     })
                 }),
                 Busy::Buy(t, what) => t.poll().map(|r| {
@@ -1278,6 +1340,7 @@ impl Game {
             Some(Busy::Replay(_)) => Some("Loading the replay...".into()),
             Some(Busy::Cup(_)) => Some("Entering the cup: the server is running its raids...".into()),
             Some(Busy::CupWatch(_)) => Some("Loading the cup entry...".into()),
+            Some(Busy::Tour(_)) => Some("Entering the tournament: the server is running its raids...".into()),
             Some(Busy::Buy(..)) => Some("Paying with online gold...".into()),
             Some(Busy::Claim(..)) => Some("Claiming your gift...".into()),
             None => None,
@@ -1415,7 +1478,7 @@ impl Game {
         }
         if self.ui.button_ex(
             Rect::new(right.x + 40.0 + tab_w * 2.0, right.y + 10.0, tab_w, 30.0),
-            "Weekly cup",
+            if s.tours.is_empty() { "Weekly cup" } else { "Cups" },
             true,
             s.show_cup,
         ) {
@@ -1464,22 +1527,103 @@ impl Game {
                     league_color(League::of(p.trophies)),
                 );
             }
+        } else if s.cup_pick > 0 && s.cup_pick <= s.tours.len() {
+            // A one-off tournament.
+            let top_y = self.cup_picker(&mut s, right, idle);
+            let ts = s.tours[s.cup_pick - 1].clone();
+            let t = &ts.info;
+            let when = if t.paid || t.finished {
+                "Over: prizes sent as gifts".to_string()
+            } else if t.active {
+                format!("Ends in {}", time_left(&t.ends_at))
+            } else {
+                format!("Starts in {}", time_left(&t.starts_at))
+            };
+            let head = format!("{when}. {}, {} entered in \"{}\".", t.rules(), ts.entries, bracket_name(ts.category));
+            text(&fit(&head, right.w - 40.0, 15.0), right.x + 20.0, top_y, 15.0, MUTED);
+            let prizes = t
+                .prizes
+                .iter()
+                .map(|p| format!("{}: {}", p.ranks(), p.text))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            text(&fit(&prizes, right.w - 40.0, 15.0), right.x + 20.0, top_y + 18.0, 15.0, ACCENT);
+            let mut rows: Vec<_> = ts.top.iter().take(5).collect();
+            if let Some(m) = &ts.mine {
+                if !rows.iter().any(|r| r.player.id == m.player.id) {
+                    rows.pop();
+                    rows.push(m);
+                }
+            }
+            if rows.is_empty() {
+                let msg = if t.message.is_empty() { "Nobody has entered yet: be the first." } else { t.message.as_str() };
+                text(&fit(msg, right.w - 40.0, 16.0), right.x + 20.0, top_y + 50.0, 16.0, TEXT);
+            }
+            for (k, r) in rows.iter().enumerate() {
+                let yy = top_y + 48.0 + k as f32 * 32.0;
+                let col = if r.player.id == me.id { ACCENT } else { TEXT };
+                let who: String = format!("{}. {}: {}", r.rank, r.player.display_name, r.troop_name)
+                    .chars()
+                    .take(26)
+                    .collect();
+                row(&who, &format!("{:.0}", r.score), yy, col, 62.0);
+                if self.ui.button_ex(Rect::new(right.x + right.w - 72.0, yy - 20.0, 58.0, 26.0), "Watch", idle, false) {
+                    let c = self.account.client();
+                    let (tid, id) = (t.id, r.player.id);
+                    s.busy = Some(Busy::CupWatch(Task::spawn(move || c.tournament_replay(tid, id).map_err(err))));
+                }
+            }
+            // Your best attacker that fits the rules goes in.
+            let champion = army
+                .iter()
+                .map(|(t, _)| t)
+                .find(|x| {
+                    t.class.is_none_or(|c| x.spec.main_class() == c)
+                        && t.category.is_none_or(|c| troop_bracket(x) == c)
+                })
+                .cloned();
+            let label = match (&champion, t.active) {
+                (_, false) => if t.finished { "This tournament is over".into() } else { "Not open yet".into() },
+                (Some(x), true) => format!("Enter {}", x.name.trim()),
+                (None, true) => "No attacker fits the rules".into(),
+            };
+            if self.ui.button_ex(
+                Rect::new(right.x + 20.0, right.y + right.h - 52.0, right.w - 40.0, 40.0),
+                &label,
+                idle && champion.is_some() && t.active,
+                false,
+            ) {
+                if let Some(x) = champion {
+                    let c = self.account.client();
+                    let id = t.id;
+                    s.msg = None;
+                    s.busy = Some(Busy::Tour(Task::spawn(move || c.enter_tournament(id, &x).map_err(err))));
+                }
+            }
         } else if let Some(cup) = s.cup.clone() {
+            let top_y = self.cup_picker(&mut s, right, idle);
+            let shift = top_y - (right.y + 62.0);
+            let ends = if cup.open {
+                format!("Ends in {}.", time_left(&cup.ends_at))
+            } else {
+                "Paused for now: no new entries.".to_string()
+            };
             text(
-                &format!("{} entered in \"{}\" brains. Ends Monday 00:00 UTC.", cup.entries, bracket_name(cup.category)),
+                &format!("{} entered in \"{}\" brains. {ends}", cup.entries, bracket_name(cup.category)),
                 right.x + 20.0,
-                right.y + 62.0,
+                top_y,
+                15.0,
+                if cup.open { MUTED } else { ACCENT },
+            );
+            let p = if cup.prizes.len() == 5 { cup.prizes.clone() } else { CUP_PRIZES.to_vec() };
+            text(
+                &format!("Gold: {}, {}, {}, top ten {}, everyone {}", p[0], p[1], p[2], p[3], p[4]),
+                right.x + 20.0,
+                top_y + 18.0,
                 15.0,
                 MUTED,
             );
-            text(
-                "Gold: 500, 300, 200, top ten 100, everyone 25",
-                right.x + 20.0,
-                right.y + 80.0,
-                15.0,
-                MUTED,
-            );
-            let mut rows: Vec<_> = cup.top.iter().take(6).collect();
+            let mut rows: Vec<_> = cup.top.iter().take(if shift > 0.0 { 5 } else { 6 }).collect();
             if let Some(m) = &cup.mine {
                 if !rows.iter().any(|r| r.player.id == m.player.id) {
                     rows.pop();
@@ -1493,13 +1637,13 @@ impl Game {
                 text(
                     champ.as_deref().unwrap_or("Nobody has entered yet: be the first."),
                     right.x + 20.0,
-                    right.y + 112.0,
+                    right.y + 112.0 + shift,
                     16.0,
                     TEXT,
                 );
             }
             for (k, r) in rows.iter().enumerate() {
-                let yy = right.y + 110.0 + k as f32 * 32.0;
+                let yy = right.y + 110.0 + shift + k as f32 * 32.0;
                 let col = if r.player.id == me.id { ACCENT } else { TEXT };
                 let who: String = format!("{}. {}: {}", r.rank, r.player.display_name, r.troop_name)
                     .chars()
@@ -1526,7 +1670,7 @@ impl Game {
             if self.ui.button_ex(
                 Rect::new(right.x + 20.0, right.y + right.h - 52.0, right.w - 40.0, 40.0),
                 &label,
-                idle && champion.is_some(),
+                idle && champion.is_some() && cup.open,
                 false,
             ) {
                 if let Some(t) = champion {
@@ -1902,6 +2046,30 @@ mod tests {
 const NEWS_H: f32 = 64.0;
 
 impl Game {
+    /// Buttons to switch between the weekly cup and one-off tournaments,
+    /// when there are any. Returns where the cup's text starts.
+    fn cup_picker(&mut self, s: &mut OnlineState, right: Rect, idle: bool) -> f32 {
+        if s.tours.is_empty() {
+            return right.y + 62.0;
+        }
+        let n = s.tours.len() + 1;
+        let w = (right.w - 40.0 - 6.0 * (n - 1) as f32) / n as f32;
+        for k in 0..n {
+            let name = if k == 0 { "Weekly".to_string() } else { s.tours[k - 1].info.title.clone() };
+            let live = k > 0 && s.tours[k - 1].info.active;
+            let label = fit(&if live { format!("* {name}") } else { name }, w - 12.0, 15.0);
+            if self.ui.button_ex(
+                Rect::new(right.x + 20.0 + k as f32 * (w + 6.0), right.y + 48.0, w, 26.0),
+                &label,
+                idle,
+                s.cup_pick == k,
+            ) {
+                s.cup_pick = k;
+            }
+        }
+        right.y + 94.0
+    }
+
     /// The strip above the battle log: the first gift to claim, else the
     /// running (or next) event. Returns the height it took.
     fn online_news(&mut self, s: &mut OnlineState, idle: bool) -> f32 {
@@ -1915,7 +2083,12 @@ impl Game {
             } else {
                 String::new()
             };
-            text(&format!("Gift: {} online gold{more}", g.gold), r.x + 14.0, r.y + 24.0, 19.0, ACCENT);
+            let what = if g.weapons.is_empty() && g.troop_name.is_none() {
+                format!("{} online gold", g.gold)
+            } else {
+                g.describe()
+            };
+            text(&fit(&format!("Gift: {what}{more}"), r.w - 130.0, 19.0), r.x + 14.0, r.y + 24.0, 19.0, ACCENT);
             let msg = if g.message.is_empty() { "From the Legion of Minds team".to_string() } else { g.message.clone() };
             text(&fit(&msg, r.w - 150.0, 15.0), r.x + 14.0, r.y + 46.0, 15.0, TEXT);
             if self.ui.button_ex(Rect::new(r.x + r.w - 104.0, r.y + 12.0, 92.0, 34.0), "Claim", idle, false) {

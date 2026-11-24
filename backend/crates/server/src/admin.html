@@ -55,6 +55,17 @@
   .log { font-size: 13px; color: var(--muted); }
   .log div { padding: 4px 0; border-top: 1px solid var(--line); }
   .log b { color: var(--text); font-weight: 600; }
+  .checks { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 4px; }
+  .checks label { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--text); font-size: 14px; }
+  .checks input { width: auto; }
+  .bands { display: grid; gap: 8px; margin-top: 6px; }
+  .band { display: grid; grid-template-columns: 64px 64px 100px minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; align-items: end; }
+  .band label { margin: 0 0 2px; font-size: 12px; }
+  .band input[type=file] { padding: 5px; font-size: 12px; }
+  .cupline { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 14px; }
+  .cupline b { color: var(--text); }
+  .tag.paid { background: var(--accent); color: #1a1406; }
+  @media (max-width: 800px) { .band { grid-template-columns: 1fr 1fr; } }
   @media (max-width: 800px) { main { grid-template-columns: 1fr; } .row { grid-template-columns: 1fr; } header .stats { display: none; } }
 </style>
 </head>
@@ -108,12 +119,16 @@
   </section>
 
   <section>
-    <h2>Give gold</h2>
-    <p class="lead">Players get a gift they claim on the Online screen. Good for apologies after downtime, or a prize.</p>
+    <h2>Give a gift</h2>
+    <p class="lead">Players get a gift they claim on the Online screen: gold, weapons unlocked online, or a trained troop for their barracks. Good for apologies after downtime, or a prize.</p>
     <div class="row">
-      <div><label for="g-gold">Gold</label><input id="g-gold" type="number" min="1" max="100000" value="500"></div>
+      <div><label for="g-gold">Gold</label><input id="g-gold" type="number" min="0" max="100000" value="500"></div>
       <div><label for="g-days">Days to claim it</label><input id="g-days" type="number" min="1" max="90" value="14"></div>
     </div>
+    <label>Weapons to unlock (optional)</label>
+    <div class="checks" id="g-weapons"></div>
+    <label for="g-troop">Troop (optional): a .troop.json file saved by the game. Its weapon is unlocked with it.</label>
+    <input id="g-troop" type="file" accept=".json,application/json">
     <label for="g-who">To (empty = every player; or a player's name or id)</label>
     <input id="g-who" placeholder="Everyone">
     <label for="g-msg">Message</label>
@@ -137,6 +152,42 @@
   </section>
 
   <section>
+    <h2>Weekly cup</h2>
+    <p class="lead">Runs by itself every week. Prizes, the closing day and hour, and pausing are under Rewards and timings (Weekly cup).</p>
+    <div class="cupline" id="cup-line"></div>
+    <div class="actions"><button class="ghost" id="cup-toggle">Pause the cup</button></div>
+  </section>
+
+  <section class="wide">
+    <h2>Tournaments</h2>
+    <p class="lead">One-off tournaments next to the weekly cup. Each player enters one attacker, scored like the cup and ranked within each brain-size category. When it ends, prizes go out as gifts players claim in the game.</p>
+    <div class="presets">
+      <button class="ghost" data-tpreset="weekend">Weekend tournament</button>
+      <button class="ghost" data-tpreset="class">One class only</button>
+      <button class="ghost" data-tpreset="big">Big brains only</button>
+    </div>
+    <div class="row">
+      <div><label for="t-title">Name</label><input id="t-title" maxlength="60" placeholder="Weekend Clash"></div>
+      <div><label for="t-msg">Message players see</label><input id="t-msg" maxlength="240" placeholder="Best attacker wins a trained troop!"></div>
+    </div>
+    <div class="row">
+      <div><label for="t-start">Starts (empty = now)</label><input id="t-start" type="datetime-local"></div>
+      <div><label for="t-end">Ends</label><input id="t-end" type="datetime-local"></div>
+    </div>
+    <div class="row">
+      <div><label for="t-cat">Brain size</label><select id="t-cat"><option value="">Every category (each ranked on its own)</option></select></div>
+      <div><label for="t-class">Class</label><select id="t-class"><option value="">Any class</option></select></div>
+    </div>
+    <label>Prizes, per category (ranks are inclusive; a troop file adds that troop to the prize)</label>
+    <div class="bands" id="t-bands"></div>
+    <div class="actions">
+      <button class="ghost" id="t-add">Add prize band</button>
+      <button id="t-go">Create tournament</button>
+    </div>
+    <div class="list" id="tournaments"></div>
+  </section>
+
+  <section>
     <h2>Recent changes</h2>
     <div class="log" id="log"></div>
   </section>
@@ -154,6 +205,25 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
+const WEAPONS = [["SwordShield", "Sword and shield"], ["Greataxe", "Greataxe"], ["Greatsword", "Greatsword"],
+  ["Daggers", "Twin daggers"], ["Crossbow", "Crossbow"], ["FireStaff", "Fire staff"], ["HolyWand", "Holy wand"]];
+const CLASSES = ["Fighter", "Archer", "Healer", "Mage", "Assassin", "Paladin", "Warlock", "Hunter", "Guard", "Sentry", "Keeper"];
+const weaponName = (w) => (WEAPONS.find((x) => x[0] === w) || [w, w])[1];
+function reward(gold, weapons, troop) {
+  const p = [];
+  if (gold > 0) p.push(`${gold} gold`);
+  for (const w of weapons || []) p.push(weaponName(w));
+  if (troop) p.push(`troop ${troop}`);
+  return p.join(", ") || "nothing";
+}
+// A .troop.json chosen in a file input, parsed; null when none.
+async function troopFrom(input) {
+  const f = input.files && input.files[0];
+  if (!f) return null;
+  if (f.size > 8e6) throw new Error("That troop file is too big");
+  try { return JSON.parse(await f.text()); } catch (e) { throw new Error(`${f.name} is not a troop file`); }
+}
+let CUP = null;
 let KEY = "";
 try { KEY = sessionStorage.getItem("bagAdminKey") || ""; } catch (e) {}
 
@@ -274,16 +344,19 @@ function renderOverview(o) {
     const open = new Date(g.expires_at).getTime() > now;
     gs.append(el("div", { class: "item" },
       el("div", { class: "body" },
-        el("div", { class: "title" }, `${g.gold} gold to ${g.player || "everyone"}`),
+        el("div", { class: "title" }, `${reward(g.gold, g.weapons, g.troop_name)} to ${g.player || "everyone"}`),
         el("div", { class: "meta" }, `${g.claims} claimed · sent ${when(g.created_at)} · ${open ? "open until " + when(g.expires_at) : "closed"}`),
         g.message ? el("div", { class: "meta" }, g.message) : null),
       open ? el("button", { class: "ghost", onclick: (ev) => busy(ev.target, async () => {
-        if (!confirm("Stop this gift being claimed? Gold already claimed stays.")) return;
+        if (!confirm("Stop this gift being claimed? What was already claimed stays.")) return;
         await api("POST", `/v1/admin/gifts/${g.id}/cancel`);
         toast("Gift closed"); await load();
       }) }, "Close") : null));
   }
   if (!o.gifts.length) gs.append(el("div", { class: "empty" }, "No gifts in the last 30 days."));
+
+  renderCup(o.cup);
+  renderTournaments(o.tournaments || []);
 
   const s = o.season;
   $("season-line").textContent = `Season ${s.number}${s.name ? ": " + s.name : ""}, started ${when(s.started_at)}, ends ${when(s.ends_at)}.`;
@@ -295,6 +368,91 @@ function renderOverview(o) {
   for (const l of o.log) log.append(el("div", {}, el("b", {}, l.action), ` · ${when(l.at)} · ${l.detail}`));
   if (!o.log.length) log.append(el("div", {}, "Nothing changed yet."));
 }
+
+function renderCup(c) {
+  CUP = c;
+  const line = $("cup-line");
+  line.replaceChildren();
+  if (!c) return;
+  const cats = c.categories.length ? c.categories : c.entries.map((_, i) => `Category ${i + 1}`);
+  line.append(
+    el("div", {}, el("b", {}, c.open ? "Open" : "Paused"), ` · closes ${when(c.ends_at)}`),
+    el("div", {}, "Entries: ", el("b", {}, cats.map((n, i) => `${n}: ${c.entries[i] || 0}`).join(", "))),
+    el("div", {}, "Prizes: ", el("b", {}, `${c.prizes[0]} / ${c.prizes[1]} / ${c.prizes[2]}, 4th-10th ${c.prizes[3]}, others ${c.prizes[4]}`)));
+  $("cup-toggle").textContent = c.open ? "Pause the cup" : "Open the cup again";
+  const sel = $("t-cat");
+  if (sel.options.length === 1) cats.forEach((n, i) => sel.append(el("option", { value: String(i) }, `"${n}" brains only`)));
+}
+
+function renderTournaments(list) {
+  const ts = $("tournaments");
+  ts.replaceChildren();
+  for (const t of list) {
+    const tag = t.paid ? el("span", { class: "tag paid" }, "PAID") : t.finished ? el("span", { class: "tag over" }, "PAYING") : t.active ? el("span", { class: "tag live" }, "LIVE") : el("span", { class: "tag soon" }, "SOON");
+    const rules = [t.class ? `${t.class} only` : null, t.category != null && CUP ? `"${CUP.categories[t.category]}" brains only` : null].filter(Boolean).join(", ") || "any attacker";
+    const prizes = t.prizes.map((p) => `${p.from === p.to ? "#" + p.from : "#" + p.from + "-" + p.to}: ${p.text}`).join(" · ");
+    const acts = el("div", { class: "actions", style: "margin-top:0" });
+    if (t.active) acts.append(el("button", { class: "ghost", onclick: (ev) => busy(ev.target, async () => {
+      if (!confirm(`End "${t.title}" now and hand out its prizes?`)) return;
+      await api("POST", `/v1/admin/tournaments/${t.id}/end`);
+      toast("Ended; prizes sent as gifts"); await load(true);
+    }) }, "End now"));
+    if (!t.paid) acts.append(el("button", { class: "danger", onclick: (ev) => busy(ev.target, async () => {
+      if (!confirm(`Call off "${t.title}"? Its entries are deleted and nobody gets a prize.`)) return;
+      await api("POST", `/v1/admin/tournaments/${t.id}/cancel`);
+      toast("Tournament called off"); await load(true);
+    }) }, "Call off"));
+    ts.append(el("div", { class: "item" },
+      el("div", { class: "body" },
+        el("div", { class: "title" }, tag, t.title),
+        el("div", { class: "meta" }, `${rules} · ${t.entries} entered · ${when(t.starts_at)} to ${when(t.ends_at)}`),
+        el("div", { class: "meta" }, prizes),
+        t.message ? el("div", { class: "meta" }, t.message) : null),
+      acts));
+  }
+  if (!list.length) ts.append(el("div", { class: "empty" }, "No tournaments yet."));
+}
+
+function addBand(from, to, gold, weapon) {
+  const id = (n) => n + Math.random().toString(36).slice(2, 8);
+  const wsel = el("select", {}, el("option", { value: "" }, "No weapon"), ...WEAPONS.map(([k, n]) => el("option", { value: k }, n)));
+  wsel.value = weapon || "";
+  const row = el("div", { class: "band" },
+    el("div", {}, el("label", {}, "From rank"), el("input", { type: "number", min: "1", max: "1000", value: String(from), "data-f": "from" })),
+    el("div", {}, el("label", {}, "To rank"), el("input", { type: "number", min: "1", max: "1000", value: String(to), "data-f": "to" })),
+    el("div", {}, el("label", {}, "Gold"), el("input", { type: "number", min: "0", max: "100000", value: String(gold), "data-f": "gold" })),
+    el("div", {}, el("label", {}, "Weapon"), wsel),
+    el("div", {}, el("label", {}, "Troop file"), el("input", { type: "file", accept: ".json,application/json", "data-f": "troop" })),
+    el("button", { class: "ghost", title: "Remove", onclick: () => row.remove() }, "✕"));
+  wsel.dataset.f = "weapon";
+  $("t-bands").append(row);
+}
+
+function tpreset(name) {
+  const now = new Date();
+  $("t-bands").replaceChildren();
+  $("t-start").value = ""; $("t-cat").value = ""; $("t-class").value = "";
+  if (name === "weekend") {
+    const end = new Date(now);
+    end.setDate(now.getDate() + ((1 - now.getDay() + 7) % 7 || 7));
+    end.setHours(0, 0, 0, 0);
+    $("t-title").value = "Weekend Clash";
+    $("t-msg").value = "Enter your best attacker before Monday. Top three win big!";
+    $("t-end").value = localInput(end);
+  } else if (name === "class") {
+    $("t-title").value = "Archers' Contest";
+    $("t-msg").value = "Archers only. Show us your sharpest shooter.";
+    $("t-class").value = "Archer";
+    $("t-end").value = localInput(new Date(now.getTime() + 3 * 24 * 3600e3));
+  } else {
+    $("t-title").value = "Big Brain Bash";
+    $("t-msg").value = "Only the biggest brains may enter.";
+    $("t-cat").value = "1";
+    $("t-end").value = localInput(new Date(now.getTime() + 7 * 24 * 3600e3));
+  }
+  addBand(1, 1, 1500, ""); addBand(2, 3, 600, ""); addBand(4, 10, 150, "");
+}
+document.querySelectorAll("[data-tpreset]").forEach((b) => b.addEventListener("click", () => tpreset(b.dataset.tpreset)));
 
 function renderSettings(list) {
   SETTINGS = list;
@@ -339,11 +497,54 @@ $("ev-go").addEventListener("click", (ev) => busy(ev.target, async () => {
 }));
 
 $("g-go").addEventListener("click", (ev) => busy(ev.target, async () => {
-  const gold = Number($("g-gold").value);
+  const gold = Number($("g-gold").value || 0);
   const who = $("g-who").value.trim();
-  if (!confirm(`Give ${gold} gold to ${who || "every player"}?`)) return;
-  await api("POST", "/v1/admin/gifts", { gold, player: who || null, message: $("g-msg").value, days: Number($("g-days").value || 14) });
-  toast("Gift sent"); $("g-msg").value = ""; await load();
+  const weapons = [...document.querySelectorAll("#g-weapons input:checked")].map((i) => i.value);
+  const troop = await troopFrom($("g-troop"));
+  const what = reward(gold, weapons, troop && troop.name);
+  if (what === "nothing") throw new Error("Add gold, a weapon or a troop");
+  if (!confirm(`Give ${what} to ${who || "every player"}?`)) return;
+  await api("POST", "/v1/admin/gifts", { gold, weapons, troop, player: who || null, message: $("g-msg").value, days: Number($("g-days").value || 14) });
+  toast("Gift sent"); $("g-msg").value = ""; $("g-troop").value = "";
+  document.querySelectorAll("#g-weapons input").forEach((i) => (i.checked = false));
+  await load(true);
+}));
+
+$("cup-toggle").addEventListener("click", (ev) => busy(ev.target, async () => {
+  const open = !(CUP && CUP.open);
+  if (!open && !confirm("Pause the weekly cup? Nobody can enter until you open it again. Entries already in still get paid.")) return;
+  renderSettings(await api("PUT", "/v1/admin/settings", { cup_open: open ? 1 : 0 }));
+  toast(open ? "Cup open" : "Cup paused"); await load(true);
+}));
+
+$("t-add").addEventListener("click", () => {
+  const last = [...document.querySelectorAll("#t-bands .band")].pop();
+  const from = last ? Number(last.querySelector("[data-f=to]").value) + 1 : 1;
+  addBand(from, from, 100, "");
+});
+
+$("t-go").addEventListener("click", (ev) => busy(ev.target, async () => {
+  const end = fromInput($("t-end").value);
+  if (!end) throw new Error("Pick when the tournament ends");
+  const prizes = [];
+  for (const b of document.querySelectorAll("#t-bands .band")) {
+    const v = (f) => b.querySelector(`[data-f=${f}]`);
+    const weapon = v("weapon").value;
+    prizes.push({
+      from: Number(v("from").value), to: Number(v("to").value),
+      reward: { gold: Number(v("gold").value || 0), weapons: weapon ? [weapon] : [], troop: await troopFrom(v("troop")) },
+    });
+  }
+  const body = {
+    title: $("t-title").value, message: $("t-msg").value,
+    starts_at: fromInput($("t-start").value), ends_at: end,
+    category: $("t-cat").value === "" ? null : Number($("t-cat").value),
+    class: $("t-class").value || null,
+    prizes,
+  };
+  const t = await api("POST", "/v1/admin/tournaments", body);
+  toast(t.active ? `"${t.title}" is open` : `"${t.title}" opens ${when(t.starts_at)}`);
+  await load(true);
 }));
 
 $("s-save").addEventListener("click", (ev) => busy(ev.target, async () => {
@@ -393,7 +594,10 @@ $("unlock").addEventListener("click", () => { KEY = $("key").value.trim(); unloc
 $("key").addEventListener("keydown", (e) => { if (e.key === "Enter") $("unlock").click(); });
 $("lock").addEventListener("click", lock);
 $("refresh").addEventListener("click", (ev) => busy(ev.target, () => load()));
+for (const [k, n] of WEAPONS) $("g-weapons").append(el("label", {}, el("input", { type: "checkbox", value: k }), n));
+for (const c of CLASSES) $("t-class").append(el("option", { value: c }, `${c} troops only`));
 preset("weekend");
+tpreset("weekend");
 if (KEY) unlock();
 </script>
 </body>

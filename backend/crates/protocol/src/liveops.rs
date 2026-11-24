@@ -5,7 +5,9 @@
 //! much gold and how long a shield a finished battle pays out, so raids
 //! re-run by the server give the same result as before.
 
-use crate::{Season, User};
+use crate::{Season, TournamentInfo, User};
+use godcore::troop::Troop;
+use godcore::weapons::Weapon;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -60,7 +62,56 @@ impl LiveEvent {
     }
 }
 
-/// Gold the operator gave out, waiting for the player to claim it.
+/// A prize or gift: gold, weapons unlocked online, and a ready-trained
+/// troop for the player's barracks. Any of them may be missing.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Reward {
+    #[serde(default)]
+    pub gold: i64,
+    /// Weapons unlocked online, as if bought.
+    #[serde(default)]
+    pub weapons: Vec<Weapon>,
+    /// A troop the player gets. Its weapon is unlocked with it and its
+    /// level counts online.
+    #[serde(default)]
+    pub troop: Option<Troop>,
+}
+
+impl Reward {
+    pub fn is_empty(&self) -> bool {
+        self.gold <= 0 && self.weapons.is_empty() && self.troop.is_none()
+    }
+
+    /// "500 gold, Crossbow, troop Wren (level 3)".
+    pub fn describe(&self) -> String {
+        describe_reward(self.gold, &self.weapons, self.troop.as_ref().map(|t| t.name.trim()))
+    }
+}
+
+/// How a reward reads in the game and on the admin page.
+pub fn describe_reward(gold: i64, weapons: &[Weapon], troop: Option<&str>) -> String {
+    let mut p = Vec::new();
+    if gold > 0 {
+        p.push(format!("{gold} gold"));
+    }
+    for w in weapons {
+        p.push(w.name().to_string());
+    }
+    if let Some(t) = troop {
+        p.push(format!("troop {t}"));
+    }
+    if p.is_empty() {
+        "nothing".into()
+    } else {
+        p.join(", ")
+    }
+}
+
+/// Most weapons one gift or prize can unlock.
+pub const REWARD_WEAPONS_MAX: usize = 7;
+
+/// A gift from the operator (or a tournament prize), waiting for the
+/// player to claim it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Gift {
     pub id: Uuid,
@@ -68,6 +119,18 @@ pub struct Gift {
     #[serde(default)]
     pub message: String,
     pub expires_at: String,
+    /// Weapons it unlocks online.
+    #[serde(default)]
+    pub weapons: Vec<Weapon>,
+    /// Name of the troop it gives, if any (the troop comes with the claim).
+    #[serde(default)]
+    pub troop_name: Option<String>,
+}
+
+impl Gift {
+    pub fn describe(&self) -> String {
+        describe_reward(self.gold, &self.weapons, self.troop_name.as_deref())
+    }
 }
 
 /// What the game shows about live operations: `GET /v1/live`.
@@ -88,6 +151,13 @@ pub struct LiveView {
 pub struct GiftClaimed {
     pub gold: i64,
     pub user: User,
+    /// Weapons now unlocked online.
+    #[serde(default)]
+    pub weapons: Vec<Weapon>,
+    /// A troop for the barracks. The server picked its id, and its level
+    /// already counts online under that id: keep the id.
+    #[serde(default)]
+    pub troop: Option<Troop>,
 }
 
 /// Running events combined: extras add up, so two "double gold" events at
@@ -132,10 +202,16 @@ fn hundred() -> i32 {
     100
 }
 
-/// Give gold to every player, or to one.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Give gold, weapons or a troop to every player, or to one.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NewGift {
+    #[serde(default)]
     pub gold: i64,
+    #[serde(default)]
+    pub weapons: Vec<Weapon>,
+    /// A trained troop, as saved by the game (a .troop.json file).
+    #[serde(default)]
+    pub troop: Option<Troop>,
     #[serde(default)]
     pub message: String,
     /// A player's name or id. Missing means everyone.
@@ -174,6 +250,10 @@ pub struct SettingView {
 pub struct AdminGift {
     pub id: Uuid,
     pub gold: i64,
+    #[serde(default)]
+    pub weapons: Vec<Weapon>,
+    #[serde(default)]
+    pub troop_name: Option<String>,
     pub message: String,
     /// Player name, or empty for everyone.
     pub player: String,
@@ -200,6 +280,27 @@ pub struct AdminOverview {
     /// Players who signed in during the last day.
     pub active_today: i64,
     pub log: Vec<AdminLogEntry>,
+    /// The weekly cup this week.
+    #[serde(default)]
+    pub cup: Option<CupAdmin>,
+    /// Running, upcoming and recently finished one-off tournaments.
+    #[serde(default)]
+    pub tournaments: Vec<TournamentInfo>,
+}
+
+/// The weekly cup as the admin page shows it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CupAdmin {
+    pub week: i64,
+    pub open: bool,
+    pub ends_at: String,
+    /// Entries per brain-size category, in category order.
+    pub entries: Vec<i64>,
+    /// The categories' names ("Up to 256"...), in the same order.
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// Gold for 1st, 2nd, 3rd, 4th to 10th and everyone else.
+    pub prizes: Vec<i64>,
 }
 
 #[cfg(test)]

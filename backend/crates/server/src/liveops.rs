@@ -14,9 +14,11 @@ use crate::AppState;
 use axum::extract::{Path, State};
 use axum::Json;
 use bag_protocol::{
-    combined_gold_pct, combined_win_gold, scale_gold, Gift, GiftClaimed, League, LiveEvent,
-    LiveView, WarResult, LEAGUES,
+    combined_gold_pct, combined_win_gold, cup_close_offset, cup_week_at, scale_gold, Gift,
+    GiftClaimed, League, LiveEvent, LiveView, WarResult, CUP_PRIZES, LEAGUES,
 };
+use godcore::troop::Troop;
+use godcore::weapons::Weapon;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -64,6 +66,17 @@ pub const KNOBS: &[Knob] = &[
     knob("war_reward_draw", "Clan wars", "War drawn: gold per member", "", 0, GOLD_MAX),
     knob("war_reward_lost", "Clan wars", "War lost: gold per member", "", 0, GOLD_MAX),
     knob("start_gold", "New players", "Starting online gold", "Online gold a brand new account gets.", 0, GOLD_MAX),
+    knob("cup_open", "Weekly cup", "Cup open (1 = yes, 0 = paused)",
+        "Paused: nobody can enter or change an entry. Entries already in still get paid when the week closes.", 0, 1),
+    knob("cup_close_day", "Weekly cup", "Closes on (0 = Mon, 1 = Tue ... 6 = Sun)",
+        "Day the cup closes and pays, then the next one starts. Default Monday.", 0, 6),
+    knob("cup_close_hour", "Weekly cup", "Closes at hour (UTC, 0 to 23)",
+        "0 UTC is 5:30 AM India time.", 0, 23),
+    knob("cup_prize_1", "Weekly cup", "Gold for 1st", "Prizes are per brain-size category and paid when the week closes.", 0, GOLD_MAX),
+    knob("cup_prize_2", "Weekly cup", "Gold for 2nd", "", 0, GOLD_MAX),
+    knob("cup_prize_3", "Weekly cup", "Gold for 3rd", "", 0, GOLD_MAX),
+    knob("cup_prize_top10", "Weekly cup", "Gold for 4th to 10th", "", 0, GOLD_MAX),
+    knob("cup_prize_rest", "Weekly cup", "Gold for everyone else who entered", "", 0, GOLD_MAX),
 ];
 
 pub fn knob_of(key: &str) -> Option<&'static Knob> {
@@ -88,6 +101,12 @@ pub fn default_of(cfg: &Config, key: &str) -> i64 {
         "war_reward_draw" => WarResult::Draw.reward(),
         "war_reward_lost" => WarResult::Lost.reward(),
         "start_gold" => cfg.start_gold,
+        "cup_open" => 1,
+        "cup_prize_1" => CUP_PRIZES[0],
+        "cup_prize_2" => CUP_PRIZES[1],
+        "cup_prize_3" => CUP_PRIZES[2],
+        "cup_prize_top10" => CUP_PRIZES[3],
+        "cup_prize_rest" => CUP_PRIZES[4],
         _ => 0,
     }
 }
@@ -152,6 +171,26 @@ impl Live {
         scale_gold(l.win_bonus(stars), self.get("win_bonus_pct") as i32)
     }
 
+    pub fn cup_open(&self) -> bool {
+        self.get("cup_open") != 0
+    }
+
+    /// Seconds from Monday 00:00 UTC to the cup's close.
+    pub fn cup_offset(&self) -> i64 {
+        cup_close_offset(self.get("cup_close_day"), self.get("cup_close_hour"))
+    }
+
+    /// The cup week running at `unix_secs`.
+    pub fn cup_week(&self, unix_secs: i64) -> i64 {
+        cup_week_at(unix_secs, self.cup_offset())
+    }
+
+    /// Gold for 1st, 2nd, 3rd, 4th to 10th and the rest.
+    pub fn cup_prizes(&self) -> [i64; 5] {
+        ["cup_prize_1", "cup_prize_2", "cup_prize_3", "cup_prize_top10", "cup_prize_rest"]
+            .map(|k| self.get(k))
+    }
+
     /// Gold each war member gets, before events.
     pub fn war_reward(&self, r: WarResult) -> i64 {
         self.get(match r {
@@ -191,8 +230,8 @@ pub async fn events(db: &PgPool, filter: &str, limit: i64) -> Result<Vec<LiveEve
 
 /// Gifts the player can still claim.
 async fn open_gifts(db: &PgPool, user: Uuid) -> Result<Vec<Gift>, sqlx::Error> {
-    let rows: Vec<(Uuid, i64, String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT g.id, g.gold, g.message, g.expires_at FROM gifts g
+    let rows: Vec<(Uuid, i64, String, DateTime<Utc>, String, Option<String>)> = sqlx::query_as(
+        "SELECT g.id, g.gold, g.message, g.expires_at, g.weapons, g.troop_name FROM gifts g
          JOIN users u ON u.id = $1
          WHERE (g.user_id IS NULL OR g.user_id = $1) AND g.expires_at > now()
            AND NOT EXISTS (SELECT 1 FROM gift_claims c WHERE c.gift_id = g.id AND c.user_id = $1)
@@ -205,11 +244,13 @@ async fn open_gifts(db: &PgPool, user: Uuid) -> Result<Vec<Gift>, sqlx::Error> {
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, gold, message, e)| Gift {
+        .map(|(id, gold, message, e, weapons, troop_name)| Gift {
             id,
             gold,
             message,
             expires_at: e.to_rfc3339(),
+            weapons: weapons_from(&weapons),
+            troop_name,
         })
         .collect())
 }
@@ -235,15 +276,37 @@ pub async fn live(State(st): State<AppState>, user: AuthUser) -> ApiResult<Json<
     }))
 }
 
-/// `POST /v1/me/gifts/{id}/claim`: add a gift's gold to the player.
+/// Weapons stored as "Crossbow,Daggers". Names this build doesn't know
+/// are skipped.
+pub fn weapons_from(s: &str) -> Vec<Weapon> {
+    s.split(',')
+        .filter(|w| !w.is_empty())
+        .filter_map(|w| serde_json::from_value(serde_json::Value::String(w.to_string())).ok())
+        .collect()
+}
+
+pub fn weapons_to(ws: &[Weapon]) -> String {
+    let mut keys: Vec<String> = ws.iter().map(|w| crate::players::weapon_key(*w)).collect();
+    keys.sort();
+    keys.dedup();
+    keys.join(",")
+}
+
+/// Ids the server gives troops it hands out start here, far above the
+/// game's own numbering (1, 2, 3...), so they never clash with a troop the
+/// player recruited.
+pub const GIFT_TROOP_ID_BASE: u64 = 1 << 40;
+
+/// `POST /v1/me/gifts/{id}/claim`: add a gift to the player: gold, weapons
+/// unlocked online, and a troop whose level counts online.
 pub async fn claim(
     State(st): State<AppState>,
     user: AuthUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<GiftClaimed>> {
     let mut tx = st.db.begin().await?;
-    let gold: Option<i64> = sqlx::query_scalar(
-        "SELECT g.gold FROM gifts g JOIN users u ON u.id = $2
+    let gift: Option<(i64, String, Option<String>)> = sqlx::query_as(
+        "SELECT g.gold, g.weapons, g.troop FROM gifts g JOIN users u ON u.id = $2
          WHERE g.id = $1 AND (g.user_id IS NULL OR g.user_id = $2)
            AND g.expires_at > now() AND u.created_at < g.expires_at",
     )
@@ -251,7 +314,7 @@ pub async fn claim(
     .bind(user.id)
     .fetch_optional(&mut *tx)
     .await?;
-    let gold = gold.ok_or_else(|| ApiError::not_found("gift"))?;
+    let (gold, weapons, troop) = gift.ok_or_else(|| ApiError::not_found("gift"))?;
     let fresh = sqlx::query(
         "INSERT INTO gift_claims (gift_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
     )
@@ -263,12 +326,69 @@ pub async fn claim(
     if fresh == 0 {
         return Err(ApiError::conflict("already_claimed", "you already claimed this gift"));
     }
-    sqlx::query("UPDATE users SET gold = gold + $1 WHERE id = $2")
-        .bind(gold)
-        .bind(user.id)
-        .execute(&mut *tx)
-        .await?;
+    if gold > 0 {
+        sqlx::query("UPDATE users SET gold = gold + $1 WHERE id = $2")
+            .bind(gold)
+            .bind(user.id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let mut weapons = weapons_from(&weapons);
+    let troop = match troop {
+        None => None,
+        Some(json) => {
+            let mut t: Troop = serde_json::from_str(&json).map_err(ApiError::internal)?;
+            // A fresh id the player doesn't have yet; its level is theirs
+            // online from now on.
+            let mut tries = 0;
+            loop {
+                t.id = GIFT_TROOP_ID_BASE + rand::random::<u32>() as u64;
+                let added = sqlx::query(
+                    "INSERT INTO troop_levels (user_id, troop_id, level) VALUES ($1, $2, $3)
+                     ON CONFLICT DO NOTHING",
+                )
+                .bind(user.id)
+                .bind(t.id as i64)
+                .bind(t.level.max(2) as i32)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+                if added == 1 {
+                    break;
+                }
+                tries += 1;
+                if tries > 8 {
+                    return Err(ApiError::internal("no free troop id"));
+                }
+            }
+            if t.level < 2 {
+                // Level 1 needs no row (and the table only holds 2 to 5).
+                sqlx::query("DELETE FROM troop_levels WHERE user_id = $1 AND troop_id = $2")
+                    .bind(user.id)
+                    .bind(t.id as i64)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            // Its weapon comes with it.
+            weapons.push(t.spec.weapon());
+            Some(t)
+        }
+    };
+    weapons.sort_by_key(|w| crate::players::weapon_key(*w));
+    weapons.dedup();
+    for w in &weapons {
+        sqlx::query("INSERT INTO user_weapons (user_id, weapon) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+            .bind(user.id)
+            .bind(crate::players::weapon_key(*w))
+            .execute(&mut *tx)
+            .await?;
+    }
     let me = load_user_in(&mut tx, user.id).await?;
     tx.commit().await?;
-    Ok(Json(GiftClaimed { gold, user: me }))
+    Ok(Json(GiftClaimed {
+        gold,
+        user: me,
+        weapons,
+        troop,
+    }))
 }
