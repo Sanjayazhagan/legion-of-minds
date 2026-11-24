@@ -12,7 +12,7 @@ pub const PRIVACY: &str = include_str!("../../../../legal/PRIVACY_POLICY.md");
 
 /// Raise this when either document changes in a way players must agree to
 /// again. It is the "Version" date at the top of both files.
-pub const VERSION: &str = "2026-11-23";
+pub const VERSION: &str = "2026-11-24";
 
 /// One laid-out line of a document.
 struct Line {

@@ -14,9 +14,9 @@ Steam has three places for this.
 
 **3. "About this game" closing paragraph** (also the place to say what data is collected, which Steam's review expects):
 
-> **Online play and your data.** Offline play sends nothing anywhere: your troops and saves stay on your PC. Online play (raids, the weekly cup, clans) needs a free Google or Discord sign-in and is for players aged 13 and up. When you play online, your published base and the armies you send, including their trained brains, are stored on our server so battles can be checked and other players can raid you. Sharing anonymous play data to help improve the game is optional and off unless you turn it on. You can delete your online account in Settings at any time. Terms of Service: [SITE]/terms.html · Privacy Policy: [SITE]/privacy.html
+> **Online play and your data.** Offline play sends nothing anywhere: your troops and saves stay on your PC. Online play (raids, the weekly cup, clans) needs a free Google or Discord sign-in and is for players aged 13 and up. When you play online, your published base and the armies you send, including their trained brains, are stored on our server so battles can be checked and other players can raid you. Sharing anonymous play data (and 1 to 5 ratings) to help improve the game is optional and off unless you say yes: it goes only to our own server, carries a random number instead of your account, is deleted after 180 days, and you can delete it yourself in Settings. You can delete your online account in Settings at any time. Terms of Service: [SITE]/terms.html · Privacy Policy: [SITE]/privacy.html
 
-**Content survey answers that follow from the policy**: the game has user-generated content shown to others (player and clan names, clan chat); it collects no email and has no in-game purchases (yet).
+**Content survey answers that follow from the policy**: the game has user-generated content shown to others (player and clan names, clan chat); it collects no email and has no in-game purchases (yet); optional, opt-in anonymous usage data is collected only after the player says yes.
 
 ## Launch page (site/index.html)
 

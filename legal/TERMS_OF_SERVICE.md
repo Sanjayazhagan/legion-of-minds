@@ -1,6 +1,6 @@
 # Terms of Service
 
-Version 2026-11-23. DRAFT: not yet reviewed by a lawyer.
+Version 2026-11-24. DRAFT: not yet reviewed by a lawyer.
 
 These terms are an agreement between you and [OPERATOR NAME] ("we", "us"), who makes Legion of Minds (the "game"). They cover the game you download and the online service behind it (sign-in, raids, the weekly cup, leaderboards, clans, clan chat and clan wars). Please read them with the Privacy Policy, which explains what data we keep and why.
 
