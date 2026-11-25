@@ -92,8 +92,9 @@ impl Game {
             };
         }
 
-        // Roster list
-        let list = Rect::new(20.0, 124.0, 400.0, H - 144.0);
+        // Roster list, with the next goal under it.
+        self.goal_strip(Rect::new(20.0, H - 84.0, 400.0, 64.0));
+        let list = Rect::new(20.0, 124.0, 400.0, H - 216.0);
         panel(list);
         crate::tour::mark("roster", Rect::new(list.x, list.y, list.w, 40.0 + 3.0 * 86.0));
         text(
@@ -207,13 +208,26 @@ impl Game {
             );
             return Screen::Barracks;
         };
-        if self.ui.button(Rect::new(d.x + d.w - 184.0, d.y + 14.0, 160.0, 34.0), "Stats") || is_key_pressed(KeyCode::S) {
+        if self.ui.button(Rect::new(d.x + d.w - 184.0, d.y + 14.0, 160.0, 34.0), "Stats") || (is_key_pressed(KeyCode::S) && self.overlay.is_none()) {
             crate::stat_panel::set_open(true);
         }
+        // Its life story: battles, best moment, earned title.
+        let id = self.troops[i].id;
+        crate::tour::mark("record", Rect::new(d.x + d.w - 354.0, d.y + 14.0, 160.0, 34.0));
+        if self.ui.button(Rect::new(d.x + d.w - 354.0, d.y + 14.0, 160.0, 34.0), "Service record") {
+            self.overlay = Some(crate::overlay::Overlay::Record(id));
+        }
+        let (title, title_col) = self.title_line(id);
         let t = &self.troops[i];
         let (x, mut y) = (d.x + 24.0, d.y + 44.0);
         crate::art::draw_showcase(vec2(x + 30.0, y - 6.0), 34.0, &t.spec);
         text(&t.name, x + 76.0, y, 36.0, TEXT);
+        // Earned title (or how far from one), small, after the name.
+        let tx = x + 76.0 + text_width(&t.name, 36.0) + 16.0;
+        let room = d.x + d.w - 364.0 - tx;
+        if room > 80.0 {
+            text(&crate::goals::fit(&title, room, 17.0), tx, y - 2.0, 17.0, title_col);
+        }
         let kind = if t.spec.is_hybrid() {
             "hybrid"
         } else {
@@ -360,6 +374,15 @@ impl Game {
 
         // Skill badges
         text("Skills seen in drills", x, y, 20.0, TEXT);
+        // Watch it next to the brain it was born with, right here.
+        if t.steps > 0 {
+            let lb = Rect::new(d.x + d.w - 494.0, y - 22.0, 230.0, 30.0);
+            crate::tour::mark("lesson", lb);
+            if self.ui.button(lb, "Watch before and after") {
+                self.overlay = Some(crate::overlay::Overlay::Lesson(Box::new(crate::lesson::Lesson::new(t))));
+                return Screen::Barracks;
+            }
+        }
         // A video of this troop raiding with a blank brain, then its own.
         if t.spec.role == godcore::classes::Role::Attack && t.steps > 0 {
             let rb = Rect::new(d.x + d.w - 254.0, y - 22.0, 230.0, 30.0);

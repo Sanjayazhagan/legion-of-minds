@@ -23,11 +23,14 @@ pub struct Settings {
     pub test_mode: bool,
     /// The last PC speed test: how big a brain this computer can train.
     pub pc: Option<crate::pc_check::PcResult>,
+    /// Remind the player to take a break after this many minutes of play
+    /// (0 = never).
+    pub break_minutes: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { volume: 0.8, muted: false, shake: true, sight: false, test_mode: false, pc: None }
+        Settings { volume: 0.8, muted: false, shake: true, sight: false, test_mode: false, pc: None, break_minutes: 60 }
     }
 }
 
@@ -175,25 +178,29 @@ impl Game {
         panel(d);
         let (x, mut y) = (d.x + 24.0, d.y + 40.0);
         text("Graphics and training", x, y, 26.0, TEXT);
-        y += 36.0;
+        y += 30.0;
         let gpu = crate::gpu_name().unwrap_or("checking...");
-        crate::recruit::wrap(&format!("Drawing on: {gpu}"), x, y, d.w - 48.0, 16.0, TEXT);
-        y += 40.0;
+        text(&crate::goals::fit(&format!("Drawing on: {gpu}"), d.w - 48.0, 16.0), x, y, 16.0, TEXT);
+        y += 24.0;
         let train = match crate::train_device() {
             Some(Some(dev)) => format!("Brains of 128+ neurons train on: {dev}"),
             Some(None) => "Training runs on: CPU".to_string(),
             None => "Training device: checking...".to_string(),
         };
         crate::recruit::wrap(&train, x, y, d.w - 48.0, 16.0, TEXT);
-        y += 40.0;
+        y += 30.0;
         crate::recruit::wrap(
-            "On a laptop with two graphics chips, if this names an Intel chip, set the game to High performance in Windows graphics settings.",
+            "Laptop with two graphics chips? If this names an Intel chip, set the game to High performance in Windows graphics settings.",
             x,
-            y,
+            y - 8.0,
             d.w - 48.0,
-            15.0,
+            14.0,
             MUTED,
         );
+        // Healthy play: a gentle break reminder and time played.
+        if self.breaks_setting(x, d.y + d.h - 62.0, d.w - 48.0) {
+            changed = true;
+        }
 
         let s = Rect::new(20.0, 562.0, 1240.0, 80.0);
         panel(s);

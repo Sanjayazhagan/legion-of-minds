@@ -43,6 +43,8 @@ pub fn starter_troops(first_id: u64) -> Vec<Troop> {
 }
 
 thread_local! {
+    /// Lessons watched when the lesson step began.
+    static LESSON_FROM: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
     /// Buttons the screens drew this frame, by name.
     static MARKS: RefCell<Vec<(&'static str, Rect)>> = const { RefCell::new(Vec::new()) };
     /// What the tour is pointing at and its card, from the last frame.
@@ -88,6 +90,8 @@ enum Wait {
     Reach(On),
     /// The battle on screen finishing.
     BattleOver,
+    /// A before-and-after lesson watched to the end of its first drill.
+    Lesson,
 }
 
 /// Where the card sits.
@@ -114,6 +118,8 @@ struct Step {
 // Step numbers, so the raid can be restarted or skipped.
 const RAID: usize = 2;
 const AFTER_RAID: usize = 7;
+/// Seeing a troop learn: its born brain next to its trained one.
+const LESSON: usize = 7;
 
 fn step(k: usize, g: &Game, screen: &Screen) -> Option<Step> {
     // The first time, the player has the starter troops; a replay may not.
@@ -145,6 +151,18 @@ fn step(k: usize, g: &Game, screen: &Screen) -> Option<Step> {
             Step { on: Battle, title: if stars > 0 { "Victory!" } else { "So close" }, body, target: Some("to_barracks"), wait: Reach(Barracks), place: At(294.0, 510.0), lock: true }
         }
         7 => {
+            let name = g.selected.and_then(|i| g.troops.get(i)).map_or("Your troop".to_string(), |t| t.name.trim().to_string());
+            Step {
+                on: Barracks,
+                title: "Watch it learn",
+                body: format!("{name} wasn't born knowing how to fight. Press Watch before and after to see {name} with the brain it was born with, next to {name} now. Same body, same drill: only the brain is different."),
+                target: Some("lesson"),
+                wait: Lesson,
+                place: Near,
+                lock: true,
+            }
+        }
+        8 => {
             let at_cap = g.selected.and_then(|i| g.troops.get(i)).is_none_or(|t| t.steps_left() == 0);
             if at_cap {
                 s(Barracks, "Training", "Training is how a troop gets smarter. Pick a troop, press Train and choose how many practice steps to give it. More steps make a better brain, until its score stops rising. Then it has learned all its brain can hold, and levelling up with gold grows the brain so it can learn more.", Some("train"), Next, Near, true)
@@ -152,12 +170,12 @@ fn step(k: usize, g: &Game, screen: &Screen) -> Option<Step> {
                 s(Barracks, "Training", "Training is how a troop gets smarter. Let's give this troop a little more practice: press Train.", Some("train"), Reach(Train), Near, true)
             }
         }
-        8 => s(Train, "Practice drills", "On the left the troop plays practice drills with its newest brain, so you can watch it learn. Press Start training. It runs on your own computer in the background, so you can press < Back at any time: only this troop is busy until it finishes, and the rest of the game is yours.", Some("start_training"), Reach(Barracks), At(30.0, 560.0), false),
-        9 => s(Barracks, "Recruit more troops", "Recruiting costs 50 gold. Pick a class, or mix classes by percentage to make a hybrid, like Mage 50 + Healer 50. Each new troop starts with an untrained brain.", Some("recruit"), Next, Near, true),
-        10 => s(Barracks, "Your home base", "Upgrade your Town Hall, place towers and cannons, and train defender troops to protect it against raids.", Some("home"), Next, Near, true),
-        11 => s(Barracks, "Tournaments and team training", "Tournament runs your troops through the same raids and ranks them. Team training teaches 2 to 5 troops to fight together and call out to each other.", Some("more"), Next, Near, true),
-        12 => s(Barracks, "Play online", "Sign in to raid other players' bases and defend your own.", Some("online"), Next, Near, true),
-        13 => s(Barracks, "You're ready", "That's the tour. Train your troops, win stars and build your base. You can play this tour again any time from Settings.", Some("settings"), Next, Near, true),
+        9 => s(Train, "Practice drills", "On the left the troop plays practice drills with its newest brain, so you can watch it learn. Press Start training. It runs on your own computer in the background, so you can press < Back at any time: only this troop is busy until it finishes, and the rest of the game is yours. When it's done, you'll see what it learned.", Some("start_training"), Reach(Barracks), At(30.0, 560.0), false),
+        10 => s(Barracks, "Recruit more troops", "Recruiting costs 50 gold. Pick a class, or mix classes by percentage to make a hybrid, like Mage 50 + Healer 50. Each new troop starts with an untrained brain.", Some("recruit"), Next, Near, true),
+        11 => s(Barracks, "Your home base", "Upgrade your Town Hall, place towers and cannons, and train defender troops to protect it against raids.", Some("home"), Next, Near, true),
+        12 => s(Barracks, "Tournaments and team training", "Tournament runs your troops through the same raids and ranks them. Team training teaches 2 to 5 troops to fight together and call out to each other.", Some("more"), Next, Near, true),
+        13 => s(Barracks, "Play online", "Sign in to raid other players' bases and defend your own.", Some("online"), Next, Near, true),
+        14 => s(Barracks, "You're ready", "That's the tour. Train your troops, win stars and build your base. You can play this tour again any time from Settings.", Some("settings"), Next, Near, true),
         _ => return None,
     })
 }
@@ -206,7 +224,7 @@ impl Game {
     pub fn tour_input(&mut self, screen: &Screen) -> bool {
         let click = self.ui.clicked;
         MARKS.with(|m| m.borrow_mut().clear());
-        if self.tour.is_none() || self.settings_open {
+        if self.tour.is_none() || self.settings_open || self.overlay.is_some() {
             return click;
         }
         let (target, card, lock) = LAST.with(|l| *l.borrow());
@@ -224,7 +242,7 @@ impl Game {
     pub fn tour_frame(&mut self, screen: &Screen, click: bool) {
         LAST.with(|l| *l.borrow_mut() = (None, None, false));
         let Some(mut k) = self.tour else { return };
-        if self.settings_open {
+        if self.settings_open || self.overlay.is_some() {
             return;
         }
         // Keep the raid steps in order: backing out of a raid starts it again
@@ -234,6 +252,17 @@ impl Game {
         }
         if k == RAID && !has_attackers(self) {
             k = AFTER_RAID;
+        }
+        // The lesson needs a troop with some training to show.
+        if k == LESSON && !self.selected.and_then(|i| self.troops.get(i)).is_some_and(|t| t.steps > 0) {
+            if let Some(i) = self.troops.iter().position(|t| t.steps > 0) {
+                self.selected = Some(i);
+            } else {
+                k += 1;
+            }
+        }
+        if k != LESSON {
+            LESSON_FROM.with(|c| c.set(None));
         }
         let Some(st) = step(k, self, screen) else {
             self.end_tour();
@@ -245,6 +274,15 @@ impl Game {
             Wait::Reach(w) => on(screen) == Some(w) && w != st.on,
             Wait::BattleOver => matches!(screen, Screen::Battle(b) if b.finished()),
             Wait::Next => false,
+            Wait::Lesson => {
+                let seen = self.journal.lessons_watched;
+                let from = LESSON_FROM.with(|c| {
+                    let f = c.get().unwrap_or(seen);
+                    c.set(Some(f));
+                    f
+                });
+                seen > from
+            }
         };
         if done {
             self.tour = Some(k + 1);

@@ -58,6 +58,9 @@ pub enum Mode {
     Raid(usize),
     /// Holding the home base against a scripted wave, or (None) your own army.
     Defend(Option<usize>),
+    /// A friend's challenge (see `challenge.rs`); true when the player's
+    /// troops are the ones defending.
+    Challenge(bool),
 }
 
 pub struct BattleState {
@@ -74,6 +77,10 @@ pub struct BattleState {
     /// The troop whose thoughts are shown (unit index), if any.
     focus: Option<usize>,
     paused: bool,
+    /// The coach's one line about the battle, once it has ended.
+    coach: Option<crate::coach::Tip>,
+    /// The friend challenge being fought, if this is one.
+    run: Option<crate::challenge::Run>,
 }
 
 impl BattleState {
@@ -105,6 +112,32 @@ impl BattleState {
             full: false,
             focus,
             paused: false,
+            coach: None,
+            run: None,
+        }
+    }
+
+    /// A friend challenge: the sender's troops against `other`. `watching`
+    /// replays a reply to the player's own challenge.
+    pub fn challenge(c: crate::challenge::Challenge, other: Vec<crate::challenge::Spot>, friend_base: Option<godcore::scenario::HomeBase>, watching: bool, mine: Vec<u64>) -> Self {
+        let run = crate::challenge::Run { c, other, friend_base, watching, mine, saved: None };
+        let i_defend = run.i_defend();
+        let r = run.clone();
+        let mut b = BattleState::start(Mode::Challenge(i_defend), Box::new(move || r.c.battle(&r.other, r.friend_base.as_ref())));
+        b.run = Some(run);
+        b
+    }
+
+    /// Test hook: play the battle to its end at once.
+    pub fn skip_to_end(&mut self) {
+        self.speed = 1000.0;
+    }
+
+    /// The side the player's troops are on.
+    fn my_team(&self) -> Team {
+        match self.mode {
+            Mode::Defend(_) | Mode::Challenge(true) => Team::Defend,
+            _ => Team::Attack,
         }
     }
 
@@ -113,6 +146,7 @@ impl BattleState {
             Mode::Raid(b) => format!("Battle: {}", BASES[b].name),
             Mode::Defend(Some(w)) => format!("Defending {} against {}", HOME_NAME, WAVES[w].name),
             Mode::Defend(None) => format!("Defending {} against your own army", HOME_NAME),
+            Mode::Challenge(_) => self.run.as_ref().map_or("Challenge".to_string(), |r| r.title()),
         }
     }
 
@@ -122,8 +156,9 @@ impl BattleState {
             Mode::Raid(b) => format!("My squad vs {}", BASES[b].name),
             Mode::Defend(Some(w)) => format!("{} attacks my base", WAVES[w].name),
             Mode::Defend(None) => "My army attacks my own base".to_string(),
+            Mode::Challenge(_) => self.run.as_ref().map_or("A friend challenge".to_string(), |r| r.title()),
         };
-        let defending = matches!(self.mode, Mode::Defend(_));
+        let defending = matches!(self.mode, Mode::Defend(_) | Mode::Challenge(true));
         Screen::Clip(crate::clip::ClipState::battle(title, defending, self.remake.clone(), back))
     }
 }
@@ -150,7 +185,12 @@ impl BattleState {
             .enumerate()
             .map(|(k, &i)| (g.troops[i].clone(), (4.0 + 1.5 * k as f32, 4.0)))
             .collect();
-        BattleState::start(Mode::Raid(base), raid_maker(base, deploy))
+        let mut b = BattleState::start(Mode::Raid(base), raid_maker(base, deploy));
+        // Test hook: BAG_SKIP plays the battle to the end at once.
+        if std::env::var_os("BAG_SKIP").is_some() {
+            b.speed = 1000.0;
+        }
+        b
     }
 }
 
@@ -309,6 +349,10 @@ impl Game {
                 preview,
             });
         }
+        // Friend challenges start here too.
+        if self.ui.button(Rect::new(W - 640.0, H - 80.0, 300.0, 56.0), "Challenge a friend") {
+            self.overlay = Some(crate::overlay::Overlay::Challenges(Box::default()));
+        }
         text(
             "Click troops to add or remove them.",
             20.0,
@@ -458,7 +502,8 @@ impl Game {
 
     pub fn battle(&mut self, mut s: BattleState) -> Screen {
         let title = s.title();
-        let defending = matches!(s.mode, Mode::Defend(_));
+        let defending = matches!(s.mode, Mode::Defend(_) | Mode::Challenge(true));
+        let challenge = matches!(s.mode, Mode::Challenge(_));
         self.header(&title, false);
         // Full view: the map fills the window (F toggles it too).
         let full_label = if s.full { "Side panel" } else { "Full view" };
@@ -486,6 +531,10 @@ impl Game {
             }
             if s.battle.outcome() != Outcome::Running {
                 s.result = Some(self.settle(&s));
+                let watching = s.run.as_ref().is_some_and(|r| r.watching);
+                if !matches!(s.mode, Mode::Defend(None)) && !watching {
+                    s.coach = crate::coach::coach(&s.battle.world, &s.battle.troops, s.my_team());
+                }
                 let stars = s.battle.world.stars();
                 let won = if defending { stars == 0 } else { stars > 0 };
                 crate::sfx::play_ui(if won { crate::sfx::Sfx::Victory } else { crate::sfx::Sfx::Defeat });
@@ -503,7 +552,7 @@ impl Game {
         draw_world(v, w, &self.fx, &|_, u| {
             if u.tag < troops.len() {
                 let mut l = Game::look_for(&troops[u.tag], true);
-                l.hostile = defending && u.team == Team::Attack;
+                l.hostile = if challenge { (u.team == Team::Defend) != defending } else { defending && u.team == Team::Attack };
                 l
             } else {
                 Look {
@@ -708,7 +757,9 @@ impl Game {
             }
         } else {
             let (stars, gold, new_best) = s.result.unwrap();
-            let r = Rect::new(rx, H - 350.0, rw, 330.0);
+            // Taller when the coach has something to say.
+            let coach_h = if s.coach.is_some() { 112.0 } else { 0.0 };
+            let r = Rect::new(rx, H - 350.0 - coach_h, rw, 330.0 + coach_h);
             draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.06, 0.06, 0.09, 0.95));
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, ACCENT);
             let (title, good) = if defending {
@@ -743,11 +794,14 @@ impl Game {
                     k < stars,
                 );
             }
+            let paid = match &s.run {
+                Some(run) if run.watching => String::new(),
+                Some(_) if new_best => "You beat the challenge!".to_string(),
+                Some(_) => "They beat you this time".to_string(),
+                None => format!("+{gold} gold{}", if new_best { "  (new best!)" } else { "" }),
+            };
             text_centered(
-                &format!(
-                    "+{gold} gold{}",
-                    if new_best { "  (new best!)" } else { "" }
-                ),
+                &paid,
                 r.x + r.w / 2.0,
                 r.y + 140.0,
                 24.0,
@@ -766,6 +820,25 @@ impl Game {
                     16.0,
                     if ok { MUTED } else { BAD },
                 );
+            }
+            if let Some(next) = self.coach_box(&s, Rect::new(r.x + 16.0, r.y + 320.0, r.w - 32.0, coach_h - 10.0)) {
+                return next;
+            }
+            if let Some(run) = &s.run {
+                // Challenges: back to the Barracks, save the reply, or a clip.
+                if self.ui.button(Rect::new(r.x + 20.0, r.y + 196.0, r.w / 2.0 - 30.0, 50.0), "Barracks") {
+                    return Screen::Barracks;
+                }
+                if !run.watching {
+                    let label = if run.saved.is_some() { "Show reply file" } else { "Send result back" };
+                    if self.ui.button(Rect::new(r.x + r.w / 2.0 + 10.0, r.y + 196.0, r.w / 2.0 - 30.0, 50.0), label) {
+                        self.reply_button(&mut s);
+                    }
+                }
+                if self.ui.button(Rect::new(r.x + 20.0, r.y + 258.0, r.w - 40.0, 50.0), "Save clip to share") {
+                    return s.clip(Screen::Barracks);
+                }
+                return Screen::Battle(s);
             }
             crate::tour::mark("to_barracks", Rect::new(r.x + 20.0, r.y + 196.0, r.w / 2.0 - 30.0, 50.0));
             if self.ui.button(
@@ -798,10 +871,25 @@ impl Game {
 
     /// Record the result and pay out. Returns (stars, gold, new best?).
     fn settle(&mut self, s: &BattleState) -> (u32, u32, bool) {
+        let w = &s.battle.world;
+        let ts = &s.battle.troops;
+        let stars = w.stars();
         let b = match s.mode {
-            Mode::Raid(b) => b,
+            Mode::Challenge(i_defend) => return self.settle_challenge(s, i_defend),
+            Mode::Raid(b) => {
+                let what = format!("Raid on {}", BASES[b].name);
+                self.note_battle(w, ts, &|u| u.team == Team::Attack, &what, stars > 0);
+                b
+            }
             Mode::Defend(wave) => {
-                let stars = s.battle.world.stars();
+                let what = match wave {
+                    Some(k) => format!("Defending {} against {}", HOME_NAME, WAVES[k].name),
+                    None => "Practice: army against home".to_string(),
+                };
+                self.note_battle(w, ts, &|u| u.team == Team::Defend, &what, stars == 0);
+                if wave.is_none() {
+                    self.note_battle(w, ts, &|u| u.team == Team::Attack, "Practice: army against home", stars > 0);
+                }
                 // A wave counts as held when the raiders leave with no stars.
                 let held = stars == 0;
                 let mut gold = 0;
@@ -841,6 +929,79 @@ impl Game {
             }
         }
         (stars, gold, new_stars > 0)
+    }
+
+    /// A friend challenge ended: count it (unless just watching a reply).
+    fn settle_challenge(&mut self, s: &BattleState, i_defend: bool) -> (u32, u32, bool) {
+        let w = &s.battle.world;
+        let stars = w.stars();
+        let won = if i_defend { stars == 0 } else { stars > 0 };
+        if let Some(run) = s.run.as_ref().filter(|r| !r.watching) {
+            let my_team = if i_defend { Team::Defend } else { Team::Attack };
+            let what = format!("Challenge: {}", run.c.what());
+            self.note_battle(w, &s.battle.troops, &|u| u.team == my_team, &what, won);
+            self.journal.challenges_played += 1;
+            self.journal.challenges_won += won as u32;
+            self.journal.save();
+        }
+        (stars, 0, won)
+    }
+
+    /// Save (or show again) the reply file for a challenge just fought.
+    fn reply_button(&mut self, s: &mut BattleState) {
+        let Some(run) = s.run.as_mut() else { return };
+        if let Some(p) = &run.saved {
+            crate::clip::show_in_folder(p);
+            return;
+        }
+        let w = &s.battle.world;
+        let stars = w.stars();
+        let beat = if run.i_defend() { stars == 0 } else { stars > 0 };
+        let run_copy = run.clone();
+        match self.save_reply(&run_copy, stars, w.destruction(), beat) {
+            Ok(p) => {
+                crate::clip::show_in_folder(&p);
+                let msg = if beat {
+                    format!("I beat your challenge in Legion of Minds ({stars} star{}). Drag this file onto your game window to watch!", if stars == 1 { "" } else { "s" })
+                } else {
+                    "Your troops beat mine in Legion of Minds. Drag this file onto your game window to watch!".to_string()
+                };
+                macroquad::miniquad::window::clipboard_set(&msg);
+                self.toast("Reply saved and a message copied. Send both to your friend.");
+                if let Some(r) = s.run.as_mut() {
+                    r.saved = Some(p);
+                }
+            }
+            Err(e) => self.toast(format!("Couldn't save the reply: {e}")),
+        }
+    }
+
+    /// The coach's line under the result, with a button to train the troop
+    /// it names. Returns a screen to go to.
+    fn coach_box(&mut self, s: &BattleState, r: Rect) -> Option<Screen> {
+        let tip = s.coach.as_ref()?;
+        draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.1, 0.12, 0.17, 1.0));
+        draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, SKY);
+        text("Coach", r.x + 10.0, r.y + 20.0, 16.0, SKY);
+        crate::recruit::wrap(&tip.line, r.x + 70.0, r.y + 20.0, r.w - 80.0, 16.0, TEXT);
+        let (id, name, focus) = tip.train.clone()?;
+        let i = self.index_of(id)?;
+        let label = match focus {
+            Some(f) => format!("Train {name}: {}", crate::coach::focus_name(&self.troops[i].spec, f)),
+            None => format!("Train {name}"),
+        };
+        let busy = self.is_busy(i);
+        let label = if busy { format!("{name} is training") } else { label };
+        let br = Rect::new(r.x + 70.0, r.y + r.h - 40.0, (text_width(&label, 18.0) + 40.0).min(r.w - 80.0), 30.0);
+        if self.ui.button_ex(br, &label, !busy, false) {
+            let t = &self.troops[i];
+            let st = match focus {
+                Some(f) => crate::training::TrainState::with_plan(t, crate::coach::nudged_plan(&t.spec, f)),
+                None => crate::training::TrainState::new(t),
+            };
+            return Some(Screen::Train(st));
+        }
+        None
     }
 }
 
