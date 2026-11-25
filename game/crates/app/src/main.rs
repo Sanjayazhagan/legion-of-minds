@@ -6,6 +6,15 @@
 
 mod armoury;
 mod art;
+mod away;
+mod breaks;
+mod challenge;
+mod coach;
+mod goals;
+mod journal;
+mod lesson;
+mod overlay;
+mod service;
 mod plan;
 mod record;
 mod barracks;
@@ -90,6 +99,15 @@ pub struct Game {
     pub team_news: Option<teamtrain::TeamNews>,
     /// Training to resume once the startup PC speed test finishes.
     pub resume_after_pc_check: bool,
+    /// Service records, goals and play time (see journal.rs).
+    pub journal: journal::Journal,
+    pub journal_saved_at: f64,
+    /// Things the journal wants to tell the player ("Wren earned a title").
+    pub journal_news: Vec<String>,
+    /// A card open over the screen (see overlay.rs).
+    pub overlay: Option<overlay::Overlay>,
+    /// Time played and break reminders (see breaks.rs).
+    pub rhythm: breaks::Rhythm,
 }
 
 impl Game {
@@ -195,6 +213,13 @@ fn demo_screen(g: &mut Game) -> Option<Screen> {
         "clip" => {
             let b = battle_screen::BattleState::demo(g, 1, all);
             b.clip(Screen::Barracks)
+        }
+        "challenge" => {
+            // A friend's squad raids this player's base (towers only).
+            let c = challenge::demo(g);
+            let mut b = battle_screen::BattleState::challenge(c, Vec::new(), Some(g.profile.base.clone()), false, Vec::new());
+            b.skip_to_end();
+            Screen::Battle(b)
         }
         "reel" => Screen::Clip(clip::ClipState::reel(&g.troops[0], Screen::Barracks)),
         "clan" => {
@@ -339,6 +364,11 @@ async fn main() {
         train_news: Default::default(),
         team_news: None,
         resume_after_pc_check: false,
+        journal: Default::default(),
+        journal_saved_at: 0.0,
+        journal_news: Vec::new(),
+        overlay: None,
+        rhythm: breaks::Rhythm::new(),
     };
     game.settings = settings::Settings::load(&game.store.home);
     game.settings.apply();
@@ -385,6 +415,8 @@ async fn main() {
             Screen::SignIn(online::SignInState::startup(&game.account))
         }
     });
+    game.tick_journal();
+    overlay::demo(&mut game);
     let autoshot = std::env::var("BAG_SCREENSHOT").ok();
     let shot_frame: u32 = std::env::var("BAG_SHOT_FRAME")
         .ok()
@@ -411,6 +443,7 @@ async fn main() {
             game.profile.gold = save::TEST_GOLD;
         }
         let click = game.tour_input(&screen);
+        let hidden = game.hide_input_for_overlay();
         if game.settings_open {
             game.settings_screen();
         } else {
@@ -454,8 +487,17 @@ async fn main() {
                 }
             }
         }
+        game.take_dropped_challenge();
+        if let Some(next) = game.overlay_frame(&screen, hidden) {
+            screen = next;
+        }
         game.poll_pc_check();
         game.tick_training();
+        game.tick_journal();
+        if game.toast.is_none() && !game.journal_news.is_empty() {
+            let n = game.journal_news.remove(0);
+            game.toast = Some((n, 5.0));
+        }
         game.tour_frame(&screen, click);
         if let Some(n) = save::take_notice() {
             game.toast = Some((n, 6.0));
@@ -466,6 +508,7 @@ async fn main() {
             // time), then everything else.
             game.pause_all_training();
             game.save_all();
+            game.journal.save();
             break;
         }
         if is_key_pressed(KeyCode::M) {

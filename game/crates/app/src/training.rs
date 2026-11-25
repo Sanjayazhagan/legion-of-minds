@@ -122,6 +122,14 @@ impl TrainState {
 }
 
 impl TrainState {
+    /// The training screen with the plan editor open on `plan` (the coach's
+    /// suggestion). Nothing changes until the player presses Apply plan.
+    pub fn with_plan(t: &Troop, plan: godcore::classes::TrainPlan) -> Self {
+        let mut s = Self::new(t);
+        s.plan = Some(plan);
+        s
+    }
+
     pub fn demo(g: &mut Game, idx: usize) -> Self {
         let t = &g.troops[idx];
         let s = Self::new(t);

@@ -744,7 +744,7 @@ fn no_window(_cmd: &mut std::process::Command) {
     }
 }
 
-fn show_in_folder(p: &std::path::Path) {
+pub fn show_in_folder(p: &std::path::Path) {
     #[cfg(windows)]
     let r = {
         let mut c = std::process::Command::new("explorer");
