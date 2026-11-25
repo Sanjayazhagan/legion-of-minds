@@ -161,6 +161,22 @@ impl Limiter {
     }
 }
 
+/// How many raids, bases and cup entries are worked on at once: one more
+/// than the battles that can run together (see [`crate::battle_slots`]), so
+/// the next one is read in while a battle runs. HEAVY_AT_ONCE sets it.
+pub fn heavy_at_once() -> usize {
+    std::env::var("HEAVY_AT_ONCE")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or_else(|| crate::battle_slots() + 1)
+        .max(1)
+}
+
+fn heavy_turns() -> &'static tokio::sync::Semaphore {
+    static TURNS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    TURNS.get_or_init(|| tokio::sync::Semaphore::new(heavy_at_once()))
+}
+
 pub async fn limit(State(st): State<AppState>, req: Request, next: Next) -> Response {
     let ip = client_ip(&st, &req);
     let class = class_of(req.method(), req.uri().path());
@@ -172,6 +188,13 @@ pub async fn limit(State(st): State<AppState>, req: Request, next: Next) -> Resp
         st.cfg.requests_per_min,
         st.cfg.heavy_per_min,
     ) {
+        Ok(()) if class == Class::Heavy => {
+            // Raids, bases and cup entries carry whole brains (megabytes
+            // each): only a few are read and worked on at once, so a burst
+            // can't run the server out of memory. The rest wait their turn.
+            let _turn = heavy_turns().acquire().await;
+            next.run(req).await
+        }
         Ok(()) => next.run(req).await,
         Err(wait) => {
             // Read the upload before refusing: answering while a big body

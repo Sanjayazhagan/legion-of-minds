@@ -118,14 +118,13 @@ pub async fn enter(
 ) -> ApiResult<Json<CupStandings>> {
     let paid = load_user(&st.db, user.id).await?.upgrades;
     let troop = canonical_troop(&req.troop, Role::Attack, max_troop_level(paid.town_hall))?;
+    crate::check_brains([&troop])?;
     if let Some(why) = paid.blocker(&troop) {
         return Err(bag_protocol::Invalid(why).into());
     }
     // Each brain-size category is its own cup.
     let category = bag_protocol::troop_bracket(&troop);
-    let (score, troop) = tokio::task::spawn_blocking(move || (cup_score(&troop), troop))
-        .await
-        .map_err(ApiError::internal)?;
+    let (score, troop) = crate::run_battle(move || (cup_score(&troop), troop)).await?;
     sqlx::query(
         "INSERT INTO cup_entries (week, user_id, troop, troop_name, class_name, score, category)
          VALUES ($1, $2, $3, $4, $5, $6, $7)

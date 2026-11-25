@@ -321,12 +321,11 @@ pub async fn submit(
 
     let (result, carried, army) = {
         let army = army.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::run_battle(move || {
             let (r, c) = run_raid_rested(&snapshot, &army);
             (r, c, army)
         })
-        .await
-        .map_err(ApiError::internal)?
+        .await?
     };
     let client_matched = req
         .client_result
