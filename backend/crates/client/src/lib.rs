@@ -97,7 +97,7 @@ impl Client {
         Client {
             base: server.trim_end_matches('/').to_string(),
             http: Http::builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(120))
                 .build()
                 .expect("http client"),
             token: None,
