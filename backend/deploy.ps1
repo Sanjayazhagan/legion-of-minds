@@ -1,10 +1,15 @@
 param(
-    [string]$VmUser = "azureuser",
-    [string]$VmHost = "40.81.20.114",
-    [string]$SshKey = "$HOME\.ssh\id_ed25519",
+    # Which cloud the VM is in. Sets the defaults below and the firewall
+    # hints: "azure" (the portfolio's VM) or "oracle" (Oracle Cloud Always
+    # Free, Ubuntu image: user "ubuntu", and -VmHost is required).
+    [ValidateSet("azure", "oracle")]
+    [string]$Cloud = "azure",
+    [string]$VmUser = "",
+    [string]$VmHost = "",
+    [string]$SshKey = "",
     # Where the server lives on the VM. Kept apart from the portfolio
     # (/home/azureuser/projects/portfolio-site), which this never touches.
-    [string]$VmPath = "/home/azureuser/legion-server",
+    [string]$VmPath = "",
     [int]$Port = 8080,
     # A domain pointed at the VM (for example game.example.com) turns on
     # HTTPS, which Google sign-in needs. Without one the server answers on
@@ -20,10 +25,40 @@ param(
     # A server build you downloaded yourself instead of using gh: the
     # legion-server-linux.zip artifact from a "Server build" run on GitHub,
     # or the folder it unzips to.
-    [string]$Binary = ""
+    [string]$Binary = "",
+    # How much the server takes on: auto picks from the VM's memory, cores
+    # and disk (small = 1-2 GB, brains up to 256; medium = 4-8 GB, 512;
+    # large = 12 GB+ and 3+ cores, like Oracle's 4-core/24 GB Ampere, 1024).
+    # keep leaves the sizing settings on the VM as they are. Values in
+    # deploy.env (MAX_ONLINE_BRAIN, DB_POOL, KEEP_RAIDS_DAYS) always win.
+    [ValidateSet("auto", "small", "medium", "large", "keep")]
+    [string]$Size = "auto"
 )
 
 $ErrorActionPreference = "Stop"
+
+# Defaults for each cloud. Anything passed on the command line wins.
+if ($Cloud -eq "oracle") {
+    if (-not $VmUser) { $VmUser = "ubuntu" }
+    if (-not $VmHost) {
+        Write-Host "Give the Oracle VM's public IP address: .\deploy.ps1 -Cloud oracle -VmHost <ip>" -ForegroundColor Red
+        Write-Host "(Oracle console > Compute > Instances > your instance > Public IP address.)" -ForegroundColor Yellow
+        exit 1
+    }
+    # Oracle hands out the private key as a download (ssh-key-<date>.key);
+    # save it as ~\.ssh\oracle.key or pass -SshKey.
+    if (-not $SshKey) { $SshKey = "$HOME\.ssh\oracle.key" }
+} else {
+    if (-not $VmUser) { $VmUser = "azureuser" }
+    if (-not $VmHost) { $VmHost = "40.81.20.114" }
+    if (-not $SshKey) { $SshKey = "$HOME\.ssh\id_ed25519" }
+}
+if (-not $VmPath) { $VmPath = "/home/$VmUser/legion-server" }
+$Portal = if ($Cloud -eq "oracle") {
+    "the Oracle console (Networking > Virtual cloud networks > your VCN > Security Lists > Default Security List > Add Ingress Rules, source 0.0.0.0/0)"
+} else {
+    "the VM's Azure network settings (Networking > Add inbound port rule)"
+}
 
 # Same flow as the portfolio's deploy.ps1: pack a tarball, upload it over scp
 # with keepalives, then run the VM side as one base64 script over ssh. The
@@ -51,6 +86,14 @@ if ($Domain -and $Domain -notmatch '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$') 
     Write-Host "Domain must be a plain host name like game.example.com (no https://, no slash)." -ForegroundColor Red
     exit 1
 }
+if ($VmUser -notmatch '^[a-z_][a-z0-9_-]*$') {
+    Write-Host "VmUser must be a plain Linux user name like ubuntu or azureuser." -ForegroundColor Red
+    exit 1
+}
+if ($VmHost -notmatch '^[A-Za-z0-9]([A-Za-z0-9.:-]*[A-Za-z0-9])?$') {
+    Write-Host "VmHost must be a plain IP address or host name (no ssh://, no user@)." -ForegroundColor Red
+    exit 1
+}
 if ($Port -lt 1024 -or $Port -gt 65535) {
     Write-Host "Port must be between 1024 and 65535." -ForegroundColor Red
     exit 1
@@ -68,14 +111,27 @@ if (-not (Test-Path $DeployEnv) -and -not $NoSecrets) {
 }
 if (-not (Test-Path $SshKey)) {
     Write-Host "SSH key not found: $SshKey" -ForegroundColor Red
-    Write-Host "Use the same key as the portfolio deploy, for example: .\deploy.ps1 -SshKey C:\path\to\key.pem" -ForegroundColor Yellow
+    if ($Cloud -eq "oracle") {
+        Write-Host "Use the private key you downloaded when creating the instance, for example:" -ForegroundColor Yellow
+        Write-Host "    .\deploy.ps1 -Cloud oracle -VmHost <ip> -SshKey $HOME\Downloads\ssh-key-2026-12-01.key" -ForegroundColor Yellow
+    } else {
+        Write-Host "Use the same key as the portfolio deploy, for example: .\deploy.ps1 -SshKey C:\path\to\key.pem" -ForegroundColor Yellow
+    }
     exit 1
+}
+# Windows' ssh refuses a key file other accounts can read ("UNPROTECTED
+# PRIVATE KEY FILE" / "bad permissions"), which a downloaded key usually is.
+# Limit the downloaded Oracle key to this account (the Azure key already works).
+if ($Cloud -eq "oracle") {
+    try {
+        icacls $SshKey /inheritance:r /grant:r "$($env:USERNAME):(R)" *> $null
+    } catch { }
 }
 
 Write-Host ""
 Write-Host "=====================================" -ForegroundColor Cyan
 Write-Host "  Legion of Minds server deploy" -ForegroundColor Cyan
-Write-Host "  to $VmUser@$VmHost" -ForegroundColor Cyan
+Write-Host "  to $VmUser@$VmHost ($Cloud)" -ForegroundColor Cyan
 Write-Host "=====================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -306,7 +362,7 @@ Write-Host "[4/5] Backing up the database, $What and restarting on the VM..." -F
 # portfolio, it travels as one base64 token, so Windows can't mangle its
 # quotes, and with LF line endings, so bash doesn't choke on `\r`.
 $ServerScript = Get-Content -Raw -Encoding UTF8 (Join-Path $Backend "deploy\server.sh")
-$RemoteScript = "set -- '$VmPath' '$Port' '$VmHost' '$Domain'`n" + $ServerScript
+$RemoteScript = "set -- '$VmPath' '$Port' '$VmHost' '$Domain' '$Size'`n" + $ServerScript
 $RemoteScript = $RemoteScript -replace "`r`n", "`n" -replace "`r", ""
 $B64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($RemoteScript))
 # Decoded to a file and run from there (not piped into bash), so sudo and apt
@@ -331,10 +387,13 @@ try {
 } catch {
     Write-Host "  The server runs on the VM, but $Url doesn't answer from here." -ForegroundColor DarkYellow
     if ($Domain) {
-        Write-Host "  Check that $Domain points at $VmHost and that ports 80 and 443 are open in the VM's Azure network settings." -ForegroundColor DarkYellow
+        Write-Host "  Check that $Domain points at $VmHost and that TCP ports 80 and 443 are open in" -ForegroundColor DarkYellow
+        Write-Host "  $Portal." -ForegroundColor DarkYellow
     } else {
-        Write-Host "  Open port $Port (TCP, inbound) in the VM's Azure network settings." -ForegroundColor DarkYellow
+        Write-Host "  Open TCP port $Port (inbound) in" -ForegroundColor DarkYellow
+        Write-Host "  $Portal." -ForegroundColor DarkYellow
     }
+    Write-Host "  (The VM's own firewall was opened by the deploy; this one is in the cloud's settings.)" -ForegroundColor DarkYellow
 }
 
 Write-Host ""

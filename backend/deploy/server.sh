@@ -4,7 +4,10 @@
 # GitHub built, or built here from the uploaded source if there is none),
 # sets up Postgres and the env file, and (re)starts it as a systemd service.
 #
-#   bash server.sh <app_dir> <port> <public_host> [domain]
+#   bash server.sh <app_dir> <port> <public_host> [domain] [size]
+#
+# size: auto (default: from this machine's memory and disk), small, medium,
+# large or keep (don't touch the sizing settings).
 #
 # Reads /tmp/legion-deploy.tar.gz (source, plus backend/deploy-bin with the
 # ready-made servers when deploy.ps1 got them) and, if present,
@@ -19,6 +22,7 @@ APP="$1"
 PORT="$2"
 HOST="$3"
 DOMAIN="${4:-}"
+SIZE="${5:-auto}"
 SERVICE=legion-server
 ENV_FILE="$APP/server.env"
 SUDO=""
@@ -204,9 +208,65 @@ if [ -f /tmp/legion-deploy.env ]; then
   tr -d '\r' < /tmp/legion-deploy.env | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' > /tmp/legion-deploy.env.clean || true
   cut -d= -f1 /tmp/legion-deploy.env.clean | while read -r k; do sed -i "/^$k=/d" "$ENV_FILE"; done
   cat /tmp/legion-deploy.env.clean >> "$ENV_FILE"
+  # Remember which keys deploy.env set, so the sizing below leaves them be.
+  cut -d= -f1 /tmp/legion-deploy.env.clean > /tmp/legion-deploy.env.keys
   rm -f /tmp/legion-deploy.env /tmp/legion-deploy.env.clean
   say "Merged deploy.env into $ENV_FILE"
 fi
+
+# --- Sizing: how much this machine takes ---------------------------------
+# A 1 GB VM (Azure B1) must refuse 1024-neuron brains and keep little battle
+# log; a 24 GB Oracle Ampere box can take everything. Picked from this
+# machine on every deploy, so moving or resizing the VM follows by itself.
+# A value set in deploy.env always wins (and isn't touched here).
+AUTO_KEYS="$APP/auto-size.keys"   # keys this script set, so it may change them
+pinned() { [ -f /tmp/legion-deploy.env.keys ] && grep -qx "$1" /tmp/legion-deploy.env.keys; }
+size_set() {
+  # Only change a key this script set before, or one nobody set at all.
+  # A key deploy.env set is also marked: drop it from deploy.env later and
+  # the sizing takes it over again.
+  if pinned "$1"; then
+    grep -qx "$1" "$AUTO_KEYS" 2>/dev/null || echo "$1" >> "$AUTO_KEYS"
+    say "  $1 from deploy.env: $(grep "^$1=" "$ENV_FILE" | tail -n 1 | cut -d= -f2-) (this machine: $2)"; return
+  fi
+  if has "$1" && ! grep -qx "$1" "$AUTO_KEYS" 2>/dev/null; then
+    say "  $1 kept as set by hand in $ENV_FILE: $(grep "^$1=" "$ENV_FILE" | tail -n 1 | cut -d= -f2-) (delete that line to size it automatically)"; return
+  fi
+  set_value "$1" "$2"
+  grep -qx "$1" "$AUTO_KEYS" 2>/dev/null || echo "$1" >> "$AUTO_KEYS"
+  say "  $1=$2"
+}
+if [ "$SIZE" != keep ]; then
+  mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+  cpus=$(nproc)
+  disk_gb=$(df -BG --output=size "$APP" | tail -n 1 | tr -dc '0-9')
+  if [ "$SIZE" = auto ]; then
+    if [ "$mem_mb" -ge 12000 ] && [ "$cpus" -ge 3 ]; then SIZE=large
+    elif [ "$mem_mb" -ge 3500 ] && [ "$cpus" -ge 2 ]; then SIZE=medium
+    else SIZE=small; fi
+  fi
+  # gb_day: battle log a day at ~1,000 raids (100 daily players) if every
+  # army had the biggest brains allowed (measured 2026-11-25: 4, ~10 and
+  # ~33 MB a raid). Real armies mix sizes, so this is the worst case.
+  case "$SIZE" in
+    # 1-2 GB, 1-2 cores (README "How many players").
+    small)  brain=256;  pool=6;  gb_day=4 ;;
+    # 4-8 GB, 2+ cores: 512 brains are ~3-4 s and ~350 MB at 10 at once.
+    medium) brain=512;  pool=8;  gb_day=10 ;;
+    # 12+ GB, 3+ cores (Oracle Ampere A1 4 cores / 24 GB): everything.
+    large)  brain=1024; pool=12; gb_day=33 ;;
+    *) fail "Unknown size '$SIZE' (use auto, small, medium, large or keep)." ;;
+  esac
+  # Battle log days: half the disk for raids at the worst case, 3 to 14.
+  days=$(( ${disk_gb:-0} / 2 / gb_day ))
+  [ "$days" -ge 3 ] || days=3
+  [ "$days" -le 14 ] || days=14
+  say "Sizing for this machine (${mem_mb} MB memory, ${cpus} cores, ${disk_gb} GB disk): $SIZE"
+  size_set MAX_ONLINE_BRAIN "$brain"
+  size_set DB_POOL "$pool"
+  size_set KEEP_RAIDS_DAYS "$days"
+fi
+rm -f /tmp/legion-deploy.env.keys
 
 if ! has DATABASE_URL; then
   # First deploy: a database and a user with a random password, made here
@@ -262,6 +322,40 @@ $SUDO systemctl daemon-reload
 $SUDO systemctl enable $SERVICE >/dev/null 2>&1
 $SUDO systemctl restart $SERVICE
 say "Service $SERVICE restarted."
+
+# --- Firewall on the VM itself -------------------------------------------
+# Oracle Cloud's Ubuntu images ship iptables rules that reject every port
+# but 22, on top of the cloud's own security list (opened in the Oracle
+# console). Azure's images have no such rules. Open only what players need:
+# 80 and 443 with a domain (certbot needs 80 too), otherwise the server port.
+# Rules go before the final REJECT and are saved so they survive a reboot.
+if [ -n "$DOMAIN" ]; then open_ports="80 443"; else open_ports="$PORT"; fi
+opened=""
+for ipt in iptables ip6tables; do
+  command -v $ipt >/dev/null 2>&1 || continue
+  reject=$($SUDO $ipt -L INPUT --line-numbers -n 2>/dev/null | awk '$2=="REJECT" {print $1; exit}')
+  [ -n "$reject" ] || continue
+  for p in $open_ports; do
+    if ! $SUDO $ipt -C INPUT -p tcp -m state --state NEW --dport "$p" -j ACCEPT 2>/dev/null; then
+      $SUDO $ipt -I INPUT "$reject" -p tcp -m state --state NEW --dport "$p" -j ACCEPT
+      opened="$opened $ipt:$p"
+    fi
+  done
+done
+if [ -n "$opened" ]; then
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    $SUDO netfilter-persistent save >/dev/null 2>&1 || true
+  elif [ -d /etc/iptables ]; then
+    $SUDO sh -c 'iptables-save > /etc/iptables/rules.v4' || true
+    command -v ip6tables-save >/dev/null 2>&1 && $SUDO sh -c 'ip6tables-save > /etc/iptables/rules.v6' || true
+  fi
+  say "Opened in the VM's own firewall:$opened"
+fi
+# ufw (off on Azure and Oracle images, but some people turn it on).
+if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -q "Status: active"; then
+  for p in $open_ports; do $SUDO ufw allow "$p/tcp" >/dev/null; done
+  say "Allowed $open_ports in ufw"
+fi
 
 # --- HTTPS (only with a domain) -------------------------------------------
 if [ -n "$DOMAIN" ]; then

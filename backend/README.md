@@ -75,14 +75,15 @@ The server is one container plus a Postgres database. Any host that runs a Docke
 docker build -f backend/Dockerfile -t legion-of-minds-server .
 ```
 
-### Deploy to the Azure VM with deploy.ps1
+### Deploy to a VM with deploy.ps1 (Azure or Oracle Cloud)
 
 `deploy.ps1` works like the portfolio site's: from PowerShell on your laptop it packs the server source into a tarball, uploads it over `scp` (with the same keepalive options) and runs `deploy/server.sh` on the VM over `ssh`, sent as one base64 token with Windows line endings removed. That script does the rest:
 
 - **The server comes ready-made from GitHub.** The "Server build" workflow (`.github/workflows/server.yml`) cross-builds it for ARM (aarch64, what the VM is) and x86_64 on every push to `dev` or `main` that touches the server, checks that the ARM build starts and answers `/health`, and keeps it as the artifact `legion-server-linux` for 30 days. `deploy.ps1` downloads the build made from the same server code as your checkout with the GitHub CLI (`gh`), checks its checksums and uploads it, so the VM never compiles. If your branch is pushed but has no build yet, it asks GitHub for one and waits.
 - **Fallback: building on the VM.** Without `gh`, with uncommitted server changes, or with `-BuildOnVm`, the VM builds from the uploaded source as before: it installs build tools and Rust and adds a swap file on a small VM so the build fits in memory. The VM does the same if the ready-made server doesn't run there.
 - **First deploy only:** it installs Postgres and creates a database with a random password. The password stays in the VM's env file and never leaves the VM.
-- **Every deploy:** it puts the new server in place, merges `deploy.env` into `<VmPath>/server.env`, restarts the `legion-server` systemd service and checks `/health`.
+- **Every deploy:** it puts the new server in place, merges `deploy.env` into `<VmPath>/server.env`, sizes the server for the machine (below), opens the server's ports in the VM's own firewall if it has one (Oracle's Ubuntu images do), restarts the `legion-server` systemd service and checks `/health`.
+- **Sizing from the machine:** `-Size auto` (the default) reads the VM's memory, cores and disk and sets `MAX_ONLINE_BRAIN`, `DB_POOL` and `KEEP_RAIDS_DAYS`: small (under ~3.5 GB, like the 1 GB Azure VM) takes brains up to 256, medium (4-8 GB, 2+ cores) up to 512, large (12 GB+, 3+ cores, like Oracle's 4-core/24 GB Ampere) up to 1024. Battle log days come from the disk: half of it for the worst case (every raid with the biggest brains), 3 to 14 days. Force one with `-Size small|medium|large`, or `-Size keep` to leave them. A value in `deploy.env` always wins, and so does one you typed into `server.env` by hand.
 - **Before changing anything:** it backs up the Postgres database to `<VmPath>/db-backups/legion-<time>.dump` (newest 10 kept) and stops if the backup fails. The previous server binary is kept as `<VmPath>/bag-server.prev`.
 - **Leaves the portfolio alone:** it never touches pm2 or the portfolio's folder. It stops if the port is taken by another program, or if another nginx site already uses the domain. It checks nginx with `nginx -t` before reloading and removes its own site again if the check fails.
 
@@ -99,11 +100,57 @@ copy deploy.env.example deploy.env      # then fill in the OAuth keys
 
 To roll back to the previous server on the VM: `cp ~/legion-server/bag-server.prev ~/legion-server/bag-server && sudo systemctl restart legion-server` (and restore the database backup if the new server changed it).
 
-The defaults are the portfolio's VM (`azureuser@40.81.20.114`, key `~\.ssh\id_ed25519`). Override them with `-VmHost`, `-VmUser`, `-SshKey`, `-VmPath` or `-Port`.
+The defaults are the portfolio's VM (`azureuser@40.81.20.114`, key `~\.ssh\id_ed25519`). With `-Cloud oracle` they are user `ubuntu`, key `~\.ssh\oracle.key`, folder `/home/ubuntu/legion-server`, and `-VmHost` is required (see "Moving to Oracle Cloud" below). Override any of them with `-VmHost`, `-VmUser`, `-SshKey`, `-VmPath` or `-Port`.
 
 **Google sign-in needs `-Domain`.** Google only accepts https redirect addresses with a domain name, not a bare IP. Point the domain's DNS at the VM first. If nginx is already on the VM (for example for the portfolio), the script adds a site and gets a certificate with certbot. Otherwise it installs Caddy.
 
-You also need to open the server's ports in the Azure portal (the VM's Networking settings): TCP 8080 inbound without a domain, or 80 and 443 with one.
+You also need to open the server's ports in the cloud's own settings: TCP 8080 inbound without a domain, or 80 and 443 with one. On Azure that's the VM's Networking settings; on Oracle, the VCN's security list (step 4 below).
+
+### Moving to Oracle Cloud (Always Free)
+
+Oracle's Always Free tier includes an Ampere A1 machine of up to 4 ARM cores and 24 GB of memory, with up to 200 GB of disk, for no charge. That's about 4 times the cores and 24 times the memory of the 1 GB Azure VM, enough for 1024-neuron brains online. The server is the same ARM (aarch64) build GitHub already makes, so nothing changes in the code.
+
+1. **Sign up** at cloud.oracle.com ("Start for free"). Oracle asks for a credit or debit card to check who you are. It places a small hold that is released and doesn't charge for Always Free resources, but there's no way to sign up without a card. Some Indian debit cards are refused; a Visa or Mastercard with online and international payments turned on usually works. Pick the **home region** carefully, because it can't be changed later and Always Free machines only run there: India South (Hyderabad) or India West (Mumbai) are closest to players in India.
+2. **Create the machine:** Compute > Instances > Create instance.
+   - Image: **Canonical Ubuntu 24.04** (Change image > Ubuntu).
+   - Shape: Change shape > Ampere > **VM.Standard.A1.Flex**, 4 OCPUs, 24 GB memory (shown as "Always Free-eligible").
+   - Networking: keep "Create new virtual cloud network" and "Create new public subnet", and **Assign a public IPv4 address**.
+   - SSH keys: **Generate a key pair for me** and click **Save private key**. Move the downloaded `ssh-key-<date>.key` to `C:\Users\<you>\.ssh\oracle.key` (or pass `-SshKey` with its path). deploy.ps1 limits the file to your account, which Windows' ssh needs.
+   - Boot volume: tick "Specify a custom boot volume size" and set **150 GB** (the free 200 GB is shared by all your disks). The battle log needs the room: a raid with 1024 brains keeps ~33 MB.
+   - Create. If it says **"Out of capacity"**, try another availability domain in the same form, or try again in a few hours; free Ampere machines are popular.
+3. Note the **Public IP address** on the instance page.
+4. **Open the ports in Oracle's network:** on the instance page click the subnet, then Security Lists > Default Security List > Add Ingress Rules. Source CIDR `0.0.0.0/0`, IP protocol TCP, destination port `8080` (no domain) or `80,443` (with a domain). The Ubuntu image also has its own firewall that blocks everything but ssh; deploy.ps1 opens the same ports there and saves the rules, so you don't need to touch it.
+5. **Check ssh once** (and answer "yes" to the new host key): `ssh -i $HOME\.ssh\oracle.key ubuntu@<ip>`, then `exit`.
+6. **Deploy** with the same `deploy.env` as Azure. If you uncommented `MAX_ONLINE_BRAIN`, `DB_POOL` or `KEEP_RAIDS_DAYS` in it, comment them out again so the bigger machine gets bigger values.
+
+   ```
+   cd backend
+   git checkout dev; git pull
+   .\deploy.ps1 -Cloud oracle -VmHost <ip>                          # http://<ip>:8080
+   .\deploy.ps1 -Cloud oracle -VmHost <ip> -Domain game.example.com # https
+   ```
+
+   The deploy prints the sizing it chose, for example `large`, `MAX_ONLINE_BRAIN=1024`.
+7. **Point players at it:** with a domain, change its DNS A record to the Oracle IP before deploying with `-Domain` (certbot needs it). If the address players use changes, set the GitHub repo variable `BAG_SERVER` to the new one and update the Google and Discord redirect URLs (`<url>/v1/auth/google/callback`, `<url>/v1/auth/discord/callback`). Keeping the same domain means neither changes.
+8. **Bring the players' data over** (optional; skip it before launch). Stop the Azure server first so no raids are lost in between, make a last backup there, and load it into Oracle after the first Oracle deploy. From PowerShell:
+
+   ```
+   ssh -i $HOME\.ssh\id_ed25519 azureuser@40.81.20.114 "sudo systemctl stop legion-server && sudo -u postgres pg_dump -Fc legion > legion-final.dump"
+   scp -i $HOME\.ssh\id_ed25519 azureuser@40.81.20.114:legion-final.dump .
+   scp -i $HOME\.ssh\oracle.key legion-final.dump ubuntu@<ip>:/tmp/legion.dump
+   ssh -i $HOME\.ssh\oracle.key ubuntu@<ip>
+   sudo systemctl stop legion-server
+   sudo chown postgres /tmp/legion.dump
+   sudo -u postgres pg_restore --clean --if-exists --no-owner --role=legion -d legion /tmp/legion.dump
+   sudo systemctl start legion-server
+   ```
+
+   If something goes wrong, `sudo systemctl start legion-server` on Azure brings the old server back as it was.
+
+Good to know:
+- **Idle machines can be taken back.** Oracle says it may stop an Always Free machine that stays nearly idle (under ~20% CPU, network and memory) for 7 days. A quiet game server can look idle. Upgrading the account to "Pay As You Go" stops that and still costs nothing while you stay inside the free limits; set a budget alert at a small amount to be safe.
+- **Keep Azure until Oracle works.** Plain `.\deploy.ps1` still deploys to the Azure VM as before. Once players connect to Oracle, the Azure server can be stopped (`sudo systemctl disable --now legion-server`); the portfolio there is untouched.
+- **How much it takes** (estimated from the 2-core measurements below, ARM up to ~30% slower, 3 battle threads on 4 cores): ~90 raids a minute with 256 brains, ~40 with 512, ~14 with 1024. 100 players online at once raid ~33 times a minute, so that fits unless most armies are 1024 brains; extra raids wait in the queue.
 
 Set these environment variables on the host (as secrets where the host has them). Never put real values in files or chat.
 
@@ -227,7 +274,7 @@ Postgres used another 250-370 MB. Everything else (log, leaderboard, cup, season
 - **100 players online at once** (a raid every ~3 minutes each, ~33 a minute) fit on 2 cores up to 256 brains. 1024 brains do not (7 a minute), so a small server sets `MAX_ONLINE_BRAIN=256`. Burstable VMs (Azure B-series) only give full CPU while their credits last.
 - Battles are queued (`BATTLE_THREADS`), and only a few raids, bases and cup entries are read in at once (`HEAVY_AT_ONCE`), so a burst makes raids wait instead of slowing every screen or running out of memory. The game waits up to 2 minutes for an answer.
 
-Settings for a 1 GB VM (in `deploy.env.example`): `MAX_ONLINE_BRAIN=256`, `KEEP_RAIDS_DAYS=3`, `DB_POOL=6`; the systemd unit sets `MALLOC_ARENA_MAX=2`.
+Settings for a 1 GB VM: `MAX_ONLINE_BRAIN=256`, `KEEP_RAIDS_DAYS=3`, `DB_POOL=6`; the systemd unit sets `MALLOC_ARENA_MAX=2`. deploy.ps1 picks these by itself on a small VM, and 1024 / 12 on a big one like Oracle's Ampere (`-Size`, see the deploy section).
 
 ```sh
 # Server: DEV_LOGIN=true REQUESTS_PER_MINUTE=1000000 RAIDS_PER_MINUTE=1000000 (all players share one address)
