@@ -6,3 +6,6 @@ videos/
 # deploy.ps1
 deploy.env
 deploy.tar.gz
+
+# deploy.ps1 puts the server GitHub built here before uploading it
+deploy-bin/

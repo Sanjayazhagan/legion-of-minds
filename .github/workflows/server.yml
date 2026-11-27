@@ -1,0 +1,100 @@
+# Builds the online server for Linux, so the VM never has to compile it
+# (a Rust build runs out of memory on a small VM).
+#
+# Cross-builds on an ordinary x86 runner with cargo-zigbuild, for ARM
+# (aarch64, what the Azure VM is) and x86_64, against glibc 2.28 so the
+# binaries run on any Linux from 2018 on (Ubuntu 20.04+, Debian 10+).
+# The ARM binary is then started under qemu against a real Postgres and has
+# to answer /health, so a broken build never reaches the VM.
+#
+# The result is the workflow artifact "legion-server-linux" (kept 30 days).
+# backend/deploy.ps1 downloads it with the GitHub CLI (gh) and uploads it.
+name: Server build
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "backend/**"
+      - "game/crates/godcore/**"
+      - "game/Cargo.toml"
+      - "game/Cargo.lock"
+      - ".github/workflows/server.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "game/crates/godcore/**"
+      - ".github/workflows/server.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Oldest glibc the binaries need.
+  GLIBC: "2.28"
+
+jobs:
+  linux:
+    name: Linux server (aarch64 + x86_64)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: bag
+          POSTGRES_PASSWORD: bag
+          POSTGRES_DB: bag
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu,x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+          key: zigbuild
+      - name: Zig and cargo-zigbuild
+        run: pip install --user ziglang==0.13.0 cargo-zigbuild==0.24.1
+      - name: Build
+        working-directory: backend
+        run: |
+          for t in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            cargo zigbuild --release --locked -p bag-server --target "$t.$GLIBC"
+          done
+      - name: Package
+        run: |
+          mkdir -p out
+          cp backend/target/aarch64-unknown-linux-gnu/release/bag-server out/bag-server-aarch64
+          cp backend/target/x86_64-unknown-linux-gnu/release/bag-server out/bag-server-x86_64
+          chmod 755 out/bag-server-*
+          echo "$GITHUB_SHA" > out/COMMIT
+          (cd out && sha256sum bag-server-* > SHA256SUMS)
+          file out/bag-server-*
+          cat out/SHA256SUMS
+      - name: Check the ARM server starts and answers
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user libc6-arm64-cross >/dev/null
+          # Fails to load (missing glibc, wrong arch) -> exits before this.
+          DATABASE_URL=postgres://bag:bag@127.0.0.1/bag BIND_ADDR=127.0.0.1:8099 PUBLIC_URL=http://127.0.0.1:8099 \
+            qemu-aarch64 -L /usr/aarch64-linux-gnu out/bag-server-aarch64 > server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8099/health; then echo; echo "ARM server answers."; kill %1; exit 0; fi
+            sleep 1
+          done
+          echo "The ARM server did not answer:"; cat server.log; exit 1
+      - name: Check the x86_64 server starts
+        run: |
+          out=$(env -i out/bag-server-x86_64 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "DATABASE_URL"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: legion-server-linux
+          path: out/
+          retention-days: 30
+      - name: Summary
+        run: |
+          echo "### Server built for ${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Deploy it with \`.\\deploy.ps1\` in backend/ (downloads artifact legion-server-linux)." >> "$GITHUB_STEP_SUMMARY"

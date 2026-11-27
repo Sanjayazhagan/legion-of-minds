@@ -170,6 +170,7 @@ pub async fn publish_base(
     SameRulesJson(snap): SameRulesJson<BaseSnapshot>,
 ) -> ApiResult<Json<Published>> {
     let snap = canonical_snapshot(&snap)?;
+    crate::check_brains(snap.defenders.iter().map(|p| &p.troop))?;
     let paid = load_user(&st.db, user.id).await?.upgrades;
     if snap.base.town_hall > paid.town_hall {
         return Err(Invalid(format!(

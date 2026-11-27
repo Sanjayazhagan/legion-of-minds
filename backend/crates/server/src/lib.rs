@@ -62,9 +62,64 @@ impl AppState {
     }
 }
 
+/// How many battles the server re-runs at once (raid and war checks, cup
+/// scores). Each takes a whole CPU core for up to several seconds, so
+/// without a limit a burst of raids takes every core and every other
+/// request waits; and each holds its brains in memory. The rest queue here.
+/// BATTLE_THREADS sets it; by default all cores but one, at least one.
+pub fn battle_slots() -> usize {
+    std::env::var("BATTLE_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1)))
+        .max(1)
+}
+
+/// Run a battle (CPU-heavy, blocking) on its own thread, waiting for a free
+/// battle slot first (see [`battle_slots`]).
+pub async fn run_battle<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> error::ApiResult<T> {
+    static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let slots = SLOTS.get_or_init(|| tokio::sync::Semaphore::new(battle_slots()));
+    let _slot = slots.acquire().await.map_err(error::ApiError::internal)?;
+    tokio::task::spawn_blocking(f).await.map_err(error::ApiError::internal)
+}
+
+/// The biggest brain this server takes online. MAX_ONLINE_BRAIN lowers it
+/// below the game's own limit (1024): a small server (1 GB of memory, one or
+/// two cores) should take 256, because one raid with 1024 brains needs about
+/// 10 s of CPU and a few hundred MB of memory to check.
+pub fn max_online_brain() -> usize {
+    std::env::var("MAX_ONLINE_BRAIN")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(godcore::ppo::ONLINE_BRAIN_MAX)
+        .min(godcore::ppo::ONLINE_BRAIN_MAX)
+}
+
+/// Refuse troops with brains bigger than [`max_online_brain`].
+pub fn check_brains<'a>(troops: impl IntoIterator<Item = &'a godcore::troop::Troop>) -> error::ApiResult<()> {
+    let max = max_online_brain();
+    for t in troops {
+        let h = t.actor.dims.get(1).copied().unwrap_or(0);
+        if h > max {
+            return Err(bag_protocol::Invalid(format!(
+                "this server takes brains up to {max} neurons online ({} has {h}); use a smaller-brained troop",
+                t.name.trim()
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
 pub async fn connect(url: &str) -> Result<PgPool, sqlx::Error> {
+    // Each connection keeps buffers as big as the biggest row it has moved
+    // (a base or an army: megabytes with big brains), so the pool size is
+    // also a memory limit. DB_POOL sets it (default 8, plenty for hundreds of
+    // players: queries take milliseconds).
+    let size = std::env::var("DB_POOL").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(8u32).max(2);
     let db = PgPoolOptions::new()
-        .max_connections(20)
+        .max_connections(size)
         .acquire_timeout(Duration::from_secs(10))
         .connect(url)
         .await?;
