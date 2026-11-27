@@ -471,9 +471,7 @@ pub async fn submit(
     let army = raid_army(&st.db, &me, &req).await?;
     let snapshot: BaseSnapshot = serde_json::from_str(&data).map_err(ApiError::internal)?;
     crate::attacks::check_bracket(&army, &snapshot)?;
-    let (result, army) = tokio::task::spawn_blocking(move || (run_raid(&snapshot, &army), army))
-        .await
-        .map_err(ApiError::internal)?;
+    let (result, army) = crate::run_battle(move || (run_raid(&snapshot, &army), army)).await?;
     let client_matched = req
         .client_result
         .as_ref()

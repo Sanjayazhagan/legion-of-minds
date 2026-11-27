@@ -248,6 +248,9 @@ Wants=network-online.target
 User=$(id -un)
 WorkingDirectory=$APP
 EnvironmentFile=$ENV_FILE
+# Fewer malloc arenas: battle threads otherwise each keep their own, and
+# memory stays high long after a burst of raids (matters on a 1 GB VM).
+Environment=MALLOC_ARENA_MAX=2
 ExecStart=$APP/bag-server
 Restart=always
 RestartSec=3

@@ -115,10 +115,13 @@ Set these environment variables on the host (as secrets where the host has them)
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | for Google sign-in | From Google Cloud Console → APIs & Services → Credentials → OAuth client ID (type "Web application"). Authorized redirect URI: `<PUBLIC_URL>/v1/auth/google/callback`. |
 | `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET` | for Discord sign-in | From the Discord Developer Portal → your app → OAuth2. Redirect: `<PUBLIC_URL>/v1/auth/discord/callback`. |
 | `PORT` | — | Most hosts set it for you. Defaults to 8080. `BIND_ADDR` overrides both. |
-| `SESSION_DAYS`, `ATTACK_WINDOW_SECS`, `SHIELD_MINUTES`, `START_GOLD`, `MATCH_TROPHY_RANGE`, `KEEP_RAIDS_DAYS` | — | Tuning; defaults 30, 300, 60, 500, 200, 14. Raids older than `KEEP_RAIDS_DAYS` leave the battle log (each keeps the whole army for its replay, about 1 MB). |
+| `SESSION_DAYS`, `ATTACK_WINDOW_SECS`, `SHIELD_MINUTES`, `START_GOLD`, `MATCH_TROPHY_RANGE`, `KEEP_RAIDS_DAYS` | — | Tuning; defaults 30, 300, 60, 500, 200, 14. Raids older than `KEEP_RAIDS_DAYS` leave the battle log (each keeps the whole army for its replay: about 0.4 MB with 64-neuron brains, 4 MB with 256, 30 MB with 1024). |
 | `DEFENCE_REWARD`, `DEFENCE_REWARDS_PER_DAY`, `DAILY_WIN_BONUS`, `PRACTICE_GOLD`, `PRACTICE_PAID_PER_DAY` | — | Gold the server hands out; defaults 30, 5, 100, 20, 5. A defender who holds a raid to no stars gets `DEFENCE_REWARD` (at most `DEFENCE_REWARDS_PER_DAY` times in 24 hours); the first raid of the UTC day that wins a star pays `DAILY_WIN_BONUS`; a practice raid pays `PRACTICE_GOLD` x Town Hall x destruction, for the first `PRACTICE_PAID_PER_DAY` in 24 hours. 0 turns one off. |
 | `REQUESTS_PER_MINUTE`, `RAIDS_PER_MINUTE` | — | Per-address limits; defaults 240 for everything and 20 for raids, publishing and sign-ins. Over the limit the server answers 429 `slow_down` with `Retry-After`. |
 | `TRUST_PROXY` | — | `true` behind our own HTTPS proxy (deploy.ps1 sets it with `-Domain`): the client address comes from the last `X-Forwarded-For` entry. Leave off when the server is reached directly, or clients could fake their address. |
+| `MAX_ONLINE_BRAIN` | — | Biggest brain (neurons per layer) taken online, default 1024. Set 256 on a small server (see "How many players"). |
+| `DB_POOL` | — | Database connections, default 8. Each keeps buffers as big as the biggest base or army it has moved, so fewer use less memory: 6 on a 1 GB server. |
+| `BATTLE_THREADS`, `HEAVY_AT_ONCE` | — | Battles re-run at once (default: all cores but one, at least 1) and raids, bases and cup entries worked on at once (default one more). The rest wait their turn, so a burst of raids can't take every core or run the server out of memory. |
 | `RUST_LOG` | — | Log level, default `info,sqlx=warn`. |
 
 Health check: `GET /health`. Serve it behind https (the host's TLS); tokens are bearer tokens.
@@ -206,6 +209,31 @@ cargo run --release -p legion-of-minds
 Type a name under "Test login" and sign in. To have someone to raid, sign in a second name with bagctl and publish a base (see above), or run a second copy of the game with its own save folder (`BAG_SAVE_DIR=/tmp/player2`).
 
 Recordings and screenshot tests (`BAG_SCREEN`, `BAG_RECORD`, `BAG_SCREENSHOT`) skip the sign-in screen; `BAG_SCREEN=signin` opens it directly.
+
+## How many players
+
+Measured 2026-11-25 with `examples/loadtest.rs` against Postgres 16, the server pinned to 2 cores of a cloud x86 machine (an ARM VM core is in the same range; expect up to ~30% slower). Brains were untrained, so every raid ran the full 3 minutes: the worst case. Each raid is 5 attackers against 4 defenders.
+
+| Brain size | One raid check (CPU) | Raids a minute, 2 cores | Stored per raid | Server memory, 10 raids at once |
+|---|---|---|---|---|
+| 64 | 0.2 s | ~400 | 0.3 MB | 70 MB |
+| 256 | 1-2 s | ~50 (~40 on 1 core) | 4 MB | 250 MB (650 MB before the limits below) |
+| 512 | ~3-4 s | ~24 | ~10 MB | 350 MB |
+| 1024 | ~10 s | ~7 | ~33 MB | over 1 GB |
+
+Postgres used another 250-370 MB. Everything else (log, leaderboard, cup, season, events) answered in milliseconds while raids ran, once battles were queued.
+
+- **100 players a day** (~1,000 raids a day) fit easily on any small VM. Disk is the limit: with 256 brains, 14 days of battle log is ~50 GB, so keep `KEEP_RAIDS_DAYS=3` on a small disk.
+- **100 players online at once** (a raid every ~3 minutes each, ~33 a minute) fit on 2 cores up to 256 brains. 1024 brains do not (7 a minute), so a small server sets `MAX_ONLINE_BRAIN=256`. Burstable VMs (Azure B-series) only give full CPU while their credits last.
+- Battles are queued (`BATTLE_THREADS`), and only a few raids, bases and cup entries are read in at once (`HEAVY_AT_ONCE`), so a burst makes raids wait instead of slowing every screen or running out of memory. The game waits up to 2 minutes for an answer.
+
+Settings for a 1 GB VM (in `deploy.env.example`): `MAX_ONLINE_BRAIN=256`, `KEEP_RAIDS_DAYS=3`, `DB_POOL=6`; the systemd unit sets `MALLOC_ARENA_MAX=2`.
+
+```sh
+# Server: DEV_LOGIN=true REQUESTS_PER_MINUTE=1000000 RAIDS_PER_MINUTE=1000000 (all players share one address)
+cargo run --release -p bag-server --example raidbench -- 256 5 4          # one raid: brain size, attackers, defenders
+cargo run --release -p bag-server --example loadtest -- http://127.0.0.1:8080 postgres://bag:bag@localhost/bag 256 100 10 60 90 cup
+```
 
 ## Pretend players (bagsim)
 

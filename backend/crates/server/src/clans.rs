@@ -504,6 +504,7 @@ pub async fn lend(
     let mut checked = Vec::new();
     for t in &req.troops {
         let t = canonical_troop(t, Role::Attack, cap)?;
+        crate::check_brains([&t])?;
         if let Some(why) = me.upgrades.blocker(&t) {
             return Err(bag_protocol::Invalid(why).into());
         }
@@ -543,6 +544,7 @@ pub async fn my_loans(State(st): State<AppState>, user: AuthUser) -> ApiResult<J
 /// then any borrowed from clanmates.
 pub async fn raid_army(db: &PgPool, me: &User, req: &AttackSubmit) -> ApiResult<Vec<Placement>> {
     let own = canonical_army(&req.army, me.upgrades.town_hall)?;
+    crate::check_brains(own.iter().map(|p| &p.troop))?;
     me.upgrades.check(&own)?;
     if req.borrowed.is_empty() {
         return Ok(own);
